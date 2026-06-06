@@ -4,15 +4,30 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, MutexGuard,
+    },
     thread,
+    thread::JoinHandle,
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager, State};
 
+#[cfg(target_os = "windows")]
+use windows::Win32::{
+    Foundation::POINT,
+    UI::{
+        Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON},
+        WindowsAndMessaging::GetCursorPos,
+    },
+};
+
+const CLICKS_FILE_NAME: &str = "clicks.json";
 const OUTPUT_FILE_NAME: &str = "screen.mp4";
 const OUTPUT_ROOT_DIR_NAME: &str = "FocusFlow";
 const OUTPUT_RECORDINGS_DIR_NAME: &str = "Recordings";
+const CLICK_POLL_INTERVAL: Duration = Duration::from_millis(8);
 const TARGET_FPS: u32 = 30;
 const STOP_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_CAPTURED_LOG_BYTES: usize = 96 * 1024;
@@ -117,6 +132,7 @@ struct RecorderRuntime {
 struct ActiveRecording {
     pid: u32,
     child: Child,
+    click_tracker: ClickTracker,
     output_path: PathBuf,
     started_at: Instant,
     monitor: MonitorInfo,
@@ -155,6 +171,93 @@ impl ProcessLog {
 struct ProcessExit {
     code: Option<i32>,
     event_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ClickEvent {
+    timestamp: f64,
+    x: i32,
+    y: i32,
+    button: ClickButton,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ClickButton {
+    Left,
+    Right,
+}
+
+struct ClickTracker {
+    stop_requested: Arc<AtomicBool>,
+    clicks: Arc<Mutex<Vec<ClickEvent>>>,
+    join_handle: Option<JoinHandle<()>>,
+}
+
+impl ClickTracker {
+    fn start(started_at: Instant) -> ClickTracker {
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let clicks = Arc::new(Mutex::new(Vec::new()));
+        let worker_stop_requested = Arc::clone(&stop_requested);
+        let worker_clicks = Arc::clone(&clicks);
+
+        let join_handle = thread::spawn(move || {
+            let mut left_was_down = left_mouse_button_down();
+            let mut right_was_down = right_mouse_button_down();
+
+            while !worker_stop_requested.load(Ordering::Relaxed) {
+                let left_is_down = left_mouse_button_down();
+                let right_is_down = right_mouse_button_down();
+
+                if left_is_down && !left_was_down {
+                    push_click(&worker_clicks, started_at, ClickButton::Left);
+                }
+
+                if right_is_down && !right_was_down {
+                    push_click(&worker_clicks, started_at, ClickButton::Right);
+                }
+
+                left_was_down = left_is_down;
+                right_was_down = right_is_down;
+                thread::sleep(CLICK_POLL_INTERVAL);
+            }
+        });
+
+        ClickTracker {
+            stop_requested,
+            clicks,
+            join_handle: Some(join_handle),
+        }
+    }
+
+    fn request_stop(&self) {
+        self.stop_requested.store(true, Ordering::Relaxed);
+    }
+
+    fn finish(mut self) -> RecorderResult<Vec<ClickEvent>> {
+        self.request_stop();
+
+        if let Some(join_handle) = self.join_handle.take() {
+            join_handle.join().map_err(|_| {
+                RecorderError::new(
+                    "click_tracker_failed",
+                    "Click tracker thread panicked",
+                    true,
+                )
+            })?;
+        }
+
+        self.clicks
+            .lock()
+            .map(|clicks| clicks.clone())
+            .map_err(|_| {
+                RecorderError::new(
+                    "click_tracker_state_poisoned",
+                    "Click tracker state lock was poisoned by a previous panic",
+                    true,
+                )
+            })
+    }
 }
 
 #[tauri::command]
@@ -247,11 +350,15 @@ async fn start_primary_monitor_recording(
         spawn_output_reader(stderr, Arc::clone(&log), ProcessStream::Stderr);
     }
 
+    let started_at = Instant::now();
+    let click_tracker = ClickTracker::start(started_at);
+
     let active = ActiveRecording {
         pid,
         child,
+        click_tracker,
         output_path: output_path.clone(),
-        started_at: Instant::now(),
+        started_at,
         monitor: monitor.clone(),
         log,
     };
@@ -296,12 +403,15 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
 
     let ActiveRecording {
         mut child,
+        click_tracker,
         output_path,
         started_at,
         monitor,
         log,
         ..
     } = active;
+
+    click_tracker.request_stop();
 
     let stop_signal_error = child
         .stdin
@@ -315,6 +425,7 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
         })
         .err();
     let exit = wait_for_ffmpeg_exit(child).await;
+    let clicks = click_tracker.finish();
 
     match exit {
         Ok(process_exit) => {
@@ -332,6 +443,14 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
             return Err(stop_timeout_error(wait_error, None, &read_log_text(&log)));
         }
     }
+
+    let clicks = match clicks {
+        Ok(clicks) => clicks,
+        Err(error) => {
+            state.clear_finalizing()?;
+            return Err(error);
+        }
+    };
 
     let metadata = match fs::metadata(&output_path) {
         Ok(metadata) => metadata,
@@ -352,6 +471,11 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
             "FFmpeg exited successfully, but screen.mp4 is empty",
             true,
         ));
+    }
+
+    if let Err(error) = write_clicks_json(&output_path, &clicks) {
+        state.clear_finalizing()?;
+        return Err(error);
     }
 
     let completed = CompletedRecording {
@@ -518,6 +642,86 @@ where
     });
 }
 
+fn push_click(clicks: &Arc<Mutex<Vec<ClickEvent>>>, started_at: Instant, button: ClickButton) {
+    let Some((x, y)) = cursor_position() else {
+        return;
+    };
+
+    if let Ok(mut clicks) = clicks.lock() {
+        clicks.push(ClickEvent {
+            timestamp: elapsed_seconds(started_at),
+            x,
+            y,
+            button,
+        });
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn left_mouse_button_down() -> bool {
+    unsafe { GetAsyncKeyState(i32::from(VK_LBUTTON.0)) < 0 }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn left_mouse_button_down() -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn right_mouse_button_down() -> bool {
+    unsafe { GetAsyncKeyState(i32::from(VK_RBUTTON.0)) < 0 }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn right_mouse_button_down() -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn cursor_position() -> Option<(i32, i32)> {
+    let mut point = POINT { x: 0, y: 0 };
+    unsafe {
+        GetCursorPos(&mut point).ok()?;
+    }
+    Some((point.x, point.y))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn cursor_position() -> Option<(i32, i32)> {
+    None
+}
+
+fn write_clicks_json(output_path: &Path, clicks: &[ClickEvent]) -> RecorderResult<()> {
+    let clicks_path = clicks_output_path(output_path)?;
+    let json = serde_json::to_vec_pretty(clicks).map_err(|error| {
+        RecorderError::new(
+            "serialize_clicks_failed",
+            format!("Could not serialize click events: {error}"),
+            true,
+        )
+    })?;
+
+    fs::write(&clicks_path, json).map_err(|error| {
+        RecorderError::new(
+            "write_clicks_failed",
+            format!("Could not write clicks.json: {error}"),
+            true,
+        )
+    })
+}
+
+fn clicks_output_path(output_path: &Path) -> RecorderResult<PathBuf> {
+    let output_dir = output_path.parent().ok_or_else(|| {
+        RecorderError::new(
+            "invalid_clicks_output_path",
+            "Could not resolve a parent directory for clicks.json",
+            true,
+        )
+    })?;
+
+    Ok(output_dir.join(CLICKS_FILE_NAME))
+}
+
 fn ffmpeg_primary_monitor_args(
     monitor: &MonitorInfo,
     output_path: &Path,
@@ -677,6 +881,10 @@ fn push_bounded(target: &mut Vec<u8>, bytes: Vec<u8>) {
 
 fn elapsed_ms(started_at: Instant) -> u64 {
     started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn elapsed_seconds(started_at: Instant) -> f64 {
+    started_at.elapsed().as_millis() as f64 / 1000.0
 }
 
 fn path_to_string(path: &Path) -> RecorderResult<String> {
