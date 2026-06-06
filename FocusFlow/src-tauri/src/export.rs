@@ -2,10 +2,11 @@ use serde::{Deserialize, Serialize};
 use std::{
     fmt, fs,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, Output, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
+use tauri_plugin_shell::ShellExt;
 
 const CLICKS_FILE_NAME: &str = "clicks.json";
 const CLICK_INDICATOR_ALPHA: f64 = 0.9;
@@ -14,10 +15,9 @@ const CLICK_INDICATOR_FONT_FILE: &str = "C\\:/Windows/Fonts/segoeui.ttf";
 const CLICK_INDICATOR_FONT_SIZE: u32 = 56;
 const CLICK_INDICATOR_GLYPH: &str = "\u{25CB}";
 const EDITED_FILE_NAME: &str = "edited.mp4";
+const FFMPEG_SIDECAR_NAME: &str = "ffmpeg";
 const FILTER_SCRIPT_FILE_NAME: &str = "edited.filter_complex.txt";
 const OUTPUT_FILE_NAME: &str = "screen.mp4";
-const OUTPUT_RECORDINGS_DIR_NAME: &str = "Recordings";
-const OUTPUT_ROOT_DIR_NAME: &str = "FocusFlow";
 const TARGET_FPS: u32 = 60;
 const TIMELINE_FILE_NAME: &str = "timeline.json";
 const ZOOM_IN_MS: u64 = 180;
@@ -191,24 +191,6 @@ struct CameraInterval {
     to: CameraKeyframe,
 }
 
-#[derive(Debug, Deserialize)]
-struct FfprobeOutput {
-    streams: Vec<FfprobeStream>,
-    format: Option<FfprobeFormat>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FfprobeStream {
-    width: Option<u32>,
-    height: Option<u32>,
-    duration: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FfprobeFormat {
-    duration: Option<String>,
-}
-
 #[tauri::command]
 pub async fn export_edited_mp4(
     app: AppHandle,
@@ -217,7 +199,7 @@ pub async fn export_edited_mp4(
     let paths = ExportPaths::resolve(&app)?;
     let config = ExportConfig::from_settings(settings);
 
-    tauri::async_runtime::spawn_blocking(move || export_edited_mp4_blocking(paths, config))
+    tauri::async_runtime::spawn_blocking(move || export_edited_mp4_blocking(app, paths, config))
         .await
         .map_err(|error| {
             ExportError::new(
@@ -229,6 +211,7 @@ pub async fn export_edited_mp4(
 }
 
 fn export_edited_mp4_blocking(
+    app: AppHandle,
     paths: ExportPaths,
     config: ExportConfig,
 ) -> ExportCommandResult<ExportStatus> {
@@ -239,18 +222,18 @@ fn export_edited_mp4_blocking(
 
     let timeline = read_timeline(&paths.timeline_path)?;
     let clicks = read_clicks(&paths.clicks_path)?;
-    let video_info = probe_video_info(&paths.input_path)?;
+    let video_info = probe_video_info(&app, &paths.input_path)?;
 
     if paths.temp_output_path.exists() {
         remove_file(&paths.temp_output_path)?;
     }
 
     if timeline.is_empty() && clicks.is_empty() {
-        run_ffmpeg_copy(&paths)?;
+        run_ffmpeg_copy(&app, &paths)?;
     } else {
         let filter = build_export_filter(&timeline, &clicks, video_info, config);
         write_filter_script(&paths.filter_script_path, &filter)?;
-        let export_result = run_ffmpeg_zoom_export(&paths);
+        let export_result = run_ffmpeg_zoom_export(&app, &paths);
         if let Err(error) = remove_filter_script(&paths) {
             eprintln!("{error}");
         }
@@ -279,49 +262,32 @@ struct ExportPaths {
 
 impl ExportPaths {
     fn resolve(app: &AppHandle) -> ExportCommandResult<ExportPaths> {
-        let dir = app
-            .path()
-            .document_dir()
-            .map_err(|error| {
-                ExportError::new(
-                    "documents_dir_unavailable",
-                    format!("Could not resolve Documents directory: {error}"),
-                    true,
-                )
-            })?
-            .join(OUTPUT_ROOT_DIR_NAME)
-            .join(OUTPUT_RECORDINGS_DIR_NAME);
-
-        fs::create_dir_all(&dir).map_err(|error| {
+        let recordings_dir = crate::recorder::recordings_root_dir(app).map_err(|error| {
             ExportError::new(
-                "create_output_dir_failed",
-                format!("Could not create recording output directory: {error}"),
-                true,
+                error.code,
+                format!("Could not resolve recording storage directory: {}", error.message),
+                error.recoverable,
             )
         })?;
+        let session_dir = latest_session_dir(&recordings_dir)?;
 
-        let session_dir = latest_session_dir(&dir)?;
+        Ok(ExportPaths::from_session_dir(session_dir))
+    }
 
-        Ok(ExportPaths {
+    fn from_session_dir(session_dir: PathBuf) -> ExportPaths {
+        ExportPaths {
             input_path: session_dir.join(OUTPUT_FILE_NAME),
             timeline_path: session_dir.join(TIMELINE_FILE_NAME),
             clicks_path: session_dir.join(CLICKS_FILE_NAME),
             output_path: session_dir.join(EDITED_FILE_NAME),
             temp_output_path: session_dir.join("edited.tmp.mp4"),
             filter_script_path: session_dir.join(FILTER_SCRIPT_FILE_NAME),
-        })
+        }
     }
 }
 
 fn latest_session_dir(recordings_dir: &Path) -> ExportCommandResult<PathBuf> {
     let mut candidates = Vec::new();
-    let legacy_input_path = recordings_dir.join(OUTPUT_FILE_NAME);
-    let legacy_timeline_path = recordings_dir.join(TIMELINE_FILE_NAME);
-    let legacy_clicks_path = recordings_dir.join(CLICKS_FILE_NAME);
-
-    if legacy_input_path.exists() && legacy_timeline_path.exists() && legacy_clicks_path.exists() {
-        candidates.push((modified_time(recordings_dir), recordings_dir.to_path_buf()));
-    }
 
     for entry in fs::read_dir(recordings_dir).map_err(|error| {
         ExportError::new(
@@ -441,101 +407,141 @@ fn read_clicks(path: &Path) -> ExportCommandResult<Vec<ClickEvent>> {
     Ok(clicks)
 }
 
-fn probe_video_info(input_path: &Path) -> ExportCommandResult<VideoInfo> {
-    let output = Command::new("ffprobe")
-        .args([
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=width,height,duration:format=duration",
-            "-of",
-            "json",
-        ])
-        .arg(input_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|error| {
-            ExportError::new(
-                "ffprobe_spawn_failed",
-                format!("Could not start ffprobe: {error}"),
-                true,
-            )
-        })?;
+fn probe_video_info(app: &AppHandle, input_path: &Path) -> ExportCommandResult<VideoInfo> {
+    let output = ffmpeg_sidecar_output(
+        app,
+        [
+            "-hide_banner".to_string(),
+            "-i".to_string(),
+            path_to_string(input_path)?,
+            "-frames:v".to_string(),
+            "1".to_string(),
+            "-f".to_string(),
+            "null".to_string(),
+            "-".to_string(),
+        ],
+        "ffmpeg_probe_spawn_failed",
+        "Could not start bundled FFmpeg metadata probe",
+    )?;
 
     if !output.status.success() {
         return Err(ExportError::new(
-            "ffprobe_failed",
+            "ffmpeg_probe_failed",
             format!(
-                "ffprobe failed: {}",
+                "Bundled FFmpeg metadata probe failed: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
             true,
         ));
     }
 
-    let probe: FfprobeOutput = serde_json::from_slice(&output.stdout).map_err(|error| {
+    let output_text = String::from_utf8_lossy(&output.stderr);
+    let duration = parse_ffmpeg_duration_seconds(&output_text).ok_or_else(|| {
         ExportError::new(
-            "ffprobe_json_invalid",
-            format!("Could not parse ffprobe JSON: {error}"),
+            "video_duration_missing",
+            "Bundled FFmpeg did not return a usable video duration",
             true,
         )
     })?;
-    let stream = probe.streams.first().ok_or_else(|| {
+    let (width, height) = parse_ffmpeg_video_dimensions(&output_text).ok_or_else(|| {
         ExportError::new(
-            "video_stream_missing",
-            "ffprobe did not return a video stream",
+            "video_dimensions_missing",
+            "Bundled FFmpeg did not return usable video dimensions",
             true,
         )
     })?;
-    let duration = stream
-        .duration
-        .as_deref()
-        .and_then(parse_ffprobe_seconds)
-        .or_else(|| {
-            probe
-                .format
-                .as_ref()
-                .and_then(|format| format.duration.as_deref())
-                .and_then(parse_ffprobe_seconds)
-        })
-        .ok_or_else(|| {
-            ExportError::new(
-                "video_duration_missing",
-                "ffprobe did not return a usable video duration",
-                true,
-            )
-        })?;
 
     Ok(VideoInfo {
-        width: stream.width.ok_or_else(|| {
-            ExportError::new(
-                "video_width_missing",
-                "ffprobe did not return video width",
-                true,
-            )
-        })?,
-        height: stream.height.ok_or_else(|| {
-            ExportError::new(
-                "video_height_missing",
-                "ffprobe did not return video height",
-                true,
-            )
-        })?,
+        width,
+        height,
         duration,
     })
 }
 
-fn parse_ffprobe_seconds(value: &str) -> Option<f64> {
-    let seconds = value.parse::<f64>().ok()?;
+fn parse_ffmpeg_duration_seconds(output: &str) -> Option<f64> {
+    for line in output.lines() {
+        let Some((_, duration)) = line.split_once("Duration:") else {
+            continue;
+        };
+        let duration = duration.split(',').next()?.trim();
 
-    if seconds.is_finite() && seconds > 0.0 {
-        Some(seconds)
+        if let Some(seconds) = parse_ffmpeg_timestamp(duration) {
+            return Some(seconds);
+        }
+    }
+
+    None
+}
+
+fn parse_ffmpeg_timestamp(value: &str) -> Option<f64> {
+    let mut parts = value.split(':');
+    let hours = parts.next()?.parse::<f64>().ok()?;
+    let minutes = parts.next()?.parse::<f64>().ok()?;
+    let seconds = parts.next()?.parse::<f64>().ok()?;
+
+    if parts.next().is_some() {
+        return None;
+    }
+
+    let total = hours * 3600.0 + minutes * 60.0 + seconds;
+
+    if total.is_finite() && total > 0.0 {
+        Some(total)
     } else {
         None
     }
+}
+
+fn parse_ffmpeg_video_dimensions(output: &str) -> Option<(u32, u32)> {
+    output
+        .lines()
+        .filter(|line| line.contains("Video:"))
+        .find_map(parse_video_dimensions_from_line)
+}
+
+fn parse_video_dimensions_from_line(line: &str) -> Option<(u32, u32)> {
+    for token in line.split(|character: char| {
+        character.is_whitespace() || matches!(character, ',' | '[' | ']')
+    }) {
+        let Some((width, height)) = token.split_once('x') else {
+            continue;
+        };
+        let (Ok(width), Ok(height)) = (width.parse::<u32>(), height.parse::<u32>()) else {
+            continue;
+        };
+
+        if width >= 16 && height >= 16 {
+            return Some((width, height));
+        }
+    }
+
+    None
+}
+
+fn ffmpeg_sidecar_output<I>(
+    app: &AppHandle,
+    args: I,
+    spawn_code: &'static str,
+    spawn_message: &'static str,
+) -> ExportCommandResult<Output>
+where
+    I: IntoIterator<Item = String>,
+{
+    let args: Vec<String> = args.into_iter().collect();
+    let mut command = ffmpeg_sidecar_command(app)?;
+
+    command
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| {
+            ExportError::new(
+                spawn_code,
+                format!("{spawn_message}: {error}"),
+                true,
+            )
+        })
 }
 
 fn build_export_filter(
@@ -972,8 +978,8 @@ fn remove_filter_script(paths: &ExportPaths) -> ExportCommandResult<()> {
     remove_file(&paths.filter_script_path)
 }
 
-fn run_ffmpeg_zoom_export(paths: &ExportPaths) -> ExportCommandResult<()> {
-    run_ffmpeg([
+fn run_ffmpeg_zoom_export(app: &AppHandle, paths: &ExportPaths) -> ExportCommandResult<()> {
+    run_ffmpeg(app, [
         "-hide_banner".to_string(),
         "-y".to_string(),
         "-i".to_string(),
@@ -999,8 +1005,8 @@ fn run_ffmpeg_zoom_export(paths: &ExportPaths) -> ExportCommandResult<()> {
     ])
 }
 
-fn run_ffmpeg_copy(paths: &ExportPaths) -> ExportCommandResult<()> {
-    run_ffmpeg([
+fn run_ffmpeg_copy(app: &AppHandle, paths: &ExportPaths) -> ExportCommandResult<()> {
+    run_ffmpeg(app, [
         "-hide_banner".to_string(),
         "-y".to_string(),
         "-i".to_string(),
@@ -1013,25 +1019,21 @@ fn run_ffmpeg_copy(paths: &ExportPaths) -> ExportCommandResult<()> {
     ])
 }
 
-fn run_ffmpeg<I>(args: I) -> ExportCommandResult<()>
+fn run_ffmpeg<I>(app: &AppHandle, args: I) -> ExportCommandResult<()>
 where
     I: IntoIterator<Item = String>,
 {
     let args: Vec<String> = args.into_iter().collect();
-    println!("{}", command_string("ffmpeg", &args));
+    let command = ffmpeg_sidecar_command(app)?;
+    let program = command.get_program().to_string_lossy().to_string();
+    println!("{}", command_string(&program, &args));
 
-    let output = Command::new("ffmpeg")
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|error| {
-            ExportError::new(
-                "ffmpeg_spawn_failed",
-                format!("Could not start FFmpeg export: {error}"),
-                true,
-            )
-        })?;
+    let output = ffmpeg_sidecar_output(
+        app,
+        args,
+        "ffmpeg_spawn_failed",
+        "Could not start bundled FFmpeg export",
+    )?;
 
     if output.status.success() {
         return Ok(());
@@ -1045,6 +1047,21 @@ where
         ),
         true,
     ))
+}
+
+fn ffmpeg_sidecar_command(app: &AppHandle) -> ExportCommandResult<Command> {
+    let command = app
+        .shell()
+        .sidecar(FFMPEG_SIDECAR_NAME)
+        .map_err(|error| {
+            ExportError::new(
+                "ffmpeg_sidecar_unavailable",
+                format!("Could not resolve bundled FFmpeg sidecar: {error}"),
+                true,
+            )
+        })?;
+
+    Ok(command.into())
 }
 
 fn command_string(program: &str, args: &[String]) -> String {

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
+    ffi::OsStr,
     fmt, fs,
     io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
@@ -13,6 +14,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Manager, State};
+use tauri_plugin_shell::ShellExt;
 
 #[cfg(target_os = "windows")]
 use windows::Win32::{
@@ -25,8 +27,8 @@ use windows::Win32::{
 
 const CLICKS_FILE_NAME: &str = "clicks.json";
 const DRAGS_FILE_NAME: &str = "drags.json";
+const FFMPEG_SIDECAR_NAME: &str = "ffmpeg";
 const OUTPUT_FILE_NAME: &str = "screen.mp4";
-const OUTPUT_ROOT_DIR_NAME: &str = "FocusFlow";
 const OUTPUT_RECORDINGS_DIR_NAME: &str = "Recordings";
 const TIMELINE_FILE_NAME: &str = "timeline.json";
 const CLICK_POLL_INTERVAL: Duration = Duration::from_millis(8);
@@ -400,12 +402,16 @@ async fn start_primary_monitor_recording(
 
     let monitor = primary_monitor_info(app)?;
     let args = ffmpeg_primary_monitor_args(&monitor, &output_path)?;
-    let mut child = Command::new("ffmpeg")
+    let mut command = ffmpeg_sidecar_command(app)?;
+    let ffmpeg_path = command.get_program().to_os_string();
+    log_recording_diagnostics(output_dir, &ffmpeg_path);
+    command
         .args(args)
         .current_dir(output_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
         .spawn()
         .map_err(|error| {
             RecorderError::new(
@@ -1294,19 +1300,29 @@ fn create_session_screen_output_path(app: &AppHandle) -> RecorderResult<PathBuf>
     ))
 }
 
-fn recordings_root_dir(app: &AppHandle) -> RecorderResult<PathBuf> {
+pub(crate) fn recordings_root_dir(app: &AppHandle) -> RecorderResult<PathBuf> {
     let dir = app
         .path()
-        .document_dir()
+        .app_data_dir()
         .map_err(|error| {
             RecorderError::new(
-                "documents_dir_unavailable",
-                format!("Could not resolve Documents directory: {error}"),
+                "app_data_dir_unavailable",
+                format!("Could not resolve AppData directory: {error}"),
                 true,
             )
         })?
-        .join(OUTPUT_ROOT_DIR_NAME)
         .join(OUTPUT_RECORDINGS_DIR_NAME);
+
+    if !dir.is_absolute() {
+        return Err(RecorderError::new(
+            "relative_output_dir",
+            format!(
+                "Recording output directory must be absolute, but resolved to: {}",
+                dir.display()
+            ),
+            true,
+        ));
+    }
 
     fs::create_dir_all(&dir).map_err(|error| {
         RecorderError::new(
@@ -1317,6 +1333,42 @@ fn recordings_root_dir(app: &AppHandle) -> RecorderResult<PathBuf> {
     })?;
 
     Ok(dir)
+}
+
+fn ffmpeg_sidecar_command(app: &AppHandle) -> RecorderResult<Command> {
+    let command = app
+        .shell()
+        .sidecar(FFMPEG_SIDECAR_NAME)
+        .map_err(|error| {
+            RecorderError::new(
+                "ffmpeg_sidecar_unavailable",
+                format!("Could not resolve bundled FFmpeg sidecar: {error}"),
+                true,
+            )
+        })?;
+
+    Ok(command.into())
+}
+
+fn log_recording_diagnostics(session_dir: &Path, ffmpeg_path: &OsStr) {
+    let current_dir = std::env::current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|error| format!("<unavailable: {error}>"));
+    let output_dir = session_dir.parent().unwrap_or(session_dir);
+
+    println!("[FocusFlow recorder] Current working directory: {current_dir}");
+    println!(
+        "[FocusFlow recorder] FFmpeg executable path: {}",
+        ffmpeg_path.to_string_lossy()
+    );
+    println!(
+        "[FocusFlow recorder] Output directory path: {}",
+        output_dir.display()
+    );
+    println!(
+        "[FocusFlow recorder] Recording session directory path: {}",
+        session_dir.display()
+    );
 }
 
 fn timestamp_folder_name() -> RecorderResult<String> {
