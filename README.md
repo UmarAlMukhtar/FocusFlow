@@ -1,121 +1,225 @@
 # FocusFlow
 
-FocusFlow is a Windows-first desktop screen recorder built with Tauri, React, TypeScript, and Rust. It records the primary monitor, captures click and drag interactions, generates a zoom timeline, and exports an edited MP4 that automatically follows the user's attention.
+## Overview
+
+FocusFlow is an open-source Windows desktop application that automatically transforms raw screen recordings into polished tutorial videos.
+
+Built with Rust, Tauri, React, TypeScript, and FFmpeg, FocusFlow records screen activity, tracks user interactions such as clicks and drag movements, automatically generates an editing timeline, and exports videos with intelligent zooming and camera movement.
+
+The goal is to help creators, students, developers, and founders produce professional-looking walkthroughs without spending hours manually editing recordings.
+
+---
+
+## Problem Statement
+
+Creating tutorial videos and product demos is time-consuming.
+
+After recording a screen capture, creators often need to:
+
+* Manually zoom into important interactions
+* Follow cursor movements
+* Highlight clicks and actions
+* Edit timelines in video editing software
+
+Existing tools that automate this process are often:
+
+* Expensive
+* Subscription-based
+* Closed source
+* Not easily accessible to students and indie developers
+
+While learning new technologies and building projects, I faced this problem myself and wanted a free, open-source alternative.
+
+---
+
+## Solution
+
+FocusFlow automatically converts raw screen recordings into focused tutorial videos.
+
+The application:
+
+1. Records the screen.
+2. Tracks user interactions such as clicks and drag movements.
+3. Generates an interaction timeline.
+4. Automatically creates zoom and camera movement effects.
+5. Exports a polished MP4 video.
+
+This removes much of the repetitive editing work normally required when creating tutorials and demos.
+
+---
+
+## Features
+
+* Screen recording
+* Automatic zoom generation
+* Click tracking with coordinates and timestamps
+* Drag interaction tracking
+* Timeline generation from interactions
+* Smooth camera pan and zoom effects
+* Click indicators in exported videos
+* Session-based recording management
+* Export progress tracking
+* Recording countdown
+* Global hotkeys
+* Bundled FFmpeg sidecar
+* Windows File Explorer integration
+* Modern desktop UI
+
+---
+
+## Tech Stack
+
+### Frontend
+
+* React
+* TypeScript
+* Vite
+
+### Backend
+
+* Rust
+* Tauri 2
+
+### Database
+
+* No database required
+* JSON-based session storage
+
+### APIs
+
+* FFmpeg Sidecar
+* Windows APIs for interaction tracking and hotkeys
+
+### Hosting
+
+* GitHub Repository
+* Windows MSI distribution
+
+---
+
+## Codex / OpenAI Usage
+
+Codex played a significant role throughout development.
+
+Used for:
+
+### Ideation
+
+* Refining the product concept
+* Defining the MVP scope
+* Feature prioritization
+
+### Architecture Planning
+
+* Designing the Tauri + Rust + React architecture
+* Defining session storage structure
+* Planning the export pipeline
+
+### Code Generation
+
+* Recorder implementation
+* Interaction tracking
+* Timeline generation
+* FFmpeg export pipeline
+* UI improvements
+
+### Debugging
+
+* FFmpeg integration issues
+* Windows path handling
+* Sidecar configuration
+* Export generation problems
+* Tauri permissions and packaging
+
+### Testing & Iteration
+
+* Rapid feature prototyping
+* Reviewing architecture decisions
+* Production build preparation
+
+### Documentation
+
+* README creation
+* Release notes
+* Pitch deck support
+* Demo preparation
+
+---
+
+## Demo
+
+### Pitch Deck
+
+[Link](https://gamma.app/docs/Turn-Raw-Recordings-Into-Polished-Tutorials-Automatically-qjdjzxy1zv4jb4f)
+
+### Demo Video
+
+[Link](https://youtu.be/NfqgOWDMl8A)
+
+---
 
 ## Screenshots
 
 ### Main UI
+
 ![Main UI](docs/screenshots/main-ui.png)
 
 ### Recording State
-![Recording](docs/screenshots/recording-state.png)
+
+![Recording State](docs/screenshots/recording-state.png)
 
 ### Export State
-![Export](docs/screenshots/export-state.png)
+
+![Export State](docs/screenshots/export-state.png)
 
 ### Edited Output
-![Edited Video](docs/screenshots/edited-video.png)
 
-### Demo 
+![Edited Output](docs/screenshots/edited-video.png)
+
+### Demo
+
 ![Demo](docs/gifs/demo.gif)
 
-## Features
+---
 
-- Primary monitor screen recording
-- Bundled FFmpeg sidecar for recording and export
-- AppData session folders for reliable release builds
-- Left and right click tracking with coordinates and timestamps
-- Click-and-drag path tracking
-- Timeline generation from interaction data
-- Automatic zoom and pan export to `edited.mp4`
-- Click ripple indicators in exported videos
-- Export progress display
-- Recording countdown, automatic window minimize, and restore on stop
-- Global hotkeys: `Ctrl+Shift+R` to start, `Ctrl+Shift+S` to stop
-- Windows File Explorer shortcuts for recordings, sessions, and edited output
+## How to Run Locally
 
-## Screenshots
-
-Recommended release screenshots:
-
-- Main FocusFlow dashboard before recording
-- Active recording state with timer and animated red indicator
-- Export progress state
-- Example output folder containing `screen.mp4`, `clicks.json`, `drags.json`, `timeline.json`, and `edited.mp4`
-
-## Architecture
-
-FocusFlow uses the generated Tauri scaffold and keeps the app split into a small React UI and Rust backend commands.
-
-- `FocusFlow/src/App.tsx` renders the single-screen demo UI and calls Tauri commands with `invoke()`.
-- `FocusFlow/src-tauri/src/lib.rs` registers commands, global hotkeys, folder-opening commands, and runtime window constraints.
-- `FocusFlow/src-tauri/src/recorder.rs` records the primary monitor with FFmpeg, tracks clicks and drags, creates session folders, and writes session data.
-- `FocusFlow/src-tauri/src/export.rs` reads `screen.mp4` and `timeline.json`, renders zoom/click effects with FFmpeg, and writes `edited.mp4`.
-- `FocusFlow/src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe` is bundled as the FFmpeg sidecar.
-
-Recordings are stored under the app data directory:
-
-```text
-AppData/
-  Roaming/
-    com.umar.focusflow/
-      Recordings/
-        <session-id>/
-          screen.mp4
-          clicks.json
-          drags.json
-          timeline.json
-          edited.mp4
-```
-
-## Installation
-
-For local development on Windows:
-
-```powershell
+```bash
+git clone <repo-url>
 cd FocusFlow
 pnpm install
 pnpm tauri dev
 ```
 
-For release builds:
+Build release:
 
-```powershell
-cd FocusFlow
+```bash
 pnpm tauri build
 ```
 
-The release build requires the FFmpeg sidecar at:
+---
 
-```text
-FocusFlow/src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
-```
+## Live / Hosted Project
 
-## Usage
+Not applicable.
 
-1. Launch FocusFlow.
-2. Press `Start Recording`.
-3. Wait for the 3, 2, 1 countdown. FocusFlow minimizes automatically.
-4. Perform the workflow to capture.
-5. Stop from the app or press `Ctrl+Shift+S`.
-6. Press `Export` to generate `edited.mp4`.
-7. Use the folder buttons to open the recordings root, session folder, or edited video folder.
+FocusFlow is currently a Windows desktop application distributed as an MSI installer.
 
-## Tech Stack
-
-- Tauri 2
-- Rust
-- React
-- TypeScript
-- Vite
-- FFmpeg sidecar
-- Windows APIs for mouse tracking and global hotkeys
+---
 
 ## Future Roadmap
 
-1. Audio and microphone recording
-2. Pre-recording source selection
-3. Better drag-pan smoothing controls
-4. Timeline editor UI
-5. Annotation tools and cursor highlights
-6. One-click share/export presets
+* Audio and microphone recording
+* Window and monitor selection
+* Region recording
+* Timeline editor
+* Cursor customization
+* Annotation tools
+* Export presets
+* Cross-platform support
+
+---
+
+## Repository
+
+GitHub Repository: [repository-link](https://github.com/UmarAlMukhtar/FocusFlow)
