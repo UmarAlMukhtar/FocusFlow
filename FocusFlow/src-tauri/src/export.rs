@@ -1,11 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::{
     fmt, fs,
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
+    sync::{Arc, Mutex},
+    thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 use tauri_plugin_shell::ShellExt;
 
 const CLICKS_FILE_NAME: &str = "clicks.json";
@@ -15,8 +18,10 @@ const CLICK_INDICATOR_FONT_FILE: &str = "C\\:/Windows/Fonts/segoeui.ttf";
 const CLICK_INDICATOR_FONT_SIZE: u32 = 56;
 const CLICK_INDICATOR_GLYPH: &str = "\u{25CB}";
 const EDITED_FILE_NAME: &str = "edited.mp4";
+const EXPORT_PROGRESS_EVENT: &str = "export-progress";
 const FFMPEG_SIDECAR_NAME: &str = "ffmpeg";
 const FILTER_SCRIPT_FILE_NAME: &str = "edited.filter_complex.txt";
+const MAX_CAPTURED_LOG_BYTES: usize = 96 * 1024;
 const OUTPUT_FILE_NAME: &str = "screen.mp4";
 const TARGET_FPS: u32 = 60;
 const TIMELINE_FILE_NAME: &str = "timeline.json";
@@ -38,6 +43,12 @@ pub struct ExportStatus {
     pub timeline_path: String,
     pub output_path: String,
     pub segment_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportProgress {
+    percentage: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -228,12 +239,14 @@ fn export_edited_mp4_blocking(
         remove_file(&paths.temp_output_path)?;
     }
 
+    emit_export_progress(&app, 0.0);
+
     if timeline.is_empty() && clicks.is_empty() {
-        run_ffmpeg_copy(&app, &paths)?;
+        run_ffmpeg_copy(&app, &paths, video_info.duration)?;
     } else {
         let filter = build_export_filter(&timeline, &clicks, video_info, config);
         write_filter_script(&paths.filter_script_path, &filter)?;
-        let export_result = run_ffmpeg_zoom_export(&app, &paths);
+        let export_result = run_ffmpeg_zoom_export(&app, &paths, video_info.duration);
         if let Err(error) = remove_filter_script(&paths) {
             eprintln!("{error}");
         }
@@ -241,6 +254,7 @@ fn export_edited_mp4_blocking(
     }
 
     replace_output_file(&paths.temp_output_path, &paths.output_path)?;
+    emit_export_progress(&app, 100.0);
 
     Ok(ExportStatus {
         input_path: path_to_string(&paths.input_path)?,
@@ -265,7 +279,10 @@ impl ExportPaths {
         let recordings_dir = crate::recorder::recordings_root_dir(app).map_err(|error| {
             ExportError::new(
                 error.code,
-                format!("Could not resolve recording storage directory: {}", error.message),
+                format!(
+                    "Could not resolve recording storage directory: {}",
+                    error.message
+                ),
                 error.recoverable,
             )
         })?;
@@ -500,9 +517,9 @@ fn parse_ffmpeg_video_dimensions(output: &str) -> Option<(u32, u32)> {
 }
 
 fn parse_video_dimensions_from_line(line: &str) -> Option<(u32, u32)> {
-    for token in line.split(|character: char| {
-        character.is_whitespace() || matches!(character, ',' | '[' | ']')
-    }) {
+    for token in line
+        .split(|character: char| character.is_whitespace() || matches!(character, ',' | '[' | ']'))
+    {
         let Some((width, height)) = token.split_once('x') else {
             continue;
         };
@@ -535,13 +552,250 @@ where
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .map_err(|error| {
+        .map_err(|error| ExportError::new(spawn_code, format!("{spawn_message}: {error}"), true))
+}
+
+fn ffmpeg_sidecar_output_with_progress(
+    app: &AppHandle,
+    args: Vec<String>,
+    duration_seconds: f64,
+) -> ExportCommandResult<Output> {
+    let mut command = ffmpeg_sidecar_command(app)?;
+
+    command
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = command.spawn().map_err(|error| {
+        ExportError::new(
+            "ffmpeg_spawn_failed",
+            format!("Could not start bundled FFmpeg export: {error}"),
+            true,
+        )
+    })?;
+
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let _ = child.kill();
+            return Err(ExportError::new(
+                "ffmpeg_stdout_unavailable",
+                "Bundled FFmpeg stdout was not available for progress events",
+                true,
+            ));
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            let _ = child.kill();
+            return Err(ExportError::new(
+                "ffmpeg_stderr_unavailable",
+                "Bundled FFmpeg stderr was not available for export diagnostics",
+                true,
+            ));
+        }
+    };
+    let stderr_log = Arc::new(Mutex::new(Vec::new()));
+    let stderr_reader = spawn_log_reader(stderr, Arc::clone(&stderr_log));
+    let progress_read_error = read_ffmpeg_progress(app, stdout, duration_seconds).err();
+    let status = child.wait().map_err(|error| {
+        ExportError::new(
+            "ffmpeg_wait_failed",
+            format!("Could not wait for bundled FFmpeg export: {error}"),
+            true,
+        )
+    })?;
+    let stderr = join_log_reader(stderr_reader, stderr_log);
+
+    if status.success() {
+        if let Some(error) = progress_read_error {
+            return Err(error);
+        }
+    }
+
+    Ok(Output {
+        status,
+        stdout: Vec::new(),
+        stderr,
+    })
+}
+
+fn read_ffmpeg_progress<R>(
+    app: &AppHandle,
+    reader: R,
+    duration_seconds: f64,
+) -> ExportCommandResult<()>
+where
+    R: Read,
+{
+    let mut reader = BufReader::new(reader);
+    let mut parser = FfmpegProgressParser::new(duration_seconds);
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let bytes_read = reader.read_line(&mut line).map_err(|error| {
             ExportError::new(
-                spawn_code,
-                format!("{spawn_message}: {error}"),
+                "ffmpeg_progress_read_failed",
+                format!("Could not read bundled FFmpeg export progress: {error}"),
                 true,
             )
-        })
+        })?;
+
+        if bytes_read == 0 {
+            break;
+        }
+
+        if let Some(percentage) = parser.parse_line(&line) {
+            emit_export_progress(app, percentage);
+        }
+    }
+
+    Ok(())
+}
+
+struct FfmpegProgressParser {
+    duration_seconds: f64,
+    last_emitted_percentage: Option<f64>,
+}
+
+impl FfmpegProgressParser {
+    fn new(duration_seconds: f64) -> FfmpegProgressParser {
+        FfmpegProgressParser {
+            duration_seconds,
+            last_emitted_percentage: None,
+        }
+    }
+
+    fn parse_line(&mut self, line: &str) -> Option<f64> {
+        let (key, value) = line.trim().split_once('=')?;
+        let output_seconds = parse_ffmpeg_progress_seconds(key, value)?;
+        let percentage = progress_percentage(output_seconds, self.duration_seconds)?;
+
+        if self.should_emit(percentage) {
+            self.last_emitted_percentage = Some(percentage);
+            Some(percentage)
+        } else {
+            None
+        }
+    }
+
+    fn should_emit(&self, percentage: f64) -> bool {
+        match self.last_emitted_percentage {
+            Some(last) => percentage > last + 0.05,
+            None => true,
+        }
+    }
+}
+
+fn parse_ffmpeg_progress_seconds(key: &str, value: &str) -> Option<f64> {
+    match key {
+        "out_time_us" | "out_time_ms" => {
+            let micros = value.trim().parse::<f64>().ok()?;
+            let seconds = micros / 1_000_000.0;
+
+            if seconds.is_finite() && seconds >= 0.0 {
+                Some(seconds)
+            } else {
+                None
+            }
+        }
+        "out_time" => parse_ffmpeg_progress_timestamp(value.trim()),
+        _ => None,
+    }
+}
+
+fn parse_ffmpeg_progress_timestamp(value: &str) -> Option<f64> {
+    let mut parts = value.split(':');
+    let hours = parts.next()?.parse::<f64>().ok()?;
+    let minutes = parts.next()?.parse::<f64>().ok()?;
+    let seconds = parts.next()?.parse::<f64>().ok()?;
+
+    if parts.next().is_some() {
+        return None;
+    }
+
+    let total = hours * 3600.0 + minutes * 60.0 + seconds;
+
+    if total.is_finite() && total >= 0.0 {
+        Some(total)
+    } else {
+        None
+    }
+}
+
+fn progress_percentage(output_seconds: f64, duration_seconds: f64) -> Option<f64> {
+    if !output_seconds.is_finite() || !duration_seconds.is_finite() || duration_seconds <= 0.0 {
+        return None;
+    }
+
+    Some(((output_seconds / duration_seconds) * 100.0).clamp(0.0, 99.9))
+}
+
+fn emit_export_progress(app: &AppHandle, percentage: f64) {
+    let percentage = percentage.clamp(0.0, 100.0);
+
+    if let Err(error) = app.emit(EXPORT_PROGRESS_EVENT, ExportProgress { percentage }) {
+        eprintln!("Could not emit export progress event: {error}");
+    }
+}
+
+fn spawn_log_reader<R>(mut reader: R, log: Arc<Mutex<Vec<u8>>>) -> JoinHandle<()>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 8192];
+
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(bytes_read) => append_bounded_log(&log, &buffer[..bytes_read]),
+                Err(error) => {
+                    append_bounded_log(
+                        &log,
+                        format!("Failed to read FFmpeg stderr: {error}").as_bytes(),
+                    );
+                    break;
+                }
+            }
+        }
+    })
+}
+
+fn join_log_reader(reader: JoinHandle<()>, log: Arc<Mutex<Vec<u8>>>) -> Vec<u8> {
+    if reader.join().is_err() {
+        append_bounded_log(&log, b"FFmpeg stderr reader thread panicked");
+    }
+
+    log.lock()
+        .map(|log| log.clone())
+        .unwrap_or_else(|_| b"Could not read FFmpeg stderr log".to_vec())
+}
+
+fn append_bounded_log(log: &Arc<Mutex<Vec<u8>>>, bytes: &[u8]) {
+    let Ok(mut log) = log.lock() else {
+        return;
+    };
+
+    if bytes.len() >= MAX_CAPTURED_LOG_BYTES {
+        log.clear();
+        log.extend_from_slice(&bytes[bytes.len() - MAX_CAPTURED_LOG_BYTES..]);
+        return;
+    }
+
+    let overflow = log
+        .len()
+        .saturating_add(bytes.len())
+        .saturating_sub(MAX_CAPTURED_LOG_BYTES);
+
+    if overflow > 0 {
+        log.drain(..overflow);
+    }
+
+    log.extend_from_slice(bytes);
 }
 
 fn build_export_filter(
@@ -978,48 +1232,70 @@ fn remove_filter_script(paths: &ExportPaths) -> ExportCommandResult<()> {
     remove_file(&paths.filter_script_path)
 }
 
-fn run_ffmpeg_zoom_export(app: &AppHandle, paths: &ExportPaths) -> ExportCommandResult<()> {
-    run_ffmpeg(app, [
-        "-hide_banner".to_string(),
-        "-y".to_string(),
-        "-i".to_string(),
-        path_to_string(&paths.input_path)?,
-        "-filter_complex_script".to_string(),
-        path_to_string(&paths.filter_script_path)?,
-        "-map".to_string(),
-        "[v]".to_string(),
-        "-r".to_string(),
-        TARGET_FPS.to_string(),
-        "-an".to_string(),
-        "-c:v".to_string(),
-        "libx264".to_string(),
-        "-preset".to_string(),
-        "veryfast".to_string(),
-        "-crf".to_string(),
-        "22".to_string(),
-        "-pix_fmt".to_string(),
-        "yuv420p".to_string(),
-        "-movflags".to_string(),
-        "+faststart".to_string(),
-        path_to_string(&paths.temp_output_path)?,
-    ])
+fn run_ffmpeg_zoom_export(
+    app: &AppHandle,
+    paths: &ExportPaths,
+    duration_seconds: f64,
+) -> ExportCommandResult<()> {
+    run_ffmpeg(
+        app,
+        [
+            "-hide_banner".to_string(),
+            "-nostats".to_string(),
+            "-progress".to_string(),
+            "pipe:1".to_string(),
+            "-y".to_string(),
+            "-i".to_string(),
+            path_to_string(&paths.input_path)?,
+            "-filter_complex_script".to_string(),
+            path_to_string(&paths.filter_script_path)?,
+            "-map".to_string(),
+            "[v]".to_string(),
+            "-r".to_string(),
+            TARGET_FPS.to_string(),
+            "-an".to_string(),
+            "-c:v".to_string(),
+            "libx264".to_string(),
+            "-preset".to_string(),
+            "veryfast".to_string(),
+            "-crf".to_string(),
+            "22".to_string(),
+            "-pix_fmt".to_string(),
+            "yuv420p".to_string(),
+            "-movflags".to_string(),
+            "+faststart".to_string(),
+            path_to_string(&paths.temp_output_path)?,
+        ],
+        duration_seconds,
+    )
 }
 
-fn run_ffmpeg_copy(app: &AppHandle, paths: &ExportPaths) -> ExportCommandResult<()> {
-    run_ffmpeg(app, [
-        "-hide_banner".to_string(),
-        "-y".to_string(),
-        "-i".to_string(),
-        path_to_string(&paths.input_path)?,
-        "-c".to_string(),
-        "copy".to_string(),
-        "-movflags".to_string(),
-        "+faststart".to_string(),
-        path_to_string(&paths.temp_output_path)?,
-    ])
+fn run_ffmpeg_copy(
+    app: &AppHandle,
+    paths: &ExportPaths,
+    duration_seconds: f64,
+) -> ExportCommandResult<()> {
+    run_ffmpeg(
+        app,
+        [
+            "-hide_banner".to_string(),
+            "-nostats".to_string(),
+            "-progress".to_string(),
+            "pipe:1".to_string(),
+            "-y".to_string(),
+            "-i".to_string(),
+            path_to_string(&paths.input_path)?,
+            "-c".to_string(),
+            "copy".to_string(),
+            "-movflags".to_string(),
+            "+faststart".to_string(),
+            path_to_string(&paths.temp_output_path)?,
+        ],
+        duration_seconds,
+    )
 }
 
-fn run_ffmpeg<I>(app: &AppHandle, args: I) -> ExportCommandResult<()>
+fn run_ffmpeg<I>(app: &AppHandle, args: I, duration_seconds: f64) -> ExportCommandResult<()>
 where
     I: IntoIterator<Item = String>,
 {
@@ -1028,12 +1304,7 @@ where
     let program = command.get_program().to_string_lossy().to_string();
     println!("{}", command_string(&program, &args));
 
-    let output = ffmpeg_sidecar_output(
-        app,
-        args,
-        "ffmpeg_spawn_failed",
-        "Could not start bundled FFmpeg export",
-    )?;
+    let output = ffmpeg_sidecar_output_with_progress(app, args, duration_seconds)?;
 
     if output.status.success() {
         return Ok(());
@@ -1050,16 +1321,13 @@ where
 }
 
 fn ffmpeg_sidecar_command(app: &AppHandle) -> ExportCommandResult<Command> {
-    let command = app
-        .shell()
-        .sidecar(FFMPEG_SIDECAR_NAME)
-        .map_err(|error| {
-            ExportError::new(
-                "ffmpeg_sidecar_unavailable",
-                format!("Could not resolve bundled FFmpeg sidecar: {error}"),
-                true,
-            )
-        })?;
+    let command = app.shell().sidecar(FFMPEG_SIDECAR_NAME).map_err(|error| {
+        ExportError::new(
+            "ffmpeg_sidecar_unavailable",
+            format!("Could not resolve bundled FFmpeg sidecar: {error}"),
+            true,
+        )
+    })?;
 
     Ok(command.into())
 }

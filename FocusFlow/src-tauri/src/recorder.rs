@@ -411,15 +411,13 @@ async fn start_primary_monitor_recording(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .map_err(|error| {
-            RecorderError::new(
-                "ffmpeg_spawn_failed",
-                format!("Could not start system FFmpeg screen recorder: {error}"),
-                true,
-            )
-        })?;
+    let mut child = command.spawn().map_err(|error| {
+        RecorderError::new(
+            "ffmpeg_spawn_failed",
+            format!("Could not start system FFmpeg screen recorder: {error}"),
+            true,
+        )
+    })?;
 
     let pid = child.id();
     let log = Arc::new(Mutex::new(ProcessLog::default()));
@@ -1336,16 +1334,13 @@ pub(crate) fn recordings_root_dir(app: &AppHandle) -> RecorderResult<PathBuf> {
 }
 
 fn ffmpeg_sidecar_command(app: &AppHandle) -> RecorderResult<Command> {
-    let command = app
-        .shell()
-        .sidecar(FFMPEG_SIDECAR_NAME)
-        .map_err(|error| {
-            RecorderError::new(
-                "ffmpeg_sidecar_unavailable",
-                format!("Could not resolve bundled FFmpeg sidecar: {error}"),
-                true,
-            )
-        })?;
+    let command = app.shell().sidecar(FFMPEG_SIDECAR_NAME).map_err(|error| {
+        RecorderError::new(
+            "ffmpeg_sidecar_unavailable",
+            format!("Could not resolve bundled FFmpeg sidecar: {error}"),
+            true,
+        )
+    })?;
 
     Ok(command.into())
 }

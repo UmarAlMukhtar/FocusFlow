@@ -1,5 +1,31 @@
-# Generated recordings
+# Generated recordings and exports
 Recordings/
+FocusFlow/Recordings/
+**/Recordings/
 *.mp4
+*.mov
+*.webm
+*.mkv
+*.filter_complex.txt
 clicks.json
+drags.json
 timeline.json
+edited.filter_complex.txt
+
+# Node and frontend build output
+node_modules/
+FocusFlow/node_modules/
+dist/
+FocusFlow/dist/
+dist-ssr/
+FocusFlow/dist-ssr/
+
+# Rust and Tauri build output
+target/
+FocusFlow/src-tauri/target/
+src-tauri/target/
+
+# Logs and local machine state
+*.log
+*.local
+.DS_Store

@@ -1,7 +1,24 @@
-# Tauri + React + Typescript
+# FocusFlow App
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+This folder contains the Tauri, React, TypeScript, and Rust application for FocusFlow.
 
-## Recommended IDE Setup
+## Development
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+```powershell
+pnpm install
+pnpm tauri dev
+```
+
+## Release Build
+
+```powershell
+pnpm tauri build
+```
+
+The FFmpeg sidecar must exist at:
+
+```text
+src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
+```
+
+Generated recordings are stored in the application data directory, not in this project folder.

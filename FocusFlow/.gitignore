@@ -12,6 +12,23 @@ dist
 dist-ssr
 *.local
 
+# Generated recordings and exports
+Recordings/
+**/Recordings/
+*.mp4
+*.mov
+*.webm
+*.mkv
+*.filter_complex.txt
+clicks.json
+drags.json
+timeline.json
+edited.filter_complex.txt
+
+# Rust and Tauri build output
+src-tauri/target/
+target/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
