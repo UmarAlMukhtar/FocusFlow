@@ -24,11 +24,20 @@ use windows::Win32::{
 };
 
 const CLICKS_FILE_NAME: &str = "clicks.json";
+const DRAGS_FILE_NAME: &str = "drags.json";
 const OUTPUT_FILE_NAME: &str = "screen.mp4";
 const OUTPUT_ROOT_DIR_NAME: &str = "FocusFlow";
 const OUTPUT_RECORDINGS_DIR_NAME: &str = "Recordings";
 const TIMELINE_FILE_NAME: &str = "timeline.json";
 const CLICK_POLL_INTERVAL: Duration = Duration::from_millis(8);
+const DRAG_POINT_INTERVAL: Duration = Duration::from_millis(50);
+const DRAG_MIN_DISTANCE_PX: i32 = 4;
+const DRAG_POINT_MIN_DISTANCE_PX: i32 = 2;
+const DRAG_FORCE_SAMPLE_DISTANCE_PX: i32 = 12;
+const PRE_CLICK_ZOOM_SECONDS: f64 = 0.3;
+const IDLE_BEFORE_ZOOM_OUT_SECONDS: f64 = 1.0;
+const ZOOM_OUT_SECONDS: f64 = 0.35;
+const MIN_TIMELINE_SEGMENT_SECONDS: f64 = 0.001;
 const TARGET_FPS: u32 = 30;
 const STOP_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_CAPTURED_LOG_BYTES: usize = 96 * 1024;
@@ -184,6 +193,21 @@ struct ClickEvent {
     button: ClickButton,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct DragInteraction {
+    start: f64,
+    end: f64,
+    button: ClickButton,
+    points: Vec<DragPoint>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct DragPoint {
+    timestamp: f64,
+    x: i32,
+    y: i32,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum ClickButton {
@@ -203,41 +227,71 @@ struct TimelineSegment {
 struct ClickTracker {
     stop_requested: Arc<AtomicBool>,
     clicks: Arc<Mutex<Vec<ClickEvent>>>,
+    drags: Arc<Mutex<Vec<DragInteraction>>>,
     join_handle: Option<JoinHandle<()>>,
+}
+
+struct InteractionEvents {
+    clicks: Vec<ClickEvent>,
+    drags: Vec<DragInteraction>,
+}
+
+struct PendingDrag {
+    button: ClickButton,
+    points: Vec<DragPoint>,
+    is_drag: bool,
 }
 
 impl ClickTracker {
     fn start(started_at: Instant) -> ClickTracker {
         let stop_requested = Arc::new(AtomicBool::new(false));
         let clicks = Arc::new(Mutex::new(Vec::new()));
+        let drags = Arc::new(Mutex::new(Vec::new()));
         let worker_stop_requested = Arc::clone(&stop_requested);
         let worker_clicks = Arc::clone(&clicks);
+        let worker_drags = Arc::clone(&drags);
 
         let join_handle = thread::spawn(move || {
             let mut left_was_down = left_mouse_button_down();
             let mut right_was_down = right_mouse_button_down();
+            let mut left_drag: Option<PendingDrag> = None;
+            let mut right_drag: Option<PendingDrag> = None;
 
             while !worker_stop_requested.load(Ordering::Relaxed) {
                 let left_is_down = left_mouse_button_down();
                 let right_is_down = right_mouse_button_down();
 
                 if left_is_down && !left_was_down {
-                    push_click(&worker_clicks, started_at, ClickButton::Left);
+                    left_drag = push_click(&worker_clicks, started_at, ClickButton::Left)
+                        .map(|point| PendingDrag::new(ClickButton::Left, point));
+                } else if left_is_down {
+                    update_pending_drag(&mut left_drag, started_at);
+                } else if left_was_down {
+                    finish_pending_drag(&mut left_drag, &worker_drags, started_at);
                 }
 
                 if right_is_down && !right_was_down {
-                    push_click(&worker_clicks, started_at, ClickButton::Right);
+                    right_drag = push_click(&worker_clicks, started_at, ClickButton::Right)
+                        .map(|point| PendingDrag::new(ClickButton::Right, point));
+                } else if right_is_down {
+                    update_pending_drag(&mut right_drag, started_at);
+                } else if right_was_down {
+                    finish_pending_drag(&mut right_drag, &worker_drags, started_at);
                 }
 
                 left_was_down = left_is_down;
                 right_was_down = right_is_down;
                 thread::sleep(CLICK_POLL_INTERVAL);
             }
+
+            finish_pending_drag(&mut left_drag, &worker_drags, started_at);
+            finish_pending_drag(&mut right_drag, &worker_drags, started_at);
         });
 
         ClickTracker {
             stop_requested,
             clicks,
+            drags,
             join_handle: Some(join_handle),
         }
     }
@@ -246,7 +300,7 @@ impl ClickTracker {
         self.stop_requested.store(true, Ordering::Relaxed);
     }
 
-    fn finish(mut self) -> RecorderResult<Vec<ClickEvent>> {
+    fn finish(mut self) -> RecorderResult<InteractionEvents> {
         self.request_stop();
 
         if let Some(join_handle) = self.join_handle.take() {
@@ -259,7 +313,8 @@ impl ClickTracker {
             })?;
         }
 
-        self.clicks
+        let clicks = self
+            .clicks
             .lock()
             .map(|clicks| clicks.clone())
             .map_err(|_| {
@@ -268,7 +323,16 @@ impl ClickTracker {
                     "Click tracker state lock was poisoned by a previous panic",
                     true,
                 )
-            })
+            })?;
+        let drags = self.drags.lock().map(|drags| drags.clone()).map_err(|_| {
+            RecorderError::new(
+                "drag_tracker_state_poisoned",
+                "Drag tracker state lock was poisoned by a previous panic",
+                true,
+            )
+        })?;
+
+        Ok(InteractionEvents { clicks, drags })
     }
 }
 
@@ -438,7 +502,7 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
         })
         .err();
     let exit = wait_for_ffmpeg_exit(child).await;
-    let clicks = click_tracker.finish();
+    let interactions = click_tracker.finish();
 
     match exit {
         Ok(process_exit) => {
@@ -457,8 +521,8 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
         }
     }
 
-    let clicks = match clicks {
-        Ok(clicks) => clicks,
+    let interactions = match interactions {
+        Ok(interactions) => interactions,
         Err(error) => {
             state.clear_finalizing()?;
             return Err(error);
@@ -486,7 +550,12 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
         ));
     }
 
-    if let Err(error) = write_clicks_json(&output_path, &clicks) {
+    if let Err(error) = write_clicks_json(&output_path, &interactions.clicks) {
+        state.clear_finalizing()?;
+        return Err(error);
+    }
+
+    if let Err(error) = write_drags_json(&output_path, &interactions.drags) {
         state.clear_finalizing()?;
         return Err(error);
     }
@@ -666,19 +735,151 @@ where
     });
 }
 
-fn push_click(clicks: &Arc<Mutex<Vec<ClickEvent>>>, started_at: Instant, button: ClickButton) {
-    let Some((x, y)) = cursor_position() else {
-        return;
-    };
+impl PendingDrag {
+    fn new(button: ClickButton, first_point: DragPoint) -> PendingDrag {
+        PendingDrag {
+            button,
+            points: vec![first_point],
+            is_drag: false,
+        }
+    }
+
+    fn update(&mut self, point: DragPoint) {
+        let Some(first_point) = self.points.first() else {
+            self.points.push(point);
+            return;
+        };
+
+        if distance_squared(first_point, &point) >= squared_distance_threshold(DRAG_MIN_DISTANCE_PX)
+        {
+            self.is_drag = true;
+        }
+
+        let Some(last_point) = self.points.last() else {
+            self.points.push(point);
+            return;
+        };
+        let point_distance = distance_squared(last_point, &point);
+        let elapsed = point.timestamp - last_point.timestamp;
+
+        if point_distance >= squared_distance_threshold(DRAG_POINT_MIN_DISTANCE_PX)
+            && (elapsed >= DRAG_POINT_INTERVAL.as_secs_f64()
+                || point_distance >= squared_distance_threshold(DRAG_FORCE_SAMPLE_DISTANCE_PX))
+        {
+            self.points.push(point);
+        }
+    }
+
+    fn finish(mut self, release_point: DragPoint) -> Option<DragInteraction> {
+        self.update(release_point.clone());
+
+        if !self.is_drag {
+            return None;
+        }
+
+        if let Some(last_point) = self.points.last() {
+            if release_point.timestamp > last_point.timestamp
+                && (release_point.x != last_point.x || release_point.y != last_point.y)
+            {
+                self.points.push(release_point);
+            } else if release_point.timestamp > last_point.timestamp {
+                let last_index = self.points.len() - 1;
+                self.points[last_index].timestamp = release_point.timestamp;
+            }
+        }
+
+        if self.points.len() < 2 {
+            return None;
+        }
+
+        let start = self.points.first()?.timestamp;
+        let end = self.points.last()?.timestamp;
+
+        if end <= start {
+            return None;
+        }
+
+        Some(DragInteraction {
+            start,
+            end,
+            button: self.button,
+            points: self.points,
+        })
+    }
+}
+
+fn push_click(
+    clicks: &Arc<Mutex<Vec<ClickEvent>>>,
+    started_at: Instant,
+    button: ClickButton,
+) -> Option<DragPoint> {
+    let point = current_drag_point(started_at)?;
 
     if let Ok(mut clicks) = clicks.lock() {
         clicks.push(ClickEvent {
-            timestamp: elapsed_seconds(started_at),
-            x,
-            y,
+            timestamp: point.timestamp,
+            x: point.x,
+            y: point.y,
             button,
         });
     }
+
+    Some(point)
+}
+
+fn update_pending_drag(drag: &mut Option<PendingDrag>, started_at: Instant) {
+    let Some(drag) = drag.as_mut() else {
+        return;
+    };
+
+    if let Some(point) = current_drag_point(started_at) {
+        drag.update(point);
+    }
+}
+
+fn finish_pending_drag(
+    drag: &mut Option<PendingDrag>,
+    drags: &Arc<Mutex<Vec<DragInteraction>>>,
+    started_at: Instant,
+) {
+    let Some(drag) = drag.take() else {
+        return;
+    };
+
+    let Some(release_point) = current_drag_point(started_at) else {
+        return;
+    };
+
+    let Some(drag) = drag.finish(release_point) else {
+        return;
+    };
+
+    if let Ok(mut drags) = drags.lock() {
+        drags.push(drag);
+    }
+}
+
+fn current_drag_point(started_at: Instant) -> Option<DragPoint> {
+    let (x, y) = cursor_position()?;
+
+    Some(DragPoint {
+        timestamp: elapsed_seconds(started_at),
+        x,
+        y,
+    })
+}
+
+fn distance_squared(left: &DragPoint, right: &DragPoint) -> i64 {
+    let x = i64::from(left.x) - i64::from(right.x);
+    let y = i64::from(left.y) - i64::from(right.y);
+
+    x * x + y * y
+}
+
+fn squared_distance_threshold(pixels: i32) -> i64 {
+    let pixels = i64::from(pixels);
+
+    pixels * pixels
 }
 
 #[cfg(target_os = "windows")]
@@ -734,6 +935,25 @@ fn write_clicks_json(output_path: &Path, clicks: &[ClickEvent]) -> RecorderResul
     })
 }
 
+fn write_drags_json(output_path: &Path, drags: &[DragInteraction]) -> RecorderResult<()> {
+    let drags_path = drags_output_path(output_path)?;
+    let json = serde_json::to_vec_pretty(drags).map_err(|error| {
+        RecorderError::new(
+            "serialize_drags_failed",
+            format!("Could not serialize drag interactions: {error}"),
+            true,
+        )
+    })?;
+
+    fs::write(&drags_path, json).map_err(|error| {
+        RecorderError::new(
+            "write_drags_failed",
+            format!("Could not write drags.json: {error}"),
+            true,
+        )
+    })
+}
+
 fn write_timeline_json(output_path: &Path) -> RecorderResult<()> {
     let clicks_path = clicks_output_path(output_path)?;
     let clicks_json = fs::read(&clicks_path).map_err(|error| {
@@ -750,17 +970,22 @@ fn write_timeline_json(output_path: &Path) -> RecorderResult<()> {
             true,
         )
     })?;
-    let timeline: Vec<TimelineSegment> = clicks
-        .into_iter()
-        .filter(|click| click.button == ClickButton::Left)
-        .map(|click| TimelineSegment {
-            start: click.timestamp,
-            end: click.timestamp + 2.0,
-            x: click.x,
-            y: click.y,
-            scale: 2.0,
-        })
-        .collect();
+    let drags_path = drags_output_path(output_path)?;
+    let drags_json = fs::read(&drags_path).map_err(|error| {
+        RecorderError::new(
+            "read_drags_failed",
+            format!("Could not read drags.json for timeline generation: {error}"),
+            true,
+        )
+    })?;
+    let drags: Vec<DragInteraction> = serde_json::from_slice(&drags_json).map_err(|error| {
+        RecorderError::new(
+            "parse_drags_failed",
+            format!("Could not parse drags.json for timeline generation: {error}"),
+            true,
+        )
+    })?;
+    let timeline = build_timeline_segments(clicks, drags);
     let timeline_json = serde_json::to_vec_pretty(&timeline).map_err(|error| {
         RecorderError::new(
             "serialize_timeline_failed",
@@ -778,28 +1003,180 @@ fn write_timeline_json(output_path: &Path) -> RecorderResult<()> {
     })
 }
 
-fn clicks_output_path(output_path: &Path) -> RecorderResult<PathBuf> {
-    let output_dir = output_path.parent().ok_or_else(|| {
-        RecorderError::new(
-            "invalid_clicks_output_path",
-            "Could not resolve a parent directory for clicks.json",
-            true,
-        )
-    })?;
+fn build_timeline_segments(
+    clicks: Vec<ClickEvent>,
+    drags: Vec<DragInteraction>,
+) -> Vec<TimelineSegment> {
+    let mut timeline = build_click_timeline_segments(clicks);
+    timeline.extend(build_drag_timeline_segments(drags));
+    timeline.sort_by(|left, right| {
+        left.start
+            .partial_cmp(&right.start)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
-    Ok(output_dir.join(CLICKS_FILE_NAME))
+    timeline
+}
+
+fn build_click_timeline_segments(mut clicks: Vec<ClickEvent>) -> Vec<TimelineSegment> {
+    clicks.sort_by(|left, right| {
+        left.timestamp
+            .partial_cmp(&right.timestamp)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut timeline = Vec::new();
+    let mut sequence_complete_at = 0.0;
+
+    for click in clicks
+        .into_iter()
+        .filter(|click| click.button == ClickButton::Left)
+    {
+        let segment_end = click.timestamp + IDLE_BEFORE_ZOOM_OUT_SECONDS;
+
+        if timeline.is_empty() {
+            timeline.push(TimelineSegment {
+                start: (click.timestamp - PRE_CLICK_ZOOM_SECONDS).max(0.0),
+                end: segment_end,
+                x: click.x,
+                y: click.y,
+                scale: 2.0,
+            });
+            sequence_complete_at = segment_end + ZOOM_OUT_SECONDS;
+            continue;
+        }
+
+        if click.timestamp <= sequence_complete_at {
+            if let Some(last_segment) = timeline.last_mut() {
+                if click.timestamp > last_segment.start + MIN_TIMELINE_SEGMENT_SECONDS {
+                    last_segment.end = click.timestamp;
+                    timeline.push(TimelineSegment {
+                        start: click.timestamp,
+                        end: segment_end,
+                        x: click.x,
+                        y: click.y,
+                        scale: 2.0,
+                    });
+                } else {
+                    last_segment.end = segment_end;
+                    last_segment.x = click.x;
+                    last_segment.y = click.y;
+                }
+            }
+        } else {
+            let segment_start = (click.timestamp - PRE_CLICK_ZOOM_SECONDS)
+                .max(0.0)
+                .max(sequence_complete_at + MIN_TIMELINE_SEGMENT_SECONDS)
+                .min(click.timestamp);
+
+            timeline.push(TimelineSegment {
+                start: segment_start,
+                end: segment_end,
+                x: click.x,
+                y: click.y,
+                scale: 2.0,
+            });
+        }
+
+        sequence_complete_at = segment_end + ZOOM_OUT_SECONDS;
+    }
+
+    timeline
+}
+
+fn build_drag_timeline_segments(mut drags: Vec<DragInteraction>) -> Vec<TimelineSegment> {
+    drags.sort_by(|left, right| {
+        left.start
+            .partial_cmp(&right.start)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut timeline = Vec::new();
+
+    for drag in drags
+        .into_iter()
+        .filter(|drag| drag.button == ClickButton::Left)
+    {
+        let points = normalized_drag_points(drag.points);
+
+        if points.len() < 2 {
+            continue;
+        }
+
+        let drag_start = drag.start.min(points[0].timestamp);
+        let drag_end = drag.end.max(
+            points
+                .last()
+                .map(|point| point.timestamp)
+                .unwrap_or(drag.end),
+        );
+        let sequence_start = (drag_start - PRE_CLICK_ZOOM_SECONDS).max(0.0);
+        let sequence_end = drag_end + IDLE_BEFORE_ZOOM_OUT_SECONDS;
+        let mut previous_segment_start = sequence_start;
+
+        for index in 0..points.len() {
+            let point = &points[index];
+            let segment_start = if index == 0 {
+                sequence_start
+            } else {
+                point
+                    .timestamp
+                    .max(previous_segment_start + MIN_TIMELINE_SEGMENT_SECONDS)
+            };
+            let segment_end = points
+                .get(index + 1)
+                .map(|next_point| next_point.timestamp)
+                .unwrap_or(sequence_end)
+                .max(segment_start + MIN_TIMELINE_SEGMENT_SECONDS);
+
+            timeline.push(TimelineSegment {
+                start: segment_start,
+                end: segment_end,
+                x: point.x,
+                y: point.y,
+                scale: 2.0,
+            });
+            previous_segment_start = segment_start;
+        }
+    }
+
+    timeline
+}
+
+fn normalized_drag_points(mut points: Vec<DragPoint>) -> Vec<DragPoint> {
+    points.retain(|point| point.timestamp.is_finite() && point.timestamp >= 0.0);
+    points.sort_by(|left, right| {
+        left.timestamp
+            .partial_cmp(&right.timestamp)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    points.dedup_by(|right, left| {
+        right.timestamp <= left.timestamp + f64::EPSILON && right.x == left.x && right.y == left.y
+    });
+
+    points
+}
+
+fn clicks_output_path(output_path: &Path) -> RecorderResult<PathBuf> {
+    Ok(session_output_dir(output_path)?.join(CLICKS_FILE_NAME))
+}
+
+fn drags_output_path(output_path: &Path) -> RecorderResult<PathBuf> {
+    Ok(session_output_dir(output_path)?.join(DRAGS_FILE_NAME))
 }
 
 fn timeline_output_path(output_path: &Path) -> RecorderResult<PathBuf> {
-    let output_dir = output_path.parent().ok_or_else(|| {
+    Ok(session_output_dir(output_path)?.join(TIMELINE_FILE_NAME))
+}
+
+fn session_output_dir(output_path: &Path) -> RecorderResult<&Path> {
+    output_path.parent().ok_or_else(|| {
         RecorderError::new(
-            "invalid_timeline_output_path",
-            "Could not resolve a parent directory for timeline.json",
+            "invalid_session_output_path",
+            "Could not resolve a parent directory for recording session assets",
             true,
         )
-    })?;
-
-    Ok(output_dir.join(TIMELINE_FILE_NAME))
+    })
 }
 
 fn ffmpeg_primary_monitor_args(

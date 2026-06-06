@@ -1,4 +1,5 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+mod export;
 mod recorder;
 
 #[tauri::command]
@@ -13,6 +14,7 @@ pub fn run() {
         .manage(recorder::RecorderState::new())
         .invoke_handler(tauri::generate_handler![
             greet,
+            export::export_edited_mp4,
             recorder::start_recording,
             recorder::stop_recording,
             recorder::recording_status

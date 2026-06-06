@@ -7,13 +7,26 @@ use std::{
 };
 use tauri::{AppHandle, Manager};
 
+const CLICKS_FILE_NAME: &str = "clicks.json";
+const CLICK_INDICATOR_ALPHA: f64 = 0.9;
+const CLICK_INDICATOR_DURATION_SECONDS: f64 = 0.3;
+const CLICK_INDICATOR_FONT_FILE: &str = "C\\:/Windows/Fonts/segoeui.ttf";
+const CLICK_INDICATOR_FONT_SIZE: u32 = 56;
+const CLICK_INDICATOR_GLYPH: &str = "\u{25CB}";
 const EDITED_FILE_NAME: &str = "edited.mp4";
+const FILTER_SCRIPT_FILE_NAME: &str = "edited.filter_complex.txt";
 const OUTPUT_FILE_NAME: &str = "screen.mp4";
 const OUTPUT_RECORDINGS_DIR_NAME: &str = "Recordings";
 const OUTPUT_ROOT_DIR_NAME: &str = "FocusFlow";
 const TARGET_FPS: u32 = 60;
 const TIMELINE_FILE_NAME: &str = "timeline.json";
-const ZOOM_RAMP_SECONDS: f64 = 0.35;
+const ZOOM_IN_MS: u64 = 180;
+const ZOOM_OUT_MS: u64 = 220;
+const ZOOM_HOLD_MS: u64 = 150;
+const ZOOM_SCALE: f64 = 2.3;
+const PAN_TRANSITION_MS: u64 = 180;
+const EXPRESSION_EPSILON: f64 = 0.000_001;
+const MIN_CAMERA_INTERVAL_SECONDS: f64 = 0.01;
 const ZOOMPAN_FRAMES_PER_INPUT: u32 = 2;
 
 pub type ExportCommandResult<T> = Result<T, ExportError>;
@@ -25,6 +38,24 @@ pub struct ExportStatus {
     pub timeline_path: String,
     pub output_path: String,
     pub segment_count: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportSettings {
+    pub zoom_scale: Option<f64>,
+    pub zoom_in_ms: Option<f64>,
+    pub zoom_out_ms: Option<f64>,
+    pub pan_transition_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExportConfig {
+    zoom_scale: f64,
+    zoom_in_ms: u64,
+    zoom_out_ms: u64,
+    zoom_hold_ms: u64,
+    pan_transition_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -53,6 +84,67 @@ impl fmt::Display for ExportError {
 
 impl std::error::Error for ExportError {}
 
+impl ExportConfig {
+    fn from_settings(settings: Option<ExportSettings>) -> ExportConfig {
+        let Some(settings) = settings else {
+            return ExportConfig::default();
+        };
+        let defaults = ExportConfig::default();
+
+        ExportConfig {
+            zoom_scale: positive_f64_or(settings.zoom_scale, defaults.zoom_scale),
+            zoom_in_ms: positive_milliseconds_or(settings.zoom_in_ms, defaults.zoom_in_ms),
+            zoom_out_ms: positive_milliseconds_or(settings.zoom_out_ms, defaults.zoom_out_ms),
+            zoom_hold_ms: defaults.zoom_hold_ms,
+            pan_transition_ms: positive_milliseconds_or(
+                settings.pan_transition_ms,
+                defaults.pan_transition_ms,
+            ),
+        }
+    }
+
+    fn zoom_in_seconds(self) -> f64 {
+        milliseconds_to_seconds(self.zoom_in_ms)
+    }
+
+    fn zoom_out_seconds(self) -> f64 {
+        milliseconds_to_seconds(self.zoom_out_ms)
+    }
+
+    fn zoom_hold_seconds(self) -> f64 {
+        milliseconds_to_seconds(self.zoom_hold_ms)
+    }
+
+    fn pan_transition_seconds(self) -> f64 {
+        milliseconds_to_seconds(self.pan_transition_ms)
+    }
+}
+
+impl Default for ExportConfig {
+    fn default() -> ExportConfig {
+        ExportConfig {
+            zoom_scale: ZOOM_SCALE,
+            zoom_in_ms: ZOOM_IN_MS,
+            zoom_out_ms: ZOOM_OUT_MS,
+            zoom_hold_ms: ZOOM_HOLD_MS,
+            pan_transition_ms: PAN_TRANSITION_MS,
+        }
+    }
+}
+
+fn positive_f64_or(value: Option<f64>, default: f64) -> f64 {
+    value
+        .filter(|value| value.is_finite() && *value > 1.0)
+        .unwrap_or(default)
+}
+
+fn positive_milliseconds_or(value: Option<f64>, default: u64) -> u64 {
+    value
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| value.round() as u64)
+        .unwrap_or(default)
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct TimelineSegment {
     start: f64,
@@ -62,17 +154,70 @@ struct TimelineSegment {
     scale: f64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct ClickEvent {
+    timestamp: f64,
+    x: i32,
+    y: i32,
+}
+
 #[derive(Debug, Clone, Copy)]
-struct VideoSize {
+struct VideoInfo {
     width: u32,
     height: u32,
+    duration: f64,
+}
+
+#[derive(Debug, Clone)]
+struct TimelineSequence {
+    start: f64,
+    end: f64,
+    targets: Vec<TimelineSegment>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CameraKeyframe {
+    time: f64,
+    x: f64,
+    y: f64,
+    zoom: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CameraInterval {
+    start: f64,
+    end: f64,
+    from: CameraKeyframe,
+    to: CameraKeyframe,
+}
+
+#[derive(Debug, Deserialize)]
+struct FfprobeOutput {
+    streams: Vec<FfprobeStream>,
+    format: Option<FfprobeFormat>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FfprobeStream {
+    width: Option<u32>,
+    height: Option<u32>,
+    duration: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FfprobeFormat {
+    duration: Option<String>,
 }
 
 #[tauri::command]
-pub async fn export_edited_mp4(app: AppHandle) -> ExportCommandResult<ExportStatus> {
+pub async fn export_edited_mp4(
+    app: AppHandle,
+    settings: Option<ExportSettings>,
+) -> ExportCommandResult<ExportStatus> {
     let paths = ExportPaths::resolve(&app)?;
+    let config = ExportConfig::from_settings(settings);
 
-    tauri::async_runtime::spawn_blocking(move || export_edited_mp4_blocking(paths))
+    tauri::async_runtime::spawn_blocking(move || export_edited_mp4_blocking(paths, config))
         .await
         .map_err(|error| {
             ExportError::new(
@@ -83,23 +228,33 @@ pub async fn export_edited_mp4(app: AppHandle) -> ExportCommandResult<ExportStat
         })?
 }
 
-fn export_edited_mp4_blocking(paths: ExportPaths) -> ExportCommandResult<ExportStatus> {
+fn export_edited_mp4_blocking(
+    paths: ExportPaths,
+    config: ExportConfig,
+) -> ExportCommandResult<ExportStatus> {
     ensure_windows()?;
     ensure_input_exists(&paths.input_path, "screen.mp4")?;
     ensure_input_exists(&paths.timeline_path, "timeline.json")?;
+    ensure_input_exists(&paths.clicks_path, "clicks.json")?;
 
     let timeline = read_timeline(&paths.timeline_path)?;
-    let video_size = probe_video_size(&paths.input_path)?;
+    let clicks = read_clicks(&paths.clicks_path)?;
+    let video_info = probe_video_info(&paths.input_path)?;
 
     if paths.temp_output_path.exists() {
         remove_file(&paths.temp_output_path)?;
     }
 
-    if timeline.is_empty() {
+    if timeline.is_empty() && clicks.is_empty() {
         run_ffmpeg_copy(&paths)?;
     } else {
-        let filter = build_zoom_filter(&timeline, video_size);
-        run_ffmpeg_zoom_export(&paths, &filter)?;
+        let filter = build_export_filter(&timeline, &clicks, video_info, config);
+        write_filter_script(&paths.filter_script_path, &filter)?;
+        let export_result = run_ffmpeg_zoom_export(&paths);
+        if let Err(error) = remove_filter_script(&paths) {
+            eprintln!("{error}");
+        }
+        export_result?;
     }
 
     replace_output_file(&paths.temp_output_path, &paths.output_path)?;
@@ -116,8 +271,10 @@ fn export_edited_mp4_blocking(paths: ExportPaths) -> ExportCommandResult<ExportS
 struct ExportPaths {
     input_path: PathBuf,
     timeline_path: PathBuf,
+    clicks_path: PathBuf,
     output_path: PathBuf,
     temp_output_path: PathBuf,
+    filter_script_path: PathBuf,
 }
 
 impl ExportPaths {
@@ -148,8 +305,10 @@ impl ExportPaths {
         Ok(ExportPaths {
             input_path: session_dir.join(OUTPUT_FILE_NAME),
             timeline_path: session_dir.join(TIMELINE_FILE_NAME),
+            clicks_path: session_dir.join(CLICKS_FILE_NAME),
             output_path: session_dir.join(EDITED_FILE_NAME),
             temp_output_path: session_dir.join("edited.tmp.mp4"),
+            filter_script_path: session_dir.join(FILTER_SCRIPT_FILE_NAME),
         })
     }
 }
@@ -158,8 +317,9 @@ fn latest_session_dir(recordings_dir: &Path) -> ExportCommandResult<PathBuf> {
     let mut candidates = Vec::new();
     let legacy_input_path = recordings_dir.join(OUTPUT_FILE_NAME);
     let legacy_timeline_path = recordings_dir.join(TIMELINE_FILE_NAME);
+    let legacy_clicks_path = recordings_dir.join(CLICKS_FILE_NAME);
 
-    if legacy_input_path.exists() && legacy_timeline_path.exists() {
+    if legacy_input_path.exists() && legacy_timeline_path.exists() && legacy_clicks_path.exists() {
         candidates.push((modified_time(recordings_dir), recordings_dir.to_path_buf()));
     }
 
@@ -193,7 +353,10 @@ fn latest_session_dir(recordings_dir: &Path) -> ExportCommandResult<PathBuf> {
             continue;
         }
 
-        if path.join(OUTPUT_FILE_NAME).exists() && path.join(TIMELINE_FILE_NAME).exists() {
+        if path.join(OUTPUT_FILE_NAME).exists()
+            && path.join(TIMELINE_FILE_NAME).exists()
+            && path.join(CLICKS_FILE_NAME).exists()
+        {
             candidates.push((modified_time(&path), path));
         }
     }
@@ -206,7 +369,7 @@ fn latest_session_dir(recordings_dir: &Path) -> ExportCommandResult<PathBuf> {
             ExportError::new(
                 "recording_session_missing",
                 format!(
-                    "No recording session containing screen.mp4 and timeline.json was found in {}",
+                    "No recording session containing screen.mp4, clicks.json, and timeline.json was found in {}",
                     recordings_dir.display()
                 ),
                 true,
@@ -252,7 +415,33 @@ fn read_timeline(path: &Path) -> ExportCommandResult<Vec<TimelineSegment>> {
     Ok(timeline)
 }
 
-fn probe_video_size(input_path: &Path) -> ExportCommandResult<VideoSize> {
+fn read_clicks(path: &Path) -> ExportCommandResult<Vec<ClickEvent>> {
+    let bytes = fs::read(path).map_err(|error| {
+        ExportError::new(
+            "read_clicks_failed",
+            format!("Could not read clicks.json: {error}"),
+            true,
+        )
+    })?;
+    let mut clicks: Vec<ClickEvent> = serde_json::from_slice(&bytes).map_err(|error| {
+        ExportError::new(
+            "parse_clicks_failed",
+            format!("Could not parse clicks.json: {error}"),
+            true,
+        )
+    })?;
+
+    clicks.retain(|click| click.timestamp.is_finite() && click.timestamp >= 0.0);
+    clicks.sort_by(|left, right| {
+        left.timestamp
+            .partial_cmp(&right.timestamp)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    Ok(clicks)
+}
+
+fn probe_video_info(input_path: &Path) -> ExportCommandResult<VideoInfo> {
     let output = Command::new("ffprobe")
         .args([
             "-v",
@@ -260,9 +449,9 @@ fn probe_video_size(input_path: &Path) -> ExportCommandResult<VideoSize> {
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=width,height",
+            "stream=width,height,duration:format=duration",
             "-of",
-            "csv=s=x:p=0",
+            "json",
         ])
         .arg(input_path)
         .stdout(Stdio::piped())
@@ -287,169 +476,510 @@ fn probe_video_size(input_path: &Path) -> ExportCommandResult<VideoSize> {
         ));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let size = stdout
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .ok_or_else(|| {
-            ExportError::new(
-                "video_size_missing",
-                "ffprobe did not return a video size",
-                true,
-            )
-        })?;
-    let (width, height) = size.split_once('x').ok_or_else(|| {
+    let probe: FfprobeOutput = serde_json::from_slice(&output.stdout).map_err(|error| {
         ExportError::new(
-            "video_size_invalid",
-            format!("ffprobe returned an invalid video size: {size}"),
+            "ffprobe_json_invalid",
+            format!("Could not parse ffprobe JSON: {error}"),
             true,
         )
     })?;
+    let stream = probe.streams.first().ok_or_else(|| {
+        ExportError::new(
+            "video_stream_missing",
+            "ffprobe did not return a video stream",
+            true,
+        )
+    })?;
+    let duration = stream
+        .duration
+        .as_deref()
+        .and_then(parse_ffprobe_seconds)
+        .or_else(|| {
+            probe
+                .format
+                .as_ref()
+                .and_then(|format| format.duration.as_deref())
+                .and_then(parse_ffprobe_seconds)
+        })
+        .ok_or_else(|| {
+            ExportError::new(
+                "video_duration_missing",
+                "ffprobe did not return a usable video duration",
+                true,
+            )
+        })?;
 
-    Ok(VideoSize {
-        width: width.trim().parse().map_err(|error| {
+    Ok(VideoInfo {
+        width: stream.width.ok_or_else(|| {
             ExportError::new(
-                "video_width_invalid",
-                format!("Could not parse video width: {error}"),
+                "video_width_missing",
+                "ffprobe did not return video width",
                 true,
             )
         })?,
-        height: height.trim().parse().map_err(|error| {
+        height: stream.height.ok_or_else(|| {
             ExportError::new(
-                "video_height_invalid",
-                format!("Could not parse video height: {error}"),
+                "video_height_missing",
+                "ffprobe did not return video height",
                 true,
             )
         })?,
+        duration,
     })
 }
 
-fn build_zoom_filter(timeline: &[TimelineSegment], size: VideoSize) -> String {
-    let zoom_expr = nested_zoom_expression(timeline);
-    let x_expr = nested_coordinate_expression(timeline, Axis::X, f64::from(size.width) / 2.0);
-    let y_expr = nested_coordinate_expression(timeline, Axis::Y, f64::from(size.height) / 2.0);
+fn parse_ffprobe_seconds(value: &str) -> Option<f64> {
+    let seconds = value.parse::<f64>().ok()?;
+
+    if seconds.is_finite() && seconds > 0.0 {
+        Some(seconds)
+    } else {
+        None
+    }
+}
+
+fn build_export_filter(
+    timeline: &[TimelineSegment],
+    clicks: &[ClickEvent],
+    info: VideoInfo,
+    config: ExportConfig,
+) -> String {
+    if timeline.is_empty() {
+        let click_filters = click_indicator_filters_for_interval(clicks, 0.0, info.duration);
+
+        return if click_filters.is_empty() {
+            "[0:v]setsar=1[v]".to_string()
+        } else {
+            format!("[0:v]{click_filters},setsar=1[v]")
+        };
+    }
+
+    let keyframes = build_camera_keyframes(timeline, info, config);
+    let intervals = camera_intervals(&keyframes);
+
+    if intervals.is_empty() {
+        let click_filters = click_indicator_filters_for_interval(clicks, 0.0, info.duration);
+
+        return if click_filters.is_empty() {
+            "[0:v]setsar=1[v]".to_string()
+        } else {
+            format!("[0:v]{click_filters},setsar=1[v]")
+        };
+    }
+
+    build_interval_filter(&intervals, clicks, info)
+}
+
+fn build_interval_filter(
+    intervals: &[CameraInterval],
+    clicks: &[ClickEvent],
+    info: VideoInfo,
+) -> String {
+    let mut chains = Vec::with_capacity(intervals.len() + 1);
+    let mut labels = Vec::with_capacity(intervals.len());
+
+    for (index, interval) in intervals.iter().enumerate() {
+        let output_label = if intervals.len() == 1 {
+            "v".to_string()
+        } else {
+            format!("v{index}")
+        };
+        let click_filters =
+            click_indicator_filters_for_interval(clicks, interval.start, interval.end);
+        let mut chain = format!(
+            "[0:v]trim=start={start}:end={end},setpts=PTS-STARTPTS",
+            start = format_seconds(interval.start),
+            end = format_seconds(interval.end)
+        );
+
+        if !click_filters.is_empty() {
+            chain.push(',');
+            chain.push_str(&click_filters);
+        }
+
+        chain.push(',');
+        chain.push_str(&zoompan_interval_filter(interval, &output_label, info));
+        chains.push(chain);
+
+        if intervals.len() > 1 {
+            labels.push(format!("[{output_label}]"));
+        }
+    }
+
+    if intervals.len() > 1 {
+        chains.push(format!(
+            "{inputs}concat=n={count}:v=1:a=0[v]",
+            inputs = labels.join(""),
+            count = intervals.len()
+        ));
+    }
+
+    chains.join(";")
+}
+
+fn zoompan_interval_filter(
+    interval: &CameraInterval,
+    output_label: &str,
+    info: VideoInfo,
+) -> String {
+    let duration = (interval.end - interval.start).max(MIN_CAMERA_INTERVAL_SECONDS);
+    let zoom = interpolate_expression(interval.from.zoom, interval.to.zoom, duration);
+    let x = interpolate_expression(interval.from.x, interval.to.x, duration);
+    let y = interpolate_expression(interval.from.y, interval.to.y, duration);
 
     format!(
-        "[0:v]zoompan=z='{zoom}':x='clip(({x})-ow/(2*({zoom})),0,iw-ow/({zoom}))':y='clip(({y})-oh/(2*({zoom})),0,ih-oh/({zoom}))':d={duration}:s={width}x{height}:fps={fps},setsar=1[v]",
-        zoom = zoom_expr,
-        x = x_expr,
-        y = y_expr,
-        duration = ZOOMPAN_FRAMES_PER_INPUT,
-        width = size.width,
-        height = size.height,
-        fps = TARGET_FPS
+        "zoompan=z='{zoom}':x='clip(({x})-ow/(2*({zoom})),0,iw-ow/({zoom}))':y='clip(({y})-oh/(2*({zoom})),0,ih-oh/({zoom}))':d={duration_frames}:s={width}x{height}:fps={fps},setsar=1[{output_label}]",
+        zoom = zoom,
+        x = x,
+        y = y,
+        duration_frames = ZOOMPAN_FRAMES_PER_INPUT,
+        width = info.width,
+        height = info.height,
+        fps = TARGET_FPS,
+        output_label = output_label
     )
 }
 
-fn nested_zoom_expression(timeline: &[TimelineSegment]) -> String {
-    timeline
+fn click_indicator_filters_for_interval(
+    clicks: &[ClickEvent],
+    interval_start: f64,
+    interval_end: f64,
+) -> String {
+    clicks
         .iter()
-        .rev()
-        .fold("1".to_string(), |next, segment| {
-            format!(
-                "if(between(out_time,{start},{end}),{active},{next})",
-                start = format_seconds(segment.start),
-                end = format_seconds(segment.end),
-                active = segment_zoom_expression(segment),
-                next = next
-            )
+        .filter(|click| {
+            click.timestamp < interval_end
+                && click.timestamp + CLICK_INDICATOR_DURATION_SECONDS > interval_start
         })
+        .map(|click| click_indicator_filter(click, interval_start))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
-fn segment_zoom_expression(segment: &TimelineSegment) -> String {
-    let amount = segment_amount_expression(segment);
+fn click_indicator_filter(click: &ClickEvent, time_offset: f64) -> String {
+    let start = click.timestamp - time_offset;
+    let end = start + CLICK_INDICATOR_DURATION_SECONDS;
+    let fade = format!(
+        "{alpha}*(0.5+0.5*cos(PI*((t-({start}))/{duration})))",
+        alpha = format_seconds(CLICK_INDICATOR_ALPHA),
+        start = format_seconds(start),
+        duration = format_seconds(CLICK_INDICATOR_DURATION_SECONDS)
+    );
 
     format!(
-        "1+({scale}-1)*({amount})",
-        scale = format_seconds(segment.scale),
-        amount = amount
+        "drawtext=fontfile='{fontfile}':text='{glyph}':fontsize={fontsize}:fontcolor=white:alpha='if(between(t,{start},{end}),{fade},0)':x='{x}-text_w/2':y='{y}-text_h/2':enable='between(t,{start},{end})'",
+        fontfile = CLICK_INDICATOR_FONT_FILE,
+        glyph = CLICK_INDICATOR_GLYPH,
+        fontsize = CLICK_INDICATOR_FONT_SIZE,
+        start = format_seconds(start),
+        end = format_seconds(end),
+        fade = fade,
+        x = click.x,
+        y = click.y
     )
 }
 
-fn segment_amount_expression(segment: &TimelineSegment) -> String {
-    let duration = segment.end - segment.start;
-    let ramp = ZOOM_RAMP_SECONDS.min(duration / 3.0).max(0.001);
-    let ramp_end = segment.start + ramp;
-    let hold_end = (segment.end - ramp).max(ramp_end);
+fn build_camera_keyframes(
+    timeline: &[TimelineSegment],
+    info: VideoInfo,
+    config: ExportConfig,
+) -> Vec<CameraKeyframe> {
+    let mut keyframes = Vec::new();
+    push_camera_keyframe(&mut keyframes, default_keyframe(0.0, info), info.duration);
 
-    let ease_in = ease_amount_expression(segment.start, ramp, EaseDirection::In);
-    let ease_out = ease_amount_expression(segment.end, ramp, EaseDirection::Out);
+    for sequence in timeline_sequences(timeline, config) {
+        push_sequence_keyframes(&mut keyframes, &sequence, info, config);
+    }
 
-    format!(
-        "if(between(out_time,{start},{ramp_end}),{ease_in},if(between(out_time,{ramp_end},{hold_end}),1,if(between(out_time,{hold_end},{end}),{ease_out},0)))",
-        start = format_seconds(segment.start),
-        ramp_end = format_seconds(ramp_end),
-        hold_end = format_seconds(hold_end),
-        end = format_seconds(segment.end),
-        ease_in = ease_in,
-        ease_out = ease_out
-    )
+    push_camera_keyframe(
+        &mut keyframes,
+        default_keyframe(info.duration, info),
+        info.duration,
+    );
+
+    normalize_camera_keyframes(keyframes, info)
 }
 
-#[derive(Debug, Clone, Copy)]
-enum EaseDirection {
-    In,
-    Out,
-}
-
-fn ease_amount_expression(anchor: f64, ramp: f64, direction: EaseDirection) -> String {
-    let progress = match direction {
-        EaseDirection::In => format!(
-            "((out_time-{})/{})",
-            format_seconds(anchor),
-            format_seconds(ramp)
-        ),
-        EaseDirection::Out => format!(
-            "(({}-out_time)/{})",
-            format_seconds(anchor),
-            format_seconds(ramp)
-        ),
+fn push_sequence_keyframes(
+    keyframes: &mut Vec<CameraKeyframe>,
+    sequence: &TimelineSequence,
+    info: VideoInfo,
+    config: ExportConfig,
+) {
+    let Some(first_target) = sequence.targets.first() else {
+        return;
     };
 
-    format!("0.5-0.5*cos(PI*{progress})", progress = progress)
+    let start = clamp_time(sequence.start, info.duration);
+    let end = clamp_time(sequence.end, info.duration);
+
+    if end <= start + EXPRESSION_EPSILON {
+        return;
+    }
+
+    let scale = sequence_scale(sequence, config);
+    let first_boundary = sequence
+        .targets
+        .get(1)
+        .map(|target| clamp_time(target.start, info.duration))
+        .unwrap_or(end)
+        .max(start)
+        .min(end);
+    let zoom_in_duration = config
+        .zoom_in_seconds()
+        .min((first_boundary - start).max(MIN_CAMERA_INTERVAL_SECONDS))
+        .min((end - start).max(MIN_CAMERA_INTERVAL_SECONDS));
+    let zoom_in_end = (start + zoom_in_duration).min(end);
+
+    push_camera_keyframe(keyframes, default_keyframe(start, info), info.duration);
+    push_camera_keyframe(
+        keyframes,
+        target_keyframe(zoom_in_end, first_target, scale),
+        info.duration,
+    );
+
+    for index in 1..sequence.targets.len() {
+        let previous_target = &sequence.targets[index - 1];
+        let current_target = &sequence.targets[index];
+        let transition_start = clamp_time(current_target.start, info.duration)
+            .max(start)
+            .min(end);
+        let next_boundary = sequence
+            .targets
+            .get(index + 1)
+            .map(|target| clamp_time(target.start, info.duration))
+            .unwrap_or(end)
+            .max(transition_start)
+            .min(end);
+        let pan_duration = config
+            .pan_transition_seconds()
+            .min((next_boundary - transition_start).max(MIN_CAMERA_INTERVAL_SECONDS))
+            .min((end - transition_start).max(MIN_CAMERA_INTERVAL_SECONDS));
+        let pan_end = (transition_start + pan_duration).min(end);
+
+        push_camera_keyframe(
+            keyframes,
+            target_keyframe(transition_start, previous_target, scale),
+            info.duration,
+        );
+        push_camera_keyframe(
+            keyframes,
+            target_keyframe(pan_end, current_target, scale),
+            info.duration,
+        );
+    }
+
+    if let Some(last_target) = sequence.targets.last() {
+        push_camera_keyframe(
+            keyframes,
+            target_keyframe(end, last_target, scale),
+            info.duration,
+        );
+    }
+
+    let zoom_out_end = clamp_time(sequence_complete_at(sequence, config), info.duration);
+
+    if zoom_out_end > end + EXPRESSION_EPSILON {
+        push_camera_keyframe(
+            keyframes,
+            default_keyframe(zoom_out_end, info),
+            info.duration,
+        );
+    }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Axis {
-    X,
-    Y,
+fn timeline_sequences(timeline: &[TimelineSegment], config: ExportConfig) -> Vec<TimelineSequence> {
+    let mut sequences: Vec<TimelineSequence> = Vec::new();
+
+    for segment in timeline.iter().cloned() {
+        if let Some(sequence) = sequences.last_mut() {
+            if segment.start <= sequence_complete_at(sequence, config) + EXPRESSION_EPSILON {
+                sequence.end = sequence.end.max(segment.end);
+                sequence.targets.push(segment);
+                continue;
+            }
+        }
+
+        sequences.push(TimelineSequence {
+            start: segment.start,
+            end: segment.end,
+            targets: vec![segment],
+        });
+    }
+
+    sequences
 }
 
-fn nested_coordinate_expression(
-    timeline: &[TimelineSegment],
-    axis: Axis,
-    default_value: f64,
-) -> String {
-    timeline
-        .iter()
-        .rev()
-        .fold(format_seconds(default_value), |next, segment| {
-            let coordinate = match axis {
-                Axis::X => segment.x,
-                Axis::Y => segment.y,
-            };
-            let amount = segment_amount_expression(segment);
+fn push_camera_keyframe(
+    keyframes: &mut Vec<CameraKeyframe>,
+    keyframe: CameraKeyframe,
+    duration: f64,
+) {
+    if !keyframe.time.is_finite()
+        || !keyframe.x.is_finite()
+        || !keyframe.y.is_finite()
+        || !keyframe.zoom.is_finite()
+    {
+        return;
+    }
 
-            format!(
-                "if(between(out_time,{start},{end}),{default}+({coordinate}-{default})*({amount}),{next})",
-                start = format_seconds(segment.start),
-                end = format_seconds(segment.end),
-                default = format_seconds(default_value),
-                coordinate = coordinate,
-                amount = amount,
-                next = next
-            )
+    let keyframe = CameraKeyframe {
+        time: clamp_time(keyframe.time, duration),
+        x: keyframe.x,
+        y: keyframe.y,
+        zoom: keyframe.zoom.max(1.0),
+    };
+
+    if let Some(existing) = keyframes
+        .iter_mut()
+        .find(|existing| (existing.time - keyframe.time).abs() <= EXPRESSION_EPSILON)
+    {
+        *existing = keyframe;
+        return;
+    }
+
+    keyframes.push(keyframe);
+}
+
+fn normalize_camera_keyframes(
+    mut keyframes: Vec<CameraKeyframe>,
+    info: VideoInfo,
+) -> Vec<CameraKeyframe> {
+    keyframes.sort_by(|left, right| {
+        left.time
+            .partial_cmp(&right.time)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut normalized: Vec<CameraKeyframe> = Vec::with_capacity(keyframes.len());
+
+    for keyframe in keyframes {
+        if let Some(last) = normalized.last_mut() {
+            if keyframe.time <= last.time + EXPRESSION_EPSILON {
+                *last = keyframe;
+                continue;
+            }
+        }
+
+        normalized.push(keyframe);
+    }
+
+    if normalized
+        .first()
+        .map(|keyframe| keyframe.time > EXPRESSION_EPSILON)
+        .unwrap_or(true)
+    {
+        normalized.insert(0, default_keyframe(0.0, info));
+    }
+
+    if normalized
+        .last()
+        .map(|keyframe| keyframe.time < info.duration - EXPRESSION_EPSILON)
+        .unwrap_or(true)
+    {
+        normalized.push(default_keyframe(info.duration, info));
+    }
+
+    normalized
+}
+
+fn camera_intervals(keyframes: &[CameraKeyframe]) -> Vec<CameraInterval> {
+    keyframes
+        .windows(2)
+        .filter_map(|window| {
+            let from = window[0];
+            let to = window[1];
+
+            if to.time <= from.time + EXPRESSION_EPSILON {
+                return None;
+            }
+
+            Some(CameraInterval {
+                start: from.time,
+                end: to.time,
+                from,
+                to,
+            })
         })
+        .collect()
 }
 
-fn run_ffmpeg_zoom_export(paths: &ExportPaths, filter: &str) -> ExportCommandResult<()> {
+fn sequence_scale(_sequence: &TimelineSequence, config: ExportConfig) -> f64 {
+    config.zoom_scale
+}
+
+fn sequence_complete_at(sequence: &TimelineSequence, config: ExportConfig) -> f64 {
+    sequence.end + config.zoom_hold_seconds() + config.zoom_out_seconds()
+}
+
+fn milliseconds_to_seconds(milliseconds: u64) -> f64 {
+    milliseconds as f64 / 1000.0
+}
+
+fn default_keyframe(time: f64, info: VideoInfo) -> CameraKeyframe {
+    CameraKeyframe {
+        time,
+        x: f64::from(info.width) / 2.0,
+        y: f64::from(info.height) / 2.0,
+        zoom: 1.0,
+    }
+}
+
+fn target_keyframe(time: f64, target: &TimelineSegment, scale: f64) -> CameraKeyframe {
+    CameraKeyframe {
+        time,
+        x: f64::from(target.x),
+        y: f64::from(target.y),
+        zoom: scale,
+    }
+}
+
+fn interpolate_expression(from: f64, to: f64, duration: f64) -> String {
+    if (from - to).abs() <= EXPRESSION_EPSILON {
+        return format_seconds(to);
+    }
+
+    format!(
+        "{from}+({to}-{from})*(0.5-0.5*cos(PI*out_time/{duration}))",
+        from = format_seconds(from),
+        to = format_seconds(to),
+        duration = format_seconds(duration.max(MIN_CAMERA_INTERVAL_SECONDS))
+    )
+}
+
+fn clamp_time(value: f64, duration: f64) -> f64 {
+    value.max(0.0).min(duration)
+}
+
+fn write_filter_script(path: &Path, filter: &str) -> ExportCommandResult<()> {
+    fs::write(path, filter).map_err(|error| {
+        ExportError::new(
+            "write_filter_script_failed",
+            format!(
+                "Could not write FFmpeg filter script at {}: {error}",
+                path.display()
+            ),
+            true,
+        )
+    })
+}
+
+fn remove_filter_script(paths: &ExportPaths) -> ExportCommandResult<()> {
+    if !paths.filter_script_path.exists() {
+        return Ok(());
+    }
+
+    remove_file(&paths.filter_script_path)
+}
+
+fn run_ffmpeg_zoom_export(paths: &ExportPaths) -> ExportCommandResult<()> {
     run_ffmpeg([
         "-hide_banner".to_string(),
         "-y".to_string(),
         "-i".to_string(),
         path_to_string(&paths.input_path)?,
-        "-filter_complex".to_string(),
-        filter.to_string(),
+        "-filter_complex_script".to_string(),
+        path_to_string(&paths.filter_script_path)?,
         "-map".to_string(),
         "[v]".to_string(),
         "-r".to_string(),
