@@ -2,6 +2,23 @@
 
 FocusFlow is a Windows-first desktop screen recorder built with Tauri, React, TypeScript, and Rust. It records the primary monitor, captures click and drag interactions, generates a zoom timeline, and exports an edited MP4 that automatically follows the user's attention.
 
+## Screenshots
+
+### Main UI
+![Main UI](docs/screenshots/main-ui.png)
+
+### Recording State
+![Recording](docs/screenshots/recording-state.png)
+
+### Export State
+![Export](docs/screenshots/export-state.png)
+
+### Edited Output
+![Edited Video](docs/screenshots/edited-video.png)
+
+### Demo 
+![Demo](docs/gifs/demo.gif)
+
 ## Features
 
 - Primary monitor screen recording
