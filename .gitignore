@@ -1,0 +1,5 @@
+# Generated recordings
+Recordings/
+*.mp4
+clicks.json
+timeline.json
