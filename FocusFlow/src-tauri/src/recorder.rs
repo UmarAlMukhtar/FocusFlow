@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{
     fmt, fs,
-    io::{Read, Write},
+    io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
@@ -10,7 +10,7 @@ use std::{
     },
     thread,
     thread::JoinHandle,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Manager, State};
 
@@ -119,6 +119,7 @@ impl RecorderState {
     fn clear_finalizing(&self) -> RecorderResult<()> {
         let mut runtime = self.lock_runtime()?;
         runtime.finalizing = false;
+        runtime.finalizing_output_path = None;
         Ok(())
     }
 }
@@ -127,6 +128,7 @@ impl RecorderState {
 struct RecorderRuntime {
     active: Option<ActiveRecording>,
     finalizing: bool,
+    finalizing_output_path: Option<PathBuf>,
     last_completed: Option<CompletedRecording>,
 }
 
@@ -316,7 +318,7 @@ async fn start_primary_monitor_recording(
         }
     }
 
-    let output_path = screen_output_path(app)?;
+    let output_path = create_session_screen_output_path(app)?;
     let output_dir = output_path.parent().ok_or_else(|| {
         RecorderError::new(
             "invalid_output_path",
@@ -408,6 +410,7 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
         };
 
         runtime.finalizing = true;
+        runtime.finalizing_output_path = Some(active.output_path.clone());
         active
     };
 
@@ -503,6 +506,7 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
     {
         let mut runtime = state.lock_runtime()?;
         runtime.finalizing = false;
+        runtime.finalizing_output_path = None;
         runtime.last_completed = Some(completed.clone());
     }
 
@@ -517,7 +521,7 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
 }
 
 fn current_recording_status(
-    app: &AppHandle,
+    _app: &AppHandle,
     state: &RecorderState,
 ) -> RecorderResult<RecordingStatus> {
     let runtime = state.lock_runtime()?;
@@ -525,7 +529,12 @@ fn current_recording_status(
     if runtime.finalizing {
         return Ok(RecordingStatus {
             phase: RecordingPhase::Finalizing,
-            output_path: path_to_string(&screen_output_path(app)?)?,
+            output_path: runtime
+                .finalizing_output_path
+                .as_deref()
+                .map(path_to_string)
+                .transpose()?
+                .unwrap_or_default(),
             pid: None,
             monitor: None,
             elapsed_ms: 0,
@@ -559,7 +568,7 @@ fn current_recording_status(
 
     Ok(RecordingStatus {
         phase: RecordingPhase::Idle,
-        output_path: path_to_string(&screen_output_path(app)?)?,
+        output_path: String::new(),
         pid: None,
         monitor: None,
         elapsed_ms: 0,
@@ -876,7 +885,39 @@ fn primary_monitor_info(app: &AppHandle) -> RecorderResult<MonitorInfo> {
     })
 }
 
-fn screen_output_path(app: &AppHandle) -> RecorderResult<PathBuf> {
+fn create_session_screen_output_path(app: &AppHandle) -> RecorderResult<PathBuf> {
+    let recordings_dir = recordings_root_dir(app)?;
+    let base_name = timestamp_folder_name()?;
+
+    for attempt in 0..1000 {
+        let folder_name = if attempt == 0 {
+            base_name.clone()
+        } else {
+            format!("{base_name}_{attempt:03}")
+        };
+        let session_dir = recordings_dir.join(folder_name);
+
+        match fs::create_dir(&session_dir) {
+            Ok(()) => return Ok(session_dir.join(OUTPUT_FILE_NAME)),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(RecorderError::new(
+                    "create_session_dir_failed",
+                    format!("Could not create recording session directory: {error}"),
+                    true,
+                ));
+            }
+        }
+    }
+
+    Err(RecorderError::new(
+        "create_session_dir_failed",
+        "Could not create a unique recording session directory",
+        true,
+    ))
+}
+
+fn recordings_root_dir(app: &AppHandle) -> RecorderResult<PathBuf> {
     let dir = app
         .path()
         .document_dir()
@@ -898,7 +939,53 @@ fn screen_output_path(app: &AppHandle) -> RecorderResult<PathBuf> {
         )
     })?;
 
-    Ok(dir.join(OUTPUT_FILE_NAME))
+    Ok(dir)
+}
+
+fn timestamp_folder_name() -> RecorderResult<String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| {
+            RecorderError::new(
+                "system_time_invalid",
+                format!("System time is before the Unix epoch: {error}"),
+                true,
+            )
+        })?;
+    let (year, month, day, hour, minute, second) =
+        unix_seconds_to_utc_components(now.as_secs() as i64);
+
+    Ok(format!(
+        "{year:04}{month:02}{day:02}_{hour:02}{minute:02}{second:02}_{millis:03}",
+        millis = now.subsec_millis()
+    ))
+}
+
+fn unix_seconds_to_utc_components(seconds: i64) -> (i32, u32, u32, u32, u32, u32) {
+    let days = seconds.div_euclid(86_400);
+    let seconds_of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let hour = (seconds_of_day / 3_600) as u32;
+    let minute = ((seconds_of_day % 3_600) / 60) as u32;
+    let second = (seconds_of_day % 60) as u32;
+
+    (year, month, day, hour, minute, second)
+}
+
+fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let days = days + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_phase = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_phase + 2) / 5 + 1;
+    let month = month_phase + if month_phase < 10 { 3 } else { -9 };
+    let year = year + if month <= 2 { 1 } else { 0 };
+
+    (year as i32, month as u32, day as u32)
 }
 
 fn ensure_windows() -> RecorderResult<()> {

@@ -17,10 +17,19 @@ type RecorderError = {
   recoverable?: boolean;
 };
 
+type ExportStatus = {
+  inputPath: string;
+  timelinePath: string;
+  outputPath: string;
+  segmentCount: number;
+};
+
 function App() {
   const [status, setStatus] = useState<RecordingStatus | null>(null);
   const [isBusy, setIsBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [exportMessage, setExportMessage] = useState<string | null>(null);
+  const [exportOutputPath, setExportOutputPath] = useState<string | null>(null);
 
   const statusLabel = useMemo(() => {
     if (isBusy) return "Working...";
@@ -49,6 +58,7 @@ function App() {
   async function startRecording() {
     setIsBusy(true);
     setError(null);
+    setExportMessage(null);
 
     try {
       const nextStatus = await invoke<RecordingStatus>("start_recording");
@@ -71,6 +81,23 @@ function App() {
     } catch (caught) {
       setError(formatError(caught));
       await refreshStatus(false);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function exportEditedVideo() {
+    setIsBusy(true);
+    setError(null);
+    setExportMessage(null);
+    setExportOutputPath(null);
+
+    try {
+      const exportStatus = await invoke<ExportStatus>("export_edited_mp4");
+      setExportMessage("Export completed.");
+      setExportOutputPath(exportStatus.outputPath);
+    } catch (caught) {
+      setError(formatError(caught));
     } finally {
       setIsBusy(false);
     }
@@ -103,10 +130,25 @@ function App() {
           >
             Stop Recording
           </button>
+
+          <button
+            type="button"
+            onClick={exportEditedVideo}
+            disabled={isBusy || isRecording}
+            style={styles.button}
+          >
+            Export Edited Video
+          </button>
         </div>
 
         {status?.outputPath ? (
           <p style={styles.meta}>Output: {status.outputPath}</p>
+        ) : null}
+
+        {exportMessage ? <p style={styles.success}>{exportMessage}</p> : null}
+
+        {exportOutputPath ? (
+          <p style={styles.meta}>Edited output: {exportOutputPath}</p>
         ) : null}
 
         {error ? <p style={styles.error}>{error}</p> : null}
@@ -188,6 +230,12 @@ const styles = {
     fontSize: "14px",
     lineHeight: 1.5,
     color: "#b42318",
+  },
+  success: {
+    margin: "16px 0 0",
+    fontSize: "14px",
+    lineHeight: 1.5,
+    color: "#067647",
   },
 } satisfies Record<string, CSSProperties>;
 
