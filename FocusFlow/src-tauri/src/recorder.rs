@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fmt, fs,
     io::{Read, Write},
@@ -27,6 +27,7 @@ const CLICKS_FILE_NAME: &str = "clicks.json";
 const OUTPUT_FILE_NAME: &str = "screen.mp4";
 const OUTPUT_ROOT_DIR_NAME: &str = "FocusFlow";
 const OUTPUT_RECORDINGS_DIR_NAME: &str = "Recordings";
+const TIMELINE_FILE_NAME: &str = "timeline.json";
 const CLICK_POLL_INTERVAL: Duration = Duration::from_millis(8);
 const TARGET_FPS: u32 = 30;
 const STOP_TIMEOUT: Duration = Duration::from_secs(12);
@@ -173,7 +174,7 @@ struct ProcessExit {
     event_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct ClickEvent {
     timestamp: f64,
     x: i32,
@@ -181,11 +182,20 @@ struct ClickEvent {
     button: ClickButton,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum ClickButton {
     Left,
     Right,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TimelineSegment {
+    start: f64,
+    end: f64,
+    x: i32,
+    y: i32,
+    scale: f64,
 }
 
 struct ClickTracker {
@@ -478,6 +488,11 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
         return Err(error);
     }
 
+    if let Err(error) = write_timeline_json(&output_path) {
+        state.clear_finalizing()?;
+        return Err(error);
+    }
+
     let completed = CompletedRecording {
         output_path: output_path.clone(),
         monitor: monitor.clone(),
@@ -710,6 +725,50 @@ fn write_clicks_json(output_path: &Path, clicks: &[ClickEvent]) -> RecorderResul
     })
 }
 
+fn write_timeline_json(output_path: &Path) -> RecorderResult<()> {
+    let clicks_path = clicks_output_path(output_path)?;
+    let clicks_json = fs::read(&clicks_path).map_err(|error| {
+        RecorderError::new(
+            "read_clicks_failed",
+            format!("Could not read clicks.json for timeline generation: {error}"),
+            true,
+        )
+    })?;
+    let clicks: Vec<ClickEvent> = serde_json::from_slice(&clicks_json).map_err(|error| {
+        RecorderError::new(
+            "parse_clicks_failed",
+            format!("Could not parse clicks.json for timeline generation: {error}"),
+            true,
+        )
+    })?;
+    let timeline: Vec<TimelineSegment> = clicks
+        .into_iter()
+        .filter(|click| click.button == ClickButton::Left)
+        .map(|click| TimelineSegment {
+            start: click.timestamp,
+            end: click.timestamp + 2.0,
+            x: click.x,
+            y: click.y,
+            scale: 2.0,
+        })
+        .collect();
+    let timeline_json = serde_json::to_vec_pretty(&timeline).map_err(|error| {
+        RecorderError::new(
+            "serialize_timeline_failed",
+            format!("Could not serialize timeline segments: {error}"),
+            true,
+        )
+    })?;
+
+    fs::write(timeline_output_path(output_path)?, timeline_json).map_err(|error| {
+        RecorderError::new(
+            "write_timeline_failed",
+            format!("Could not write timeline.json: {error}"),
+            true,
+        )
+    })
+}
+
 fn clicks_output_path(output_path: &Path) -> RecorderResult<PathBuf> {
     let output_dir = output_path.parent().ok_or_else(|| {
         RecorderError::new(
@@ -720,6 +779,18 @@ fn clicks_output_path(output_path: &Path) -> RecorderResult<PathBuf> {
     })?;
 
     Ok(output_dir.join(CLICKS_FILE_NAME))
+}
+
+fn timeline_output_path(output_path: &Path) -> RecorderResult<PathBuf> {
+    let output_dir = output_path.parent().ok_or_else(|| {
+        RecorderError::new(
+            "invalid_timeline_output_path",
+            "Could not resolve a parent directory for timeline.json",
+            true,
+        )
+    })?;
+
+    Ok(output_dir.join(TIMELINE_FILE_NAME))
 }
 
 fn ffmpeg_primary_monitor_args(
