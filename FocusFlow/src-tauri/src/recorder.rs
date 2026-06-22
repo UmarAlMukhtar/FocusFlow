@@ -39,8 +39,9 @@ use windows::Win32::{
     UI::{
         Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON},
         WindowsAndMessaging::{
-            EnumWindows, GetCursorPos, GetShellWindow, GetWindow, GetWindowRect, GetWindowTextW,
-            IsIconic, IsWindow, IsWindowVisible, GW_OWNER,
+            EnumWindows, GetAncestor, GetCursorPos, GetShellWindow, GetWindow, GetWindowRect,
+            GetWindowTextW, IsIconic, IsWindow, IsWindowVisible, WindowFromPoint, GA_ROOT,
+            GW_OWNER,
         },
     },
 };
@@ -63,6 +64,11 @@ const PRE_CLICK_ZOOM_SECONDS: f64 = 0.3;
 const IDLE_BEFORE_ZOOM_OUT_SECONDS: f64 = 1.0;
 const ZOOM_OUT_SECONDS: f64 = 0.35;
 const MIN_TIMELINE_SEGMENT_SECONDS: f64 = 0.001;
+/// Two adjacent camera sequences are merged into one continuous sequence when
+/// the gap between them is shorter than this value.  This avoids a zoom-out
+/// followed immediately by a zoom-in when the user clicks or drags in quick
+/// succession.
+const TIMELINE_MERGE_WINDOW_SECONDS: f64 = 0.3;
 const TARGET_FPS: u32 = 30;
 const STOP_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_CAPTURED_LOG_BYTES: usize = 96 * 1024;
@@ -530,8 +536,25 @@ struct PendingDrag {
     is_drag: bool,
 }
 
+/// Determines which clicks the tracker records and how coordinates are stored.
+///
+/// - `All`: every click is accepted; raw screen coordinates are stored and
+///   converted to capture-relative after the recording stops (Screen / Region).
+/// - `Window`: only clicks whose root HWND matches the recorded window are
+///   accepted; coordinates are converted to window-relative at click time so
+///   the after-the-fact normalization step can be skipped.
+#[derive(Clone, Copy)]
+enum ClickFilter {
+    All,
+    Window {
+        hwnd: usize,
+        encoder_width: u32,
+        encoder_height: u32,
+    },
+}
+
 impl ClickTracker {
-    fn start(started_at: Instant) -> ClickTracker {
+    fn start(started_at: Instant, filter: ClickFilter) -> ClickTracker {
         let stop_requested = Arc::new(AtomicBool::new(false));
         let clicks = Arc::new(Mutex::new(Vec::new()));
         let drags = Arc::new(Mutex::new(Vec::new()));
@@ -550,7 +573,7 @@ impl ClickTracker {
                 let right_is_down = right_mouse_button_down();
 
                 if left_is_down && !left_was_down {
-                    left_drag = push_click(&worker_clicks, started_at, ClickButton::Left)
+                    left_drag = push_click(&worker_clicks, started_at, ClickButton::Left, &filter)
                         .map(|point| PendingDrag::new(ClickButton::Left, point));
                 } else if left_is_down {
                     update_pending_drag(&mut left_drag, started_at);
@@ -559,7 +582,7 @@ impl ClickTracker {
                 }
 
                 if right_is_down && !right_was_down {
-                    right_drag = push_click(&worker_clicks, started_at, ClickButton::Right)
+                    right_drag = push_click(&worker_clicks, started_at, ClickButton::Right, &filter)
                         .map(|point| PendingDrag::new(ClickButton::Right, point));
                 } else if right_is_down {
                     update_pending_drag(&mut right_drag, started_at);
@@ -781,7 +804,8 @@ async fn start_recording_with_source(
     let pid = capture.pid();
 
     let started_at = Instant::now();
-    let click_tracker = ClickTracker::start(started_at);
+    let click_filter = click_filter_for_source(&capture_plan);
+    let click_tracker = ClickTracker::start(started_at, click_filter);
 
     let active = ActiveRecording {
         capture,
@@ -975,7 +999,13 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
             return Err(error);
         }
     };
-    let interactions = normalize_interactions_to_capture(interactions, capture_bounds);
+    // For Window recordings, coordinates are already window-relative and bounds-checked
+    // at click time, so the after-the-fact normalization must be skipped to avoid
+    // double-subtracting the window origin.
+    let interactions = match &source {
+        RecordingSource::Window { .. } => interactions,
+        _ => normalize_interactions_to_capture(interactions, capture_bounds),
+    };
 
     let metadata = match fs::metadata(&output_path) {
         Ok(metadata) => metadata,
@@ -1353,19 +1383,32 @@ fn push_click(
     clicks: &Arc<Mutex<Vec<ClickEvent>>>,
     started_at: Instant,
     button: ClickButton,
+    filter: &ClickFilter,
 ) -> Option<DragPoint> {
-    let point = current_drag_point(started_at)?;
+    // Sample raw screen coordinates first.
+    let (screen_x, screen_y) = cursor_position()?;
+    let timestamp = elapsed_seconds(started_at);
+
+    // Apply the filter: returns the coordinates to store (possibly converted to
+    // window-relative) or None if the click should be discarded.
+    let (stored_x, stored_y) = apply_click_filter(filter, screen_x, screen_y)?;
 
     if let Ok(mut clicks) = clicks.lock() {
         clicks.push(ClickEvent {
-            timestamp: point.timestamp,
-            x: point.x,
-            y: point.y,
+            timestamp,
+            x: stored_x,
+            y: stored_y,
             button,
         });
     }
 
-    Some(point)
+    // The DragPoint must carry the same stored coordinates so that drag tracking
+    // is consistent with click tracking.
+    Some(DragPoint {
+        timestamp,
+        x: stored_x,
+        y: stored_y,
+    })
 }
 
 fn update_pending_drag(drag: &mut Option<PendingDrag>, started_at: Instant) {
@@ -1455,6 +1498,102 @@ fn cursor_position() -> Option<(i32, i32)> {
 #[cfg(not(target_os = "windows"))]
 fn cursor_position() -> Option<(i32, i32)> {
     None
+}
+
+/// Returns the root (top-level) HWND currently under the cursor as a raw
+/// pointer value, or `None` if the cursor position cannot be read.
+#[cfg(target_os = "windows")]
+fn hwnd_under_cursor() -> Option<usize> {
+    let mut point = POINT { x: 0, y: 0 };
+    unsafe {
+        GetCursorPos(&mut point).ok()?;
+        let hwnd = WindowFromPoint(point);
+        if hwnd.0.is_null() {
+            return None;
+        }
+        // Walk up to the root (owner-less ancestor) so that clicking a child
+        // control inside the target window is still accepted.
+        let root = GetAncestor(hwnd, GA_ROOT);
+        if root.0.is_null() {
+            return None;
+        }
+        Some(root.0 as usize)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hwnd_under_cursor() -> Option<usize> {
+    None
+}
+
+/// Returns the current top-left screen position `(left, top)` of the window
+/// identified by `hwnd`, or `None` if the rect cannot be read.
+#[cfg(target_os = "windows")]
+fn window_rect_for_hwnd(hwnd: usize) -> Option<(i32, i32)> {
+    let mut rect = RECT::default();
+    unsafe {
+        GetWindowRect(HWND(hwnd as *mut _), &mut rect).ok()?;
+    }
+    Some((rect.left, rect.top))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn window_rect_for_hwnd(_hwnd: usize) -> Option<(i32, i32)> {
+    None
+}
+
+/// Evaluates `filter` against the click at `(screen_x, screen_y)` and returns
+/// the coordinates to store, or `None` if the click should be discarded.
+///
+/// - [`ClickFilter::All`]: returns `(screen_x, screen_y)` unchanged. The
+///   caller is responsible for converting to capture-relative coordinates after
+///   the recording stops (via `normalize_interactions_to_capture`).
+/// - [`ClickFilter::Window`]: checks that the root HWND under the cursor
+///   matches the recorded window, then converts screen coordinates to
+///   window-relative using the window's *current* position (live `GetWindowRect`
+///   call). Out-of-bounds clicks (e.g. after a window resize) are discarded.
+fn apply_click_filter(
+    filter: &ClickFilter,
+    screen_x: i32,
+    screen_y: i32,
+) -> Option<(i32, i32)> {
+    match filter {
+        ClickFilter::All => Some((screen_x, screen_y)),
+        ClickFilter::Window {
+            hwnd: target_hwnd,
+            encoder_width,
+            encoder_height,
+        } => {
+            let root_hwnd = hwnd_under_cursor()?;
+            if root_hwnd != *target_hwnd {
+                println!(
+                    "[FocusFlow click] Ignored  click x={screen_x} y={screen_y} hwnd=0x{root_hwnd:X}"
+                );
+                return None;
+            }
+            // Convert screen -> window-relative using the *live* window origin
+            // so that movement during recording is handled correctly.
+            let (win_left, win_top) = window_rect_for_hwnd(*target_hwnd)?;
+            let rel_x = screen_x - win_left;
+            let rel_y = screen_y - win_top;
+            // Discard clicks that fall outside the encoder dimensions (can
+            // happen if the window is resized after recording starts).
+            if rel_x < 0
+                || rel_y < 0
+                || rel_x >= *encoder_width as i32
+                || rel_y >= *encoder_height as i32
+            {
+                println!(
+                    "[FocusFlow click] Ignored  click x={screen_x} y={screen_y} hwnd=0x{root_hwnd:X} (out of encoder bounds)"
+                );
+                return None;
+            }
+            println!(
+                "[FocusFlow click] Accepted click x={screen_x} y={screen_y} hwnd=0x{root_hwnd:X} -> rel=({rel_x},{rel_y})"
+            );
+            Some((rel_x, rel_y))
+        }
+    }
 }
 
 fn normalize_interactions_to_capture(
@@ -1624,15 +1763,143 @@ fn build_timeline_segments(
     clicks: Vec<ClickEvent>,
     drags: Vec<DragInteraction>,
 ) -> Vec<TimelineSegment> {
+    println!(
+        "[FocusFlow timeline] raw click count: {}",
+        clicks.len()
+    );
+    println!(
+        "[FocusFlow timeline] raw drag count: {}",
+        drags.len()
+    );
+
     let mut timeline = build_click_timeline_segments(clicks);
     timeline.extend(build_drag_timeline_segments(drags));
-    timeline.sort_by(|left, right| {
-        left.start
-            .partial_cmp(&right.start)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+
+    println!(
+        "[FocusFlow timeline] segment count before cleanup: {}",
+        timeline.len()
+    );
+
+    let timeline = cleanup_timeline_segments(timeline);
+
+    println!(
+        "[FocusFlow timeline] segment count after cleanup: {}",
+        timeline.len()
+    );
 
     timeline
+}
+
+/// Converts a raw, potentially overlapping list of [`TimelineSegment`]s
+/// (produced by independently merging click and drag segments) into a clean,
+/// non-overlapping, sorted list suitable for the export pipeline.
+///
+/// Steps (all in a single pass after sorting):
+///
+/// 1. **Sort** by `start` ascending.
+/// 2. **Deduplicate**: when two segments share the same `start` time, keep
+///    the one with the later `end` (wider coverage).
+/// 3. **Merge nearby sequences**: if the gap between the end of the current
+///    accumulator segment and the start of the next segment is within
+///    [`TIMELINE_MERGE_WINDOW_SECONDS`], extend the accumulator instead of
+///    starting a new zoom-out/zoom-in cycle.  The new segment is appended to
+///    the accumulator's chain so the camera pans smoothly.
+/// 4. **Clip overlaps**: if a following segment still starts before the
+///    previous segment ends, trim the previous segment's `end` to the
+///    following segment's `start`.
+/// 5. **Drop invalid segments**: remove any segment where `end <= start`.
+fn cleanup_timeline_segments(mut raw: Vec<TimelineSegment>) -> Vec<TimelineSegment> {
+    if raw.is_empty() {
+        return raw;
+    }
+
+    // Step 1 — sort by start time, break ties by preferring later end (wider).
+    raw.sort_by(|a, b| {
+        a.start
+            .partial_cmp(&b.start)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.end
+                    .partial_cmp(&a.end)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+
+    // Step 2 — deduplicate same-start segments (keep the one with the later end).
+    raw.dedup_by(|later, earlier| {
+        if (later.start - earlier.start).abs() <= MIN_TIMELINE_SEGMENT_SECONDS {
+            // `dedup_by` removes `later` when returning true.  We want to keep
+            // the one with the later `end`, so copy its fields into `earlier`
+            // (which survives) if `later` is wider.
+            if later.end > earlier.end {
+                earlier.end = later.end;
+                earlier.x = later.x;
+                earlier.y = later.y;
+            }
+            true
+        } else {
+            false
+        }
+    });
+
+    // Steps 3 & 4 — single forward pass: merge nearby sequences, clip overlaps.
+    let mut out: Vec<TimelineSegment> = Vec::with_capacity(raw.len());
+
+    for seg in raw {
+        if let Some(prev) = out.last_mut() {
+            let gap = seg.start - prev.end;
+
+            if gap <= TIMELINE_MERGE_WINDOW_SECONDS {
+                // The two sequences are close enough to merge: extend `prev`
+                // to cover `seg` without zooming out in between.  We update
+                // the camera target to `seg`'s position and widen the window.
+                // (The export pipeline's `timeline_sequences` groups contiguous
+                // segments into one sequence, so no artificial boundary is
+                // needed here.)
+                if seg.end > prev.end {
+                    // Push a new segment starting where prev ends (or at
+                    // seg.start if that is later) so the export pipeline sees
+                    // a smooth pan rather than a jump.
+                    let pan_start = prev.end.max(seg.start);
+                    if pan_start < seg.end - MIN_TIMELINE_SEGMENT_SECONDS {
+                        out.push(TimelineSegment {
+                            start: pan_start,
+                            end: seg.end,
+                            x: seg.x,
+                            y: seg.y,
+                            scale: seg.scale,
+                        });
+                    } else {
+                        // The window is too narrow to add a segment; just
+                        // extend the previous one.
+                        prev.end = seg.end;
+                        prev.x = seg.x;
+                        prev.y = seg.y;
+                    }
+                }
+                // If seg is entirely contained within prev, discard it.
+                continue;
+            }
+
+            // Gap is wide enough for a separate sequence.  Before appending,
+            // clip any leftover overlap (shouldn't happen after dedup but
+            // defends against floating-point edge cases).
+            if seg.start < prev.end {
+                prev.end = seg.start;
+            }
+        }
+
+        // Only push segments that still have positive duration.
+        if seg.end > seg.start + MIN_TIMELINE_SEGMENT_SECONDS {
+            out.push(seg);
+        }
+    }
+
+    // Step 5 — final pass: drop any zero-width or inverted segments that
+    // slipped through (defensive).
+    out.retain(|seg| seg.end > seg.start + MIN_TIMELINE_SEGMENT_SECONDS);
+
+    out
 }
 
 fn build_click_timeline_segments(mut clicks: Vec<ClickEvent>) -> Vec<TimelineSegment> {
@@ -1802,6 +2069,27 @@ fn session_output_dir(output_path: &Path) -> RecorderResult<&Path> {
             true,
         )
     })
+}
+
+/// Builds the [`ClickFilter`] appropriate for the given capture plan.
+///
+/// Screen and Region recordings use [`ClickFilter::All`] so that the existing
+/// post-recording normalization converts screen coordinates to capture-relative.
+/// Window recordings use [`ClickFilter::Window`] so that only clicks inside the
+/// target window are accepted and coordinates are converted at click time.
+fn click_filter_for_source(plan: &CapturePlan) -> ClickFilter {
+    if let RecordingSource::Window { ref hwnd, .. } = plan.source {
+        if let Ok(h) = parse_window_handle(hwnd) {
+            if let Some(ref wcp) = plan.window_capture {
+                return ClickFilter::Window {
+                    hwnd: h.0 as usize,
+                    encoder_width: wcp.width,
+                    encoder_height: wcp.height,
+                };
+            }
+        }
+    }
+    ClickFilter::All
 }
 
 fn capture_plan_for_source(

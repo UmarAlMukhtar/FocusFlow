@@ -30,10 +30,13 @@ const ZOOM_IN_MS: u64 = 180;
 const ZOOM_OUT_MS: u64 = 220;
 const ZOOM_HOLD_MS: u64 = 150;
 const ZOOM_SCALE: f64 = 2.3;
-const PAN_TRANSITION_MS: u64 = 180;
+const PAN_TRANSITION_MS: u64 = 220;
+/// Brief hold added after the camera reaches a pan target before the next
+/// movement starts.  Prevents the camera from feeling like it is constantly
+/// rubber-banding between targets.
+const CAMERA_SETTLE_MS: u64 = 120;
 const EXPRESSION_EPSILON: f64 = 0.000_001;
 const MIN_CAMERA_INTERVAL_SECONDS: f64 = 0.01;
-const ZOOMPAN_FRAMES_PER_INPUT: u32 = 2;
 
 pub type ExportCommandResult<T> = Result<T, ExportError>;
 
@@ -77,6 +80,8 @@ struct ExportConfig {
     zoom_out_ms: u64,
     zoom_hold_ms: u64,
     pan_transition_ms: u64,
+    /// Hold duration added after each pan completes before the next movement.
+    camera_settle_ms: u64,
     crf: u8,
     fps: u32,
 }
@@ -123,6 +128,7 @@ impl ExportConfig {
                 settings.pan_transition_ms,
                 defaults.pan_transition_ms,
             ),
+            camera_settle_ms: defaults.camera_settle_ms,
             ..ExportPreset::config(settings.preset.unwrap_or_default())
         }
     }
@@ -142,6 +148,11 @@ impl ExportConfig {
     fn pan_transition_seconds(self) -> f64 {
         milliseconds_to_seconds(self.pan_transition_ms)
     }
+
+    /// Brief hold after a pan lands; prevents immediate chained movement.
+    fn camera_settle_seconds(self) -> f64 {
+        milliseconds_to_seconds(self.camera_settle_ms)
+    }
 }
 
 impl Default for ExportConfig {
@@ -152,6 +163,7 @@ impl Default for ExportConfig {
             zoom_out_ms: ZOOM_OUT_MS,
             zoom_hold_ms: ZOOM_HOLD_MS,
             pan_transition_ms: PAN_TRANSITION_MS,
+            camera_settle_ms: CAMERA_SETTLE_MS,
             crf: DEFAULT_CRF,
             fps: DEFAULT_TARGET_FPS,
         }
@@ -273,6 +285,17 @@ fn export_edited_mp4_blocking(
     let clicks = read_clicks(&paths.clicks_path)?;
     let video_info = probe_video_info(&app, &paths.input_path)?;
 
+    // Diagnostics: input
+    let input_size_kb = fs::metadata(&paths.input_path)
+        .map(|m| m.len() / 1024)
+        .unwrap_or(0);
+    println!(
+        "[FocusFlow export] input duration: {:.3}s  size: {} KB  timeline segments: {}",
+        video_info.duration,
+        input_size_kb,
+        timeline.len()
+    );
+
     if paths.temp_output_path.exists() {
         remove_file(&paths.temp_output_path)?;
     }
@@ -283,7 +306,13 @@ fn export_edited_mp4_blocking(
         run_ffmpeg_copy(&app, &paths, video_info.duration, config)?;
     } else {
         let filter = build_export_filter(&timeline, &clicks, video_info, config);
+        let filter_bytes = filter.len() as u64;
         write_filter_script(&paths.filter_script_path, &filter)?;
+        println!(
+            "[FocusFlow export] filter script size: {} bytes  expected output duration: ≈{:.3}s",
+            filter_bytes,
+            video_info.duration
+        );
         let export_result = run_ffmpeg_zoom_export(&app, &paths, video_info.duration, config);
         if let Err(error) = remove_filter_script(&paths) {
             eprintln!("{error}");
@@ -295,11 +324,28 @@ fn export_edited_mp4_blocking(
     mark_session_exported(&paths)?;
     emit_export_progress(&app, 100.0);
 
+    // Diagnostics: output
+    let output_size_kb = fs::metadata(&paths.output_path)
+        .map(|m| m.len() / 1024)
+        .unwrap_or(0);
+    println!(
+        "[FocusFlow export] output size: {} KB  path: {}",
+        output_size_kb,
+        paths.output_path.display()
+    );
+
+    export_edited_mp4_ok_result(&paths, timeline.len())
+}
+
+fn export_edited_mp4_ok_result(
+    paths: &ExportPaths,
+    timeline_len: usize,
+) -> ExportCommandResult<ExportStatus> {
     Ok(ExportStatus {
         input_path: path_to_string(&paths.input_path)?,
         timeline_path: path_to_string(&paths.timeline_path)?,
         output_path: path_to_string(&paths.output_path)?,
-        segment_count: timeline.len(),
+        segment_count: timeline_len,
     })
 }
 
@@ -869,7 +915,16 @@ fn build_export_filter(
     }
 
     let keyframes = build_camera_keyframes(timeline, info, config);
+    println!(
+        "[FocusFlow export] camera keyframe count: {}",
+        keyframes.len()
+    );
+
     let intervals = camera_intervals(&keyframes);
+    println!(
+        "[FocusFlow export] camera interval count: {}",
+        intervals.len()
+    );
 
     if intervals.is_empty() {
         let click_filters = click_indicator_filters_for_interval(clicks, 0.0, info.duration);
@@ -880,6 +935,21 @@ fn build_export_filter(
             format!("[0:v]{click_filters},setsar=1[v]")
         };
     }
+
+    // Count intervals that involve camera movement (zoom or position change)
+    // for diagnostics.
+    let moving_intervals = intervals
+        .iter()
+        .filter(|iv| {
+            (iv.from.zoom - iv.to.zoom).abs() > EXPRESSION_EPSILON
+                || (iv.from.x - iv.to.x).abs() > EXPRESSION_EPSILON
+                || (iv.from.y - iv.to.y).abs() > EXPRESSION_EPSILON
+        })
+        .count();
+    println!(
+        "[FocusFlow export] smoothing intervals (moving): {moving_intervals} / {}",
+        intervals.len()
+    );
 
     build_interval_filter(&intervals, clicks, info, config)
 }
@@ -948,17 +1018,42 @@ fn zoompan_interval_filter(
     let x = interpolate_expression(interval.from.x, interval.to.x, duration);
     let y = interpolate_expression(interval.from.y, interval.to.y, duration);
 
-    format!(
-        "zoompan=z='{zoom}':x='clip(({x})-ow/(2*({zoom})),0,iw-ow/({zoom}))':y='clip(({y})-oh/(2*({zoom})),0,ih-oh/({zoom}))':d={duration_frames}:s={width}x{height}:fps={fps},setsar=1[{output_label}]",
+    // IMPORTANT: d must always be 1 for video input.
+    //
+    // FFmpeg zoompan with a video source generates `d` output frames *per
+    // input frame*, not `d` frames in total.  Setting d=N (where N is the
+    // segment frame count) therefore multiplies the output length by N,
+    // producing a file that is N× too long and too large.
+    //
+    // With d=1 each input frame produces exactly 1 output frame.  The
+    // easing curve in the z/x/y expressions uses `out_time` (the output
+    // presentation timestamp in seconds), which advances frame-by-frame at
+    // the natural rate, so the smooth cosine interpolation works correctly.
+    // Duration is controlled entirely by trim=start=...:end=... before
+    // this filter in the chain.
+    let filter = format!(
+        "zoompan=z='{zoom}':x='clip(({x})-ow/(2*({zoom})),0,iw-ow/({zoom}))':y='clip(({y})-oh/(2*({zoom})),0,ih-oh/({zoom}))':d=1:s={width}x{height}:fps={fps},setsar=1[{output_label}]",
         zoom = zoom,
         x = x,
         y = y,
-        duration_frames = ZOOMPAN_FRAMES_PER_INPUT,
         width = info.width,
         height = info.height,
         fps = config.fps,
         output_label = output_label
-    )
+    );
+
+    // Safety check: confirm no d value other than 1 was generated.
+    // A d>1 in a video segment filter is always a bug — log a warning so
+    // it shows up immediately in the console.
+    if !filter.contains(":d=1:") {
+        eprintln!(
+            "[FocusFlow export] WARNING: zoompan filter for interval [{:.3}, {:.3}] \
+             does not contain d=1 — frame multiplication may occur!",
+            interval.start, interval.end
+        );
+    }
+
+    filter
 }
 
 fn click_indicator_filters_for_interval(
@@ -1072,22 +1167,42 @@ fn push_sequence_keyframes(
             .unwrap_or(end)
             .max(transition_start)
             .min(end);
+
+        // Guarantee the pan lasts at least pan_transition_seconds so very
+        // short segment gaps can't collapse to zero frames.
+        let available_for_pan = (next_boundary - transition_start).max(MIN_CAMERA_INTERVAL_SECONDS);
         let pan_duration = config
             .pan_transition_seconds()
-            .min((next_boundary - transition_start).max(MIN_CAMERA_INTERVAL_SECONDS))
-            .min((end - transition_start).max(MIN_CAMERA_INTERVAL_SECONDS));
+            .min(available_for_pan)
+            // Never shorter than the minimum camera interval regardless of
+            // how tightly-packed the targets are.
+            .max(MIN_CAMERA_INTERVAL_SECONDS);
         let pan_end = (transition_start + pan_duration).min(end);
 
+        // Keyframe where we leave the previous target position.
         push_camera_keyframe(
             keyframes,
             target_keyframe(transition_start, previous_target, scale),
             info.duration,
         );
+        // Keyframe where the pan arrives at the new target.
         push_camera_keyframe(
             keyframes,
             target_keyframe(pan_end, current_target, scale),
             info.duration,
         );
+
+        // Optional settle hold: keep the camera stationary at the new target
+        // for camera_settle_seconds before the next movement.  This removes
+        // the rubber-banding effect when targets are close together.
+        let settle_end = (pan_end + config.camera_settle_seconds()).min(end);
+        if settle_end > pan_end + EXPRESSION_EPSILON {
+            push_camera_keyframe(
+                keyframes,
+                target_keyframe(settle_end, current_target, scale),
+                info.duration,
+            );
+        }
     }
 
     if let Some(last_target) = sequence.targets.last() {
