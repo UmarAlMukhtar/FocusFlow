@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    ffi::OsStr,
+    ffi::{c_void, OsStr},
     fmt, fs,
     io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
@@ -15,21 +15,44 @@ use std::{
 };
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_shell::ShellExt;
+use windows_capture::{
+    capture::{
+        CaptureControl, CaptureControlError, Context, GraphicsCaptureApiError,
+        GraphicsCaptureApiHandler,
+    },
+    encoder::{
+        AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder,
+        VideoSettingsSubType,
+    },
+    frame::Frame,
+    graphics_capture_api::InternalCaptureControl,
+    settings::{
+        ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
+        MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
+    },
+    window::Window as WindowsCaptureWindow,
+};
 
 #[cfg(target_os = "windows")]
 use windows::Win32::{
-    Foundation::POINT,
+    Foundation::{HWND, LPARAM, POINT, RECT, TRUE},
     UI::{
         Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON},
-        WindowsAndMessaging::GetCursorPos,
+        WindowsAndMessaging::{
+            EnumWindows, GetCursorPos, GetShellWindow, GetWindow, GetWindowRect, GetWindowTextW,
+            IsIconic, IsWindow, IsWindowVisible, GW_OWNER,
+        },
     },
 };
 
 const CLICKS_FILE_NAME: &str = "clicks.json";
 const DRAGS_FILE_NAME: &str = "drags.json";
+const EDITED_FILE_NAME: &str = "edited.mp4";
 const FFMPEG_SIDECAR_NAME: &str = "ffmpeg";
+const METADATA_FILE_NAME: &str = "metadata.json";
 const OUTPUT_FILE_NAME: &str = "screen.mp4";
 const OUTPUT_RECORDINGS_DIR_NAME: &str = "Recordings";
+const SESSION_FILE_NAME: &str = "session.json";
 const TIMELINE_FILE_NAME: &str = "timeline.json";
 const CLICK_POLL_INTERVAL: Duration = Duration::from_millis(8);
 const DRAG_POINT_INTERVAL: Duration = Duration::from_millis(50);
@@ -75,6 +98,108 @@ pub struct MonitorInfo {
     pub width: u32,
     pub height: u32,
     pub scale_factor: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordableWindow {
+    pub id: String,
+    pub title: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum RecordingSource {
+    Screen,
+    Window {
+        hwnd: String,
+        title: String,
+    },
+    Region {
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
+}
+
+impl Default for RecordingSource {
+    fn default() -> RecordingSource {
+        RecordingSource::Screen
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CaptureBounds {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Clone)]
+struct CapturePlan {
+    source: RecordingSource,
+    monitor: MonitorInfo,
+    bounds: CaptureBounds,
+    backend: CaptureBackend,
+    ffmpeg_args: Vec<String>,
+    window_capture: Option<WindowCapturePlan>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CaptureBackend {
+    Ffmpeg,
+    WindowsCapture,
+}
+
+#[derive(Debug, Clone)]
+struct WindowCapturePlan {
+    hwnd: usize,
+    title: String,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionMetadata {
+    version: u32,
+    source: RecordingSource,
+    capture_bounds: CaptureBounds,
+    capture_backend: CaptureBackend,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionSummary {
+    #[serde(alias = "sessionId")]
+    pub session_id: String,
+    #[serde(alias = "createdAt")]
+    pub created_at: String,
+    #[serde(alias = "durationSeconds")]
+    pub duration_seconds: f64,
+    #[serde(alias = "recordingSource")]
+    pub recording_source: String,
+    pub exported: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentSession {
+    pub session_id: String,
+    pub created_at: String,
+    pub duration_seconds: f64,
+    pub recording_source: String,
+    pub exported: bool,
+    pub session_path: String,
+    pub edited_video_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -144,13 +269,174 @@ struct RecorderRuntime {
 }
 
 struct ActiveRecording {
-    pid: u32,
-    child: Child,
+    capture: ActiveCapture,
     click_tracker: ClickTracker,
     output_path: PathBuf,
     started_at: Instant,
     monitor: MonitorInfo,
+    capture_bounds: CaptureBounds,
+    source: RecordingSource,
     log: Arc<Mutex<ProcessLog>>,
+}
+
+enum ActiveCapture {
+    Ffmpeg {
+        child: Child,
+    },
+    WindowsCapture {
+        capture: CaptureControl<WindowsWindowCapture, RecorderError>,
+    },
+}
+
+impl ActiveCapture {
+    fn pid(&self) -> Option<u32> {
+        match self {
+            ActiveCapture::Ffmpeg { child } => Some(child.id()),
+            ActiveCapture::WindowsCapture { .. } => None,
+        }
+    }
+}
+
+struct WindowsCaptureFlags {
+    output_path: PathBuf,
+    hwnd: usize,
+    title: String,
+    width: u32,
+    height: u32,
+}
+
+struct WindowsWindowCapture {
+    encoder: Option<VideoEncoder>,
+    hwnd: usize,
+    title: String,
+    encoder_width: u32,
+    encoder_height: u32,
+    last_frame_size: Option<(u32, u32)>,
+    frame_count: u64,
+}
+
+impl WindowsWindowCapture {
+    fn finish_encoder(&mut self) -> RecorderResult<()> {
+        if let Some(encoder) = self.encoder.take() {
+            encoder.finish().map_err(|error| {
+                RecorderError::new(
+                    "windows_capture_finish_failed",
+                    format!("Could not finalize window recording: {error}"),
+                    true,
+                )
+            })?;
+        }
+
+        println!(
+            "[FocusFlow recorder] windows-capture frames encoded: {}",
+            self.frame_count
+        );
+
+        Ok(())
+    }
+
+    fn log_frame_size_change(&mut self, frame: &Frame) {
+        let frame_size = (frame.width(), frame.height());
+
+        if self.last_frame_size == Some(frame_size) {
+            return;
+        }
+
+        if let Some(previous_size) = self.last_frame_size {
+            println!(
+                "[FocusFlow recorder] Warning: window capture frame size changed from {}x{} to {}x{} for HWND 0x{:X} ({})",
+                previous_size.0,
+                previous_size.1,
+                frame_size.0,
+                frame_size.1,
+                self.hwnd,
+                self.title
+            );
+            println!(
+                "[FocusFlow recorder] Encoder remains locked to {}x{}; resize support requires segmented recording.",
+                self.encoder_width, self.encoder_height
+            );
+            // TODO: Restart capture into a new segment on resize and merge segments after stop.
+        } else {
+            println!(
+                "[FocusFlow recorder] First window capture frame size: {}x{}; encoder dimensions: {}x{}",
+                frame_size.0, frame_size.1, self.encoder_width, self.encoder_height
+            );
+        }
+
+        self.last_frame_size = Some(frame_size);
+    }
+}
+
+impl GraphicsCaptureApiHandler for WindowsWindowCapture {
+    type Flags = WindowsCaptureFlags;
+    type Error = RecorderError;
+
+    fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
+        println!(
+            "[FocusFlow recorder] Starting windows-capture encoder for HWND 0x{:X} ({}) at {}x{}",
+            ctx.flags.hwnd, ctx.flags.title, ctx.flags.width, ctx.flags.height
+        );
+
+        let video_settings = VideoSettingsBuilder::new(ctx.flags.width, ctx.flags.height)
+            .sub_type(VideoSettingsSubType::H264)
+            .frame_rate(TARGET_FPS)
+            .bitrate(12_000_000);
+
+        let encoder = VideoEncoder::new(
+            video_settings,
+            AudioSettingsBuilder::default().disabled(true),
+            ContainerSettingsBuilder::default(),
+            &ctx.flags.output_path,
+        )
+        .map_err(|error| {
+            RecorderError::new(
+                "windows_capture_encoder_failed",
+                format!("Could not initialize window recording encoder: {error}"),
+                true,
+            )
+        })?;
+
+        Ok(Self {
+            encoder: Some(encoder),
+            hwnd: ctx.flags.hwnd,
+            title: ctx.flags.title,
+            encoder_width: ctx.flags.width,
+            encoder_height: ctx.flags.height,
+            last_frame_size: None,
+            frame_count: 0,
+        })
+    }
+
+    fn on_frame_arrived(
+        &mut self,
+        frame: &mut Frame,
+        _capture_control: InternalCaptureControl,
+    ) -> Result<(), Self::Error> {
+        self.log_frame_size_change(frame);
+
+        if let Some(encoder) = self.encoder.as_mut() {
+            encoder.send_frame(frame).map_err(|error| {
+                RecorderError::new(
+                    "windows_capture_frame_failed",
+                    format!("Could not encode window recording frame: {error}"),
+                    true,
+                )
+            })?;
+            self.frame_count = self.frame_count.saturating_add(1);
+        }
+
+        Ok(())
+    }
+
+    fn on_closed(&mut self) -> Result<(), Self::Error> {
+        self.finish_encoder()?;
+        Err(RecorderError::new(
+            "window_capture_closed",
+            "Selected window closed during recording",
+            true,
+        ))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -342,8 +628,9 @@ impl ClickTracker {
 pub async fn start_recording(
     app: AppHandle,
     state: State<'_, RecorderState>,
+    source: Option<RecordingSource>,
 ) -> RecorderResult<RecordingStatus> {
-    start_primary_monitor_recording(&app, &state).await
+    start_recording_with_source(&app, &state, source.unwrap_or_default()).await
 }
 
 #[tauri::command]
@@ -359,9 +646,70 @@ pub fn recording_status(
     current_recording_status(&app, &state)
 }
 
-async fn start_primary_monitor_recording(
+#[tauri::command]
+pub fn list_recordable_windows() -> RecorderResult<Vec<RecordableWindow>> {
+    ensure_windows()?;
+    enumerate_recordable_windows()
+}
+
+#[tauri::command]
+pub fn list_recent_sessions(app: AppHandle) -> RecorderResult<Vec<RecentSession>> {
+    let recordings_dir = recordings_root_dir(&app)?;
+    let mut sessions = Vec::new();
+
+    for entry in fs::read_dir(&recordings_dir).map_err(|error| {
+        RecorderError::new(
+            "read_recordings_dir_failed",
+            format!("Could not read recordings directory: {error}"),
+            true,
+        )
+    })? {
+        let entry = entry.map_err(|error| {
+            RecorderError::new(
+                "read_recording_entry_failed",
+                format!("Could not read recording directory entry: {error}"),
+                true,
+            )
+        })?;
+        let file_type = entry.file_type().map_err(|error| {
+            RecorderError::new(
+                "read_recording_entry_type_failed",
+                format!("Could not read recording entry type: {error}"),
+                true,
+            )
+        })?;
+
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        if let Some(session) = recent_session_from_dir(&entry.path())? {
+            sessions.push(session);
+        }
+    }
+
+    sessions.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    Ok(sessions)
+}
+
+#[tauri::command]
+pub fn delete_recording_session(app: AppHandle, session_id: String) -> RecorderResult<()> {
+    let recordings_dir = recordings_root_dir(&app)?;
+    let session_dir = session_dir_from_id(&recordings_dir, &session_id)?;
+
+    fs::remove_dir_all(&session_dir).map_err(|error| {
+        RecorderError::new(
+            "delete_session_failed",
+            format!("Could not delete recording session: {error}"),
+            true,
+        )
+    })
+}
+
+async fn start_recording_with_source(
     app: &AppHandle,
     state: &RecorderState,
+    source: RecordingSource,
 ) -> RecorderResult<RecordingStatus> {
     ensure_windows()?;
 
@@ -400,46 +748,49 @@ async fn start_primary_monitor_recording(
         )
     })?;
 
-    let monitor = primary_monitor_info(app)?;
-    let args = ffmpeg_primary_monitor_args(&monitor, &output_path)?;
-    let mut command = ffmpeg_sidecar_command(app)?;
-    let ffmpeg_path = command.get_program().to_os_string();
-    log_recording_diagnostics(output_dir, &ffmpeg_path);
-    command
-        .args(args)
-        .current_dir(output_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(|error| {
-        RecorderError::new(
-            "ffmpeg_spawn_failed",
-            format!("Could not start system FFmpeg screen recorder: {error}"),
-            true,
-        )
-    })?;
-
-    let pid = child.id();
+    let capture_plan = capture_plan_for_source(app, source, &output_path)?;
+    write_session_metadata(
+        &output_path,
+        &capture_plan.source,
+        capture_plan.bounds,
+        capture_plan.backend,
+    )?;
+    write_session_json(&output_path, &capture_plan.source, 0.0, false)?;
+    let monitor = capture_plan.monitor.clone();
+    let capture_bounds = capture_plan.bounds;
     let log = Arc::new(Mutex::new(ProcessLog::default()));
+    let capture = match start_capture_backend(
+        app,
+        output_dir,
+        &output_path,
+        &capture_plan,
+        Arc::clone(&log),
+    ) {
+        Ok(capture) => capture,
+        Err(error) => {
+            if let Err(cleanup_error) = fs::remove_dir_all(output_dir) {
+                eprintln!(
+                    "Could not remove failed recording session directory {}: {cleanup_error}",
+                    output_dir.display()
+                );
+            }
 
-    if let Some(stdout) = child.stdout.take() {
-        spawn_output_reader(stdout, Arc::clone(&log), ProcessStream::Stdout);
-    }
-
-    if let Some(stderr) = child.stderr.take() {
-        spawn_output_reader(stderr, Arc::clone(&log), ProcessStream::Stderr);
-    }
+            return Err(error);
+        }
+    };
+    let pid = capture.pid();
 
     let started_at = Instant::now();
     let click_tracker = ClickTracker::start(started_at);
 
     let active = ActiveRecording {
-        pid,
-        child,
+        capture,
         click_tracker,
         output_path: output_path.clone(),
         started_at,
         monitor: monitor.clone(),
+        capture_bounds,
+        source: capture_plan.source.clone(),
         log,
     };
 
@@ -450,11 +801,124 @@ async fn start_primary_monitor_recording(
     Ok(RecordingStatus {
         phase: RecordingPhase::Recording,
         output_path: path_to_string(&output_path)?,
-        pid: Some(pid),
+        pid,
         monitor: Some(monitor),
         elapsed_ms: 0,
         file_size_bytes: None,
     })
+}
+
+fn start_capture_backend(
+    app: &AppHandle,
+    output_dir: &Path,
+    output_path: &Path,
+    capture_plan: &CapturePlan,
+    log: Arc<Mutex<ProcessLog>>,
+) -> RecorderResult<ActiveCapture> {
+    println!(
+        "[FocusFlow recorder] Capture backend: {:?}",
+        capture_plan.backend
+    );
+    println!(
+        "[FocusFlow recorder] Output path: {}",
+        output_path.display()
+    );
+
+    match capture_plan.backend {
+        CaptureBackend::Ffmpeg => {
+            start_ffmpeg_capture(app, output_dir, &capture_plan.ffmpeg_args, Arc::clone(&log))
+        }
+        CaptureBackend::WindowsCapture => {
+            let window_capture = capture_plan.window_capture.as_ref().ok_or_else(|| {
+                RecorderError::new(
+                    "window_capture_plan_missing",
+                    "Window capture plan was not prepared",
+                    true,
+                )
+            })?;
+
+            start_windows_capture(window_capture, output_path)
+        }
+    }
+}
+
+fn start_ffmpeg_capture(
+    app: &AppHandle,
+    output_dir: &Path,
+    args: &[String],
+    log: Arc<Mutex<ProcessLog>>,
+) -> RecorderResult<ActiveCapture> {
+    let mut command = ffmpeg_sidecar_command(app)?;
+    let ffmpeg_path = command.get_program().to_os_string();
+    log_recording_diagnostics(output_dir, &ffmpeg_path);
+    log_ffmpeg_command(&ffmpeg_path, args);
+    command
+        .args(args)
+        .current_dir(output_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|error| {
+        RecorderError::new(
+            "ffmpeg_spawn_failed",
+            format!("Could not start bundled FFmpeg recorder: {error}"),
+            true,
+        )
+    })?;
+
+    if let Some(stdout) = child.stdout.take() {
+        spawn_output_reader(stdout, Arc::clone(&log), ProcessStream::Stdout);
+    }
+
+    if let Some(stderr) = child.stderr.take() {
+        spawn_output_reader(stderr, Arc::clone(&log), ProcessStream::Stderr);
+    }
+
+    Ok(ActiveCapture::Ffmpeg { child })
+}
+
+fn start_windows_capture(
+    plan: &WindowCapturePlan,
+    output_path: &Path,
+) -> RecorderResult<ActiveCapture> {
+    println!("[FocusFlow recorder] Selected HWND: 0x{:X}", plan.hwnd);
+    println!("[FocusFlow recorder] Window title: {}", plan.title);
+
+    let window = WindowsCaptureWindow::from_raw_hwnd(plan.hwnd as *mut c_void);
+    if !window.is_valid() {
+        return Err(RecorderError::new(
+            "window_capture_unavailable",
+            "Selected window is not available to Windows Graphics Capture",
+            true,
+        ));
+    }
+
+    let settings = Settings::new(
+        window,
+        CursorCaptureSettings::Default,
+        DrawBorderSettings::Default,
+        SecondaryWindowSettings::Default,
+        MinimumUpdateIntervalSettings::Default,
+        DirtyRegionSettings::Default,
+        ColorFormat::Rgba8,
+        WindowsCaptureFlags {
+            output_path: output_path.to_path_buf(),
+            hwnd: plan.hwnd,
+            title: plan.title.clone(),
+            width: plan.width,
+            height: plan.height,
+        },
+    );
+
+    let capture = WindowsWindowCapture::start_free_threaded(settings).map_err(|error| {
+        RecorderError::new(
+            "window_capture_start_failed",
+            format!("Could not start window recording: {error}"),
+            true,
+        )
+    })?;
+
+    Ok(ActiveCapture::WindowsCapture { capture })
 }
 
 async fn stop_active_recording(state: &RecorderState) -> RecorderResult<RecordingStatus> {
@@ -483,46 +947,25 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
     };
 
     let ActiveRecording {
-        mut child,
+        capture,
         click_tracker,
         output_path,
         started_at,
         monitor,
+        capture_bounds,
+        source,
         log,
         ..
     } = active;
 
     click_tracker.request_stop();
 
-    let stop_signal_error = child
-        .stdin
-        .as_mut()
-        .ok_or_else(|| "FFmpeg stdin was not piped".to_string())
-        .and_then(|stdin| {
-            stdin
-                .write_all(b"q\n")
-                .and_then(|_| stdin.flush())
-                .map_err(|error| error.to_string())
-        })
-        .err();
-    let exit = wait_for_ffmpeg_exit(child).await;
+    let capture_stop = stop_capture_backend(capture, &log).await;
     let interactions = click_tracker.finish();
 
-    match exit {
-        Ok(process_exit) => {
-            if process_exit.code != Some(0) {
-                state.clear_finalizing()?;
-                return Err(ffmpeg_exit_error(
-                    process_exit,
-                    stop_signal_error,
-                    &read_log_text(&log),
-                ));
-            }
-        }
-        Err(wait_error) => {
-            state.clear_finalizing()?;
-            return Err(stop_timeout_error(wait_error, None, &read_log_text(&log)));
-        }
+    if let Err(error) = capture_stop {
+        state.clear_finalizing()?;
+        return Err(error);
     }
 
     let interactions = match interactions {
@@ -532,6 +975,7 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
             return Err(error);
         }
     };
+    let interactions = normalize_interactions_to_capture(interactions, capture_bounds);
 
     let metadata = match fs::metadata(&output_path) {
         Ok(metadata) => metadata,
@@ -539,7 +983,7 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
             state.clear_finalizing()?;
             return Err(RecorderError::new(
                 "recording_output_missing",
-                format!("FFmpeg exited successfully, but screen.mp4 was not readable: {error}"),
+                format!("Recording finished, but screen.mp4 was not readable: {error}"),
                 true,
             ));
         }
@@ -549,7 +993,7 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
         state.clear_finalizing()?;
         return Err(RecorderError::new(
             "recording_output_empty",
-            "FFmpeg exited successfully, but screen.mp4 is empty",
+            "Recording finished, but screen.mp4 is empty",
             true,
         ));
     }
@@ -565,6 +1009,16 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
     }
 
     if let Err(error) = write_timeline_json(&output_path) {
+        state.clear_finalizing()?;
+        return Err(error);
+    }
+
+    if let Err(error) = write_session_json(
+        &output_path,
+        &source,
+        elapsed_seconds_from_millis(elapsed_ms(started_at)),
+        false,
+    ) {
         state.clear_finalizing()?;
         return Err(error);
     }
@@ -593,6 +1047,89 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
     })
 }
 
+async fn stop_capture_backend(
+    capture: ActiveCapture,
+    log: &Arc<Mutex<ProcessLog>>,
+) -> RecorderResult<()> {
+    match capture {
+        ActiveCapture::Ffmpeg { child } => stop_ffmpeg_capture(child, log).await,
+        ActiveCapture::WindowsCapture { capture } => stop_windows_capture(capture).await,
+    }
+}
+
+async fn stop_ffmpeg_capture(mut child: Child, log: &Arc<Mutex<ProcessLog>>) -> RecorderResult<()> {
+    let stop_signal_error = child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| "FFmpeg stdin was not piped".to_string())
+        .and_then(|stdin| {
+            stdin
+                .write_all(b"q\n")
+                .and_then(|_| stdin.flush())
+                .map_err(|error| error.to_string())
+        })
+        .err();
+    let exit = wait_for_ffmpeg_exit(child).await;
+
+    match exit {
+        Ok(process_exit) if process_exit.code == Some(0) => Ok(()),
+        Ok(process_exit) => Err(ffmpeg_exit_error(
+            process_exit,
+            stop_signal_error,
+            &read_log_text(log),
+        )),
+        Err(wait_error) => Err(stop_timeout_error(wait_error, None, &read_log_text(log))),
+    }
+}
+
+async fn stop_windows_capture(
+    capture: CaptureControl<WindowsWindowCapture, RecorderError>,
+) -> RecorderResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let callback = capture.callback();
+        let stop_result = capture.stop().map_err(windows_capture_stop_error);
+        let finish_result = callback.lock().finish_encoder();
+
+        match (stop_result, finish_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(stop_error), Err(finish_error)) => Err(RecorderError::new(
+                stop_error.code,
+                format!(
+                    "{}; additionally failed to finalize window recording: {}",
+                    stop_error.message, finish_error.message
+                ),
+                true,
+            )),
+        }
+    })
+    .await
+    .map_err(|error| {
+        RecorderError::new(
+            "window_capture_wait_failed",
+            format!("Could not join window recording stop task: {error}"),
+            true,
+        )
+    })?
+}
+
+fn windows_capture_stop_error(error: CaptureControlError<RecorderError>) -> RecorderError {
+    match error {
+        CaptureControlError::StoppedHandlerError(error)
+        | CaptureControlError::GraphicsCaptureApiError(
+            GraphicsCaptureApiError::FrameHandlerError(error),
+        )
+        | CaptureControlError::GraphicsCaptureApiError(GraphicsCaptureApiError::NewHandlerError(
+            error,
+        )) => error,
+        other => RecorderError::new(
+            "window_capture_stop_failed",
+            format!("Could not stop window recording: {other}"),
+            true,
+        ),
+    }
+}
+
 fn current_recording_status(
     _app: &AppHandle,
     state: &RecorderState,
@@ -619,7 +1156,7 @@ fn current_recording_status(
         return Ok(RecordingStatus {
             phase: RecordingPhase::Recording,
             output_path: path_to_string(&active.output_path)?,
-            pid: Some(active.pid),
+            pid: active.capture.pid(),
             monitor: Some(active.monitor.clone()),
             elapsed_ms: elapsed_ms(active.started_at),
             file_size_bytes: fs::metadata(&active.output_path)
@@ -920,6 +1457,82 @@ fn cursor_position() -> Option<(i32, i32)> {
     None
 }
 
+fn normalize_interactions_to_capture(
+    interactions: InteractionEvents,
+    bounds: CaptureBounds,
+) -> InteractionEvents {
+    InteractionEvents {
+        clicks: interactions
+            .clicks
+            .into_iter()
+            .filter_map(|click| normalize_click_to_capture(click, bounds))
+            .collect(),
+        drags: interactions
+            .drags
+            .into_iter()
+            .filter_map(|drag| normalize_drag_to_capture(drag, bounds))
+            .collect(),
+    }
+}
+
+fn normalize_click_to_capture(mut click: ClickEvent, bounds: CaptureBounds) -> Option<ClickEvent> {
+    let (x, y) = normalize_point_to_capture(click.x, click.y, bounds)?;
+    click.x = x;
+    click.y = y;
+    Some(click)
+}
+
+fn normalize_drag_to_capture(
+    mut drag: DragInteraction,
+    bounds: CaptureBounds,
+) -> Option<DragInteraction> {
+    let points = drag
+        .points
+        .into_iter()
+        .filter_map(|point| normalize_drag_point_to_capture(point, bounds))
+        .collect::<Vec<_>>();
+
+    if points.len() < 2 {
+        return None;
+    }
+
+    drag.start = points
+        .first()
+        .map(|point| point.timestamp)
+        .unwrap_or(drag.start);
+    drag.end = points
+        .last()
+        .map(|point| point.timestamp)
+        .unwrap_or(drag.end);
+    drag.points = points;
+    Some(drag)
+}
+
+fn normalize_drag_point_to_capture(
+    mut point: DragPoint,
+    bounds: CaptureBounds,
+) -> Option<DragPoint> {
+    let (x, y) = normalize_point_to_capture(point.x, point.y, bounds)?;
+    point.x = x;
+    point.y = y;
+    Some(point)
+}
+
+fn normalize_point_to_capture(x: i32, y: i32, bounds: CaptureBounds) -> Option<(i32, i32)> {
+    let relative_x = i64::from(x) - i64::from(bounds.x);
+    let relative_y = i64::from(y) - i64::from(bounds.y);
+
+    if relative_x < 0
+        || relative_y < 0
+        || relative_x >= i64::from(bounds.width)
+        || relative_y >= i64::from(bounds.height)
+    {
+        return None;
+    }
+
+    Some((relative_x as i32, relative_y as i32))
+}
+
 fn write_clicks_json(output_path: &Path, clicks: &[ClickEvent]) -> RecorderResult<()> {
     let clicks_path = clicks_output_path(output_path)?;
     let json = serde_json::to_vec_pretty(clicks).map_err(|error| {
@@ -1173,6 +1786,14 @@ fn timeline_output_path(output_path: &Path) -> RecorderResult<PathBuf> {
     Ok(session_output_dir(output_path)?.join(TIMELINE_FILE_NAME))
 }
 
+fn metadata_output_path(output_path: &Path) -> RecorderResult<PathBuf> {
+    Ok(session_output_dir(output_path)?.join(METADATA_FILE_NAME))
+}
+
+fn session_json_output_path(output_path: &Path) -> RecorderResult<PathBuf> {
+    Ok(session_output_dir(output_path)?.join(SESSION_FILE_NAME))
+}
+
 fn session_output_dir(output_path: &Path) -> RecorderResult<&Path> {
     output_path.parent().ok_or_else(|| {
         RecorderError::new(
@@ -1183,12 +1804,189 @@ fn session_output_dir(output_path: &Path) -> RecorderResult<&Path> {
     })
 }
 
-fn ffmpeg_primary_monitor_args(
-    monitor: &MonitorInfo,
+fn capture_plan_for_source(
+    app: &AppHandle,
+    source: RecordingSource,
+    output_path: &Path,
+) -> RecorderResult<CapturePlan> {
+    match source {
+        RecordingSource::Screen => {
+            let monitor = primary_monitor_info(app)?;
+            let bounds = capture_bounds_from_monitor(&monitor);
+            let args = ffmpeg_desktop_region_args(bounds, output_path)?;
+
+            Ok(CapturePlan {
+                source: RecordingSource::Screen,
+                monitor,
+                bounds,
+                backend: CaptureBackend::Ffmpeg,
+                ffmpeg_args: args,
+                window_capture: None,
+            })
+        }
+        RecordingSource::Region {
+            x,
+            y,
+            width,
+            height,
+        } => {
+            let bounds = validated_capture_bounds(x, y, width, height)?;
+            let monitor = MonitorInfo {
+                name: Some("Selected region".to_string()),
+                x: bounds.x,
+                y: bounds.y,
+                width: bounds.width,
+                height: bounds.height,
+                scale_factor: 1.0,
+            };
+            let args = ffmpeg_desktop_region_args(bounds, output_path)?;
+
+            Ok(CapturePlan {
+                source: RecordingSource::Region {
+                    x: bounds.x,
+                    y: bounds.y,
+                    width: bounds.width,
+                    height: bounds.height,
+                },
+                monitor,
+                bounds,
+                backend: CaptureBackend::Ffmpeg,
+                ffmpeg_args: args,
+                window_capture: None,
+            })
+        }
+        RecordingSource::Window { hwnd, title } => {
+            let hwnd = parse_window_handle(&hwnd)?;
+            let (window_capture, original_bounds) = window_capture_plan_from_hwnd(hwnd, &title)?;
+            let source_monitor = monitor_info_for_capture_bounds(app, original_bounds)?;
+            let bounds = validated_capture_bounds(
+                original_bounds.x,
+                original_bounds.y,
+                window_capture.width,
+                window_capture.height,
+            )?;
+            log_window_capture_bounds("Original window bounds", original_bounds);
+            println!(
+                "[FocusFlow recorder] Window capture backend uses Windows Graphics Capture; FFmpeg gdigrab HWND capture is bypassed."
+            );
+            let monitor = MonitorInfo {
+                name: Some(window_capture.title.clone()),
+                x: bounds.x,
+                y: bounds.y,
+                width: bounds.width,
+                height: bounds.height,
+                scale_factor: source_monitor.scale_factor,
+            };
+
+            Ok(CapturePlan {
+                source: RecordingSource::Window {
+                    hwnd: window_id(hwnd),
+                    title: window_capture.title.clone(),
+                },
+                monitor,
+                bounds,
+                backend: CaptureBackend::WindowsCapture,
+                ffmpeg_args: Vec::new(),
+                window_capture: Some(window_capture),
+            })
+        }
+    }
+}
+
+fn capture_bounds_from_monitor(monitor: &MonitorInfo) -> CaptureBounds {
+    CaptureBounds {
+        x: monitor.x,
+        y: monitor.y,
+        width: monitor.width,
+        height: monitor.height,
+    }
+}
+
+fn validated_capture_bounds(
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> RecorderResult<CaptureBounds> {
+    if width < 16 || height < 16 {
+        return Err(RecorderError::new(
+            "invalid_capture_region",
+            format!("Capture region must be at least 16x16, got {width}x{height}"),
+            true,
+        ));
+    }
+
+    Ok(CaptureBounds {
+        x,
+        y,
+        width,
+        height,
+    })
+}
+
+fn monitor_info_for_capture_bounds(
+    app: &AppHandle,
+    bounds: CaptureBounds,
+) -> RecorderResult<MonitorInfo> {
+    let monitors = app.available_monitors().map_err(|error| {
+        RecorderError::new(
+            "monitor_query_failed",
+            format!("Could not query available monitors: {error}"),
+            true,
+        )
+    })?;
+
+    let best_monitor = monitors
+        .into_iter()
+        .map(|monitor| {
+            let size = monitor.size();
+            let position = monitor.position();
+            let info = MonitorInfo {
+                name: monitor.name().cloned(),
+                x: position.x,
+                y: position.y,
+                width: size.width,
+                height: size.height,
+                scale_factor: monitor.scale_factor(),
+            };
+            let intersection_area =
+                capture_bounds_intersection_area(bounds, capture_bounds_from_monitor(&info));
+
+            (intersection_area, info)
+        })
+        .max_by_key(|(intersection_area, _)| *intersection_area);
+
+    match best_monitor {
+        Some((0, _)) | None => primary_monitor_info(app),
+        Some((_, monitor)) => Ok(monitor),
+    }
+}
+
+fn capture_bounds_intersection_area(left: CaptureBounds, right: CaptureBounds) -> u64 {
+    let left_right = i64::from(left.x) + i64::from(left.width);
+    let left_bottom = i64::from(left.y) + i64::from(left.height);
+    let right_right = i64::from(right.x) + i64::from(right.width);
+    let right_bottom = i64::from(right.y) + i64::from(right.height);
+    let intersection_width = left_right
+        .min(right_right)
+        .saturating_sub(i64::from(left.x).max(i64::from(right.x)));
+    let intersection_height = left_bottom
+        .min(right_bottom)
+        .saturating_sub(i64::from(left.y).max(i64::from(right.y)));
+
+    if intersection_width <= 0 || intersection_height <= 0 {
+        return 0;
+    }
+
+    (intersection_width as u64) * (intersection_height as u64)
+}
+
+fn ffmpeg_desktop_region_args(
+    bounds: CaptureBounds,
     output_path: &Path,
 ) -> RecorderResult<Vec<String>> {
     let output_path = path_to_string(output_path)?;
-    let video_size = format!("{}x{}", monitor.width, monitor.height);
+    let video_size = format!("{}x{}", bounds.width, bounds.height);
 
     Ok(vec![
         "-hide_banner".to_string(),
@@ -1199,9 +1997,9 @@ fn ffmpeg_primary_monitor_args(
         "-framerate".to_string(),
         TARGET_FPS.to_string(),
         "-offset_x".to_string(),
-        monitor.x.to_string(),
+        bounds.x.to_string(),
         "-offset_y".to_string(),
-        monitor.y.to_string(),
+        bounds.y.to_string(),
         "-video_size".to_string(),
         video_size,
         "-draw_mouse".to_string(),
@@ -1298,6 +2096,260 @@ fn create_session_screen_output_path(app: &AppHandle) -> RecorderResult<PathBuf>
     ))
 }
 
+fn write_session_metadata(
+    output_path: &Path,
+    source: &RecordingSource,
+    capture_bounds: CaptureBounds,
+    capture_backend: CaptureBackend,
+) -> RecorderResult<()> {
+    let metadata = SessionMetadata {
+        version: 1,
+        source: source.clone(),
+        capture_bounds,
+        capture_backend,
+    };
+    let json = serde_json::to_vec_pretty(&metadata).map_err(|error| {
+        RecorderError::new(
+            "serialize_metadata_failed",
+            format!("Could not serialize recording metadata: {error}"),
+            true,
+        )
+    })?;
+
+    fs::write(metadata_output_path(output_path)?, json).map_err(|error| {
+        RecorderError::new(
+            "write_metadata_failed",
+            format!("Could not write metadata.json: {error}"),
+            true,
+        )
+    })
+}
+
+fn write_session_json(
+    output_path: &Path,
+    source: &RecordingSource,
+    duration_seconds: f64,
+    exported: bool,
+) -> RecorderResult<()> {
+    let session_dir = session_output_dir(output_path)?;
+    let session_id = session_id_from_dir(session_dir)?;
+    let session = SessionSummary {
+        created_at: created_at_from_session_id(&session_id),
+        session_id,
+        duration_seconds,
+        recording_source: recording_source_label(source).to_string(),
+        exported,
+    };
+    let json = serde_json::to_vec_pretty(&session).map_err(|error| {
+        RecorderError::new(
+            "serialize_session_failed",
+            format!("Could not serialize session.json: {error}"),
+            true,
+        )
+    })?;
+
+    fs::write(session_json_output_path(output_path)?, json).map_err(|error| {
+        RecorderError::new(
+            "write_session_failed",
+            format!("Could not write session.json: {error}"),
+            true,
+        )
+    })
+}
+
+pub(crate) fn mark_session_exported(session_dir: &Path) -> RecorderResult<()> {
+    let mut summary = match read_session_summary(session_dir) {
+        Ok(Some(summary)) => summary,
+        Ok(None) => fallback_session_summary(session_dir),
+        Err(error) => {
+            eprintln!("Could not read existing session metadata before export update: {error}");
+            fallback_session_summary(session_dir)
+        }
+    };
+    summary.exported = true;
+    write_session_summary(session_dir, &summary)
+}
+
+fn read_session_summary(session_dir: &Path) -> RecorderResult<Option<SessionSummary>> {
+    let path = session_dir.join(SESSION_FILE_NAME);
+
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let bytes = fs::read(&path).map_err(|error| {
+        RecorderError::new(
+            "read_session_failed",
+            format!("Could not read session.json: {error}"),
+            true,
+        )
+    })?;
+    serde_json::from_slice(&bytes).map(Some).map_err(|error| {
+        RecorderError::new(
+            "parse_session_failed",
+            format!("Could not parse session.json: {error}"),
+            true,
+        )
+    })
+}
+
+fn write_session_summary(session_dir: &Path, summary: &SessionSummary) -> RecorderResult<()> {
+    let json = serde_json::to_vec_pretty(summary).map_err(|error| {
+        RecorderError::new(
+            "serialize_session_failed",
+            format!("Could not serialize session.json: {error}"),
+            true,
+        )
+    })?;
+
+    fs::write(session_dir.join(SESSION_FILE_NAME), json).map_err(|error| {
+        RecorderError::new(
+            "write_session_failed",
+            format!("Could not write session.json: {error}"),
+            true,
+        )
+    })
+}
+
+fn recent_session_from_dir(session_dir: &Path) -> RecorderResult<Option<RecentSession>> {
+    if !session_dir.join(OUTPUT_FILE_NAME).exists() {
+        return Ok(None);
+    }
+
+    let session_id = session_id_from_dir(session_dir)?;
+    let fallback = SessionSummary {
+        session_id: session_id.clone(),
+        created_at: created_at_from_session_id(&session_id),
+        duration_seconds: 0.0,
+        recording_source: "unknown".to_string(),
+        exported: session_dir.join(EDITED_FILE_NAME).exists(),
+    };
+    let summary = match read_session_summary(session_dir) {
+        Ok(Some(summary)) => summary,
+        Ok(None) => fallback,
+        Err(error) => {
+            eprintln!("Could not read session metadata for browser list: {error}");
+            fallback
+        }
+    };
+    let edited_video_path = session_dir.join(EDITED_FILE_NAME);
+    let exported = summary.exported || edited_video_path.exists();
+
+    Ok(Some(RecentSession {
+        session_id: summary.session_id,
+        created_at: summary.created_at,
+        duration_seconds: summary.duration_seconds,
+        recording_source: summary.recording_source,
+        exported,
+        session_path: path_to_string(session_dir)?,
+        edited_video_path: if edited_video_path.exists() {
+            Some(path_to_string(&edited_video_path)?)
+        } else {
+            None
+        },
+    }))
+}
+
+fn fallback_session_summary(session_dir: &Path) -> SessionSummary {
+    let session_id = session_id_from_dir(session_dir).unwrap_or_else(|_| "unknown".to_string());
+
+    SessionSummary {
+        created_at: created_at_from_session_id(&session_id),
+        session_id,
+        duration_seconds: 0.0,
+        recording_source: "unknown".to_string(),
+        exported: session_dir.join(EDITED_FILE_NAME).exists(),
+    }
+}
+
+fn session_dir_from_id(recordings_dir: &Path, session_id: &str) -> RecorderResult<PathBuf> {
+    if session_id.trim().is_empty()
+        || session_id.contains('\\')
+        || session_id.contains('/')
+        || session_id.contains("..")
+    {
+        return Err(RecorderError::new(
+            "invalid_session_id",
+            "Session id is invalid",
+            true,
+        ));
+    }
+
+    let recordings_dir = recordings_dir.canonicalize().map_err(|error| {
+        RecorderError::new(
+            "resolve_recordings_dir_failed",
+            format!("Could not resolve recordings directory: {error}"),
+            true,
+        )
+    })?;
+    let session_dir = recordings_dir.join(session_id);
+    let canonical_session_dir = session_dir.canonicalize().map_err(|error| {
+        RecorderError::new(
+            "resolve_session_dir_failed",
+            format!("Could not resolve session directory: {error}"),
+            true,
+        )
+    })?;
+
+    if !canonical_session_dir.starts_with(&recordings_dir) || !canonical_session_dir.is_dir() {
+        return Err(RecorderError::new(
+            "invalid_session_id",
+            "Session id is outside the recordings directory",
+            true,
+        ));
+    }
+
+    Ok(canonical_session_dir)
+}
+
+fn session_id_from_dir(session_dir: &Path) -> RecorderResult<String> {
+    session_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            RecorderError::new(
+                "invalid_session_dir",
+                format!("Could not derive session id from {}", session_dir.display()),
+                true,
+            )
+        })
+}
+
+fn created_at_from_session_id(session_id: &str) -> String {
+    let parts = session_id.split('_').collect::<Vec<_>>();
+
+    if parts.len() < 2 || parts[0].len() != 8 || parts[1].len() != 6 {
+        return session_id.to_string();
+    }
+
+    let date = parts[0];
+    let time = parts[1];
+
+    format!(
+        "{}-{}-{}T{}:{}:{}Z",
+        &date[0..4],
+        &date[4..6],
+        &date[6..8],
+        &time[0..2],
+        &time[2..4],
+        &time[4..6]
+    )
+}
+
+fn recording_source_label(source: &RecordingSource) -> &'static str {
+    match source {
+        RecordingSource::Screen => "screen",
+        RecordingSource::Window { .. } => "window",
+        RecordingSource::Region { .. } => "region",
+    }
+}
+
+fn elapsed_seconds_from_millis(milliseconds: u64) -> f64 {
+    milliseconds as f64 / 1000.0
+}
+
 pub(crate) fn recordings_root_dir(app: &AppHandle) -> RecorderResult<PathBuf> {
     let dir = app
         .path()
@@ -1333,6 +2385,288 @@ pub(crate) fn recordings_root_dir(app: &AppHandle) -> RecorderResult<PathBuf> {
     Ok(dir)
 }
 
+#[cfg(target_os = "windows")]
+fn enumerate_recordable_windows() -> RecorderResult<Vec<RecordableWindow>> {
+    let mut windows: Vec<RecordableWindow> = Vec::new();
+
+    unsafe {
+        EnumWindows(
+            Some(enum_recordable_window),
+            LPARAM((&mut windows as *mut Vec<RecordableWindow>) as isize),
+        )
+        .map_err(|error| {
+            RecorderError::new(
+                "window_enumeration_failed",
+                format!("Could not enumerate windows: {error}"),
+                true,
+            )
+        })?;
+    }
+
+    windows.sort_by(|left, right| {
+        left.title
+            .to_lowercase()
+            .cmp(&right.title.to_lowercase())
+            .then(left.id.cmp(&right.id))
+    });
+
+    Ok(windows)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn enumerate_recordable_windows() -> RecorderResult<Vec<RecordableWindow>> {
+    Ok(Vec::new())
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn enum_recordable_window(
+    hwnd: HWND,
+    lparam: LPARAM,
+) -> windows::core::BOOL {
+    if lparam.0 == 0 {
+        return TRUE;
+    }
+
+    let windows = &mut *(lparam.0 as *mut Vec<RecordableWindow>);
+
+    if let Some(window) = recordable_window_info(hwnd) {
+        windows.push(window);
+    }
+
+    TRUE
+}
+
+#[cfg(target_os = "windows")]
+fn recordable_window_info(hwnd: HWND) -> Option<RecordableWindow> {
+    if hwnd.0.is_null() {
+        return None;
+    }
+
+    let shell_window = unsafe { GetShellWindow() };
+
+    if hwnd.0 == shell_window.0 {
+        return None;
+    }
+
+    if !unsafe { IsWindowVisible(hwnd).as_bool() } || unsafe { IsIconic(hwnd).as_bool() } {
+        return None;
+    }
+
+    if unsafe { GetWindow(hwnd, GW_OWNER).is_ok() } {
+        return None;
+    }
+
+    let title = window_title(hwnd)?;
+
+    if is_ignored_window_title(&title) {
+        return None;
+    }
+
+    let bounds = window_capture_bounds(hwnd)?;
+
+    Some(RecordableWindow {
+        id: window_id(hwnd),
+        title,
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn window_title(hwnd: HWND) -> Option<String> {
+    let mut buffer = [0_u16; 512];
+    let length = unsafe { GetWindowTextW(hwnd, &mut buffer) };
+
+    if length <= 0 {
+        return None;
+    }
+
+    let title = String::from_utf16_lossy(&buffer[..length as usize])
+        .trim()
+        .to_string();
+
+    if title.is_empty() {
+        None
+    } else {
+        Some(title)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn is_ignored_window_title(title: &str) -> bool {
+    matches!(
+        title,
+        "Program Manager" | "Windows Input Experience" | "Default IME"
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn window_capture_bounds(hwnd: HWND) -> Option<CaptureBounds> {
+    let mut rect = RECT::default();
+
+    unsafe {
+        GetWindowRect(hwnd, &mut rect).ok()?;
+    }
+
+    let width = rect.right.checked_sub(rect.left)?;
+    let height = rect.bottom.checked_sub(rect.top)?;
+
+    if width < 16 || height < 16 {
+        return None;
+    }
+
+    Some(CaptureBounds {
+        x: rect.left,
+        y: rect.top,
+        width: width as u32,
+        height: height as u32,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn window_capture_plan_from_hwnd(
+    hwnd: HWND,
+    selected_title: &str,
+) -> RecorderResult<(WindowCapturePlan, CaptureBounds)> {
+    if hwnd.0.is_null() || !unsafe { IsWindow(Some(hwnd)).as_bool() } {
+        return Err(RecorderError::new(
+            "window_source_closed",
+            "Selected window is closed or no longer exists",
+            true,
+        ));
+    }
+
+    if unsafe { IsIconic(hwnd).as_bool() } {
+        return Err(RecorderError::new(
+            "window_source_minimized",
+            "Selected window is minimized. Restore it before recording.",
+            true,
+        ));
+    }
+
+    if !unsafe { IsWindowVisible(hwnd).as_bool() } {
+        return Err(RecorderError::new(
+            "window_source_hidden",
+            "Selected window is hidden and cannot be recorded",
+            true,
+        ));
+    }
+
+    let title = window_title(hwnd)
+        .or_else(|| {
+            let title = selected_title.trim();
+            (!title.is_empty()).then(|| title.to_string())
+        })
+        .ok_or_else(|| {
+            RecorderError::new(
+                "window_source_missing_title",
+                "Selected window does not have a readable title",
+                true,
+            )
+        })?;
+
+    let bounds = window_capture_bounds(hwnd).ok_or_else(|| {
+        RecorderError::new(
+            "window_source_invalid_bounds",
+            "Selected window does not have a valid recording size",
+            true,
+        )
+    })?;
+
+    let capture_window = WindowsCaptureWindow::from_raw_hwnd(hwnd.0 as *mut c_void);
+    if !capture_window.is_valid() {
+        return Err(RecorderError::new(
+            "window_capture_unavailable",
+            "Selected window is not available to Windows Graphics Capture",
+            true,
+        ));
+    }
+
+    let width = capture_window.width().map_err(|error| {
+        RecorderError::new(
+            "window_capture_size_failed",
+            format!("Could not read selected window width: {error}"),
+            true,
+        )
+    })?;
+    let height = capture_window.height().map_err(|error| {
+        RecorderError::new(
+            "window_capture_size_failed",
+            format!("Could not read selected window height: {error}"),
+            true,
+        )
+    })?;
+    let width = u32::try_from(width).map_err(|_| {
+        RecorderError::new(
+            "window_capture_invalid_size",
+            format!("Selected window width is invalid: {width}"),
+            true,
+        )
+    })?;
+    let height = u32::try_from(height).map_err(|_| {
+        RecorderError::new(
+            "window_capture_invalid_size",
+            format!("Selected window height is invalid: {height}"),
+            true,
+        )
+    })?;
+
+    if width < 16 || height < 16 {
+        return Err(RecorderError::new(
+            "window_capture_invalid_size",
+            format!("Selected window is too small to record: {width}x{height}"),
+            true,
+        ));
+    }
+
+    Ok((
+        WindowCapturePlan {
+            hwnd: hwnd.0 as usize,
+            title,
+            width,
+            height,
+        },
+        bounds,
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn parse_window_handle(value: &str) -> RecorderResult<HWND> {
+    let trimmed = value.trim();
+    let parsed = if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        usize::from_str_radix(hex, 16)
+    } else {
+        trimmed.parse::<usize>()
+    }
+    .map_err(|error| {
+        RecorderError::new(
+            "invalid_window_source",
+            format!("Selected window id is invalid: {error}"),
+            true,
+        )
+    })?;
+
+    if parsed == 0 {
+        return Err(RecorderError::new(
+            "invalid_window_source",
+            "Selected window id is empty",
+            true,
+        ));
+    }
+
+    Ok(HWND(parsed as *mut _))
+}
+
+#[cfg(target_os = "windows")]
+fn window_id(hwnd: HWND) -> String {
+    format!("0x{:X}", hwnd.0 as usize)
+}
+
 fn ffmpeg_sidecar_command(app: &AppHandle) -> RecorderResult<Command> {
     let command = app.shell().sidecar(FFMPEG_SIDECAR_NAME).map_err(|error| {
         RecorderError::new(
@@ -1364,6 +2698,54 @@ fn log_recording_diagnostics(session_dir: &Path, ffmpeg_path: &OsStr) {
         "[FocusFlow recorder] Recording session directory path: {}",
         session_dir.display()
     );
+}
+
+fn log_window_capture_bounds(label: &str, bounds: CaptureBounds) {
+    println!("[FocusFlow recorder] {label}:");
+    println!("[FocusFlow recorder] x={}", bounds.x);
+    println!("[FocusFlow recorder] y={}", bounds.y);
+    println!("[FocusFlow recorder] width={}", bounds.width);
+    println!("[FocusFlow recorder] height={}", bounds.height);
+}
+
+fn log_ffmpeg_command(ffmpeg_path: &OsStr, args: &[String]) {
+    println!(
+        "[FocusFlow recorder] FFmpeg command: {}",
+        command_string(ffmpeg_path, args)
+    );
+}
+
+fn command_string(program: &OsStr, args: &[String]) -> String {
+    std::iter::once(program.to_string_lossy().to_string())
+        .chain(args.iter().map(|arg| quote_command_arg(arg)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn quote_command_arg(arg: &str) -> String {
+    if arg.is_empty() {
+        return "\"\"".to_string();
+    }
+
+    if !arg
+        .chars()
+        .any(|character| character.is_whitespace() || matches!(character, '"' | '\''))
+    {
+        return arg.to_string();
+    }
+
+    let mut quoted = String::with_capacity(arg.len() + 2);
+    quoted.push('"');
+
+    for character in arg.chars() {
+        if character == '"' {
+            quoted.push('\\');
+        }
+        quoted.push(character);
+    }
+
+    quoted.push('"');
+    quoted
 }
 
 fn timestamp_folder_name() -> RecorderResult<String> {

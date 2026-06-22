@@ -23,7 +23,8 @@ const FFMPEG_SIDECAR_NAME: &str = "ffmpeg";
 const FILTER_SCRIPT_FILE_NAME: &str = "edited.filter_complex.txt";
 const MAX_CAPTURED_LOG_BYTES: usize = 96 * 1024;
 const OUTPUT_FILE_NAME: &str = "screen.mp4";
-const TARGET_FPS: u32 = 60;
+const DEFAULT_TARGET_FPS: u32 = 30;
+const DEFAULT_CRF: u8 = 25;
 const TIMELINE_FILE_NAME: &str = "timeline.json";
 const ZOOM_IN_MS: u64 = 180;
 const ZOOM_OUT_MS: u64 = 220;
@@ -58,6 +59,15 @@ pub struct ExportSettings {
     pub zoom_in_ms: Option<f64>,
     pub zoom_out_ms: Option<f64>,
     pub pan_transition_ms: Option<f64>,
+    pub preset: Option<ExportPreset>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExportPreset {
+    SmallFile,
+    Balanced,
+    HighQuality,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -67,6 +77,8 @@ struct ExportConfig {
     zoom_out_ms: u64,
     zoom_hold_ms: u64,
     pan_transition_ms: u64,
+    crf: u8,
+    fps: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -111,6 +123,7 @@ impl ExportConfig {
                 settings.pan_transition_ms,
                 defaults.pan_transition_ms,
             ),
+            ..ExportPreset::config(settings.preset.unwrap_or_default())
         }
     }
 
@@ -139,6 +152,31 @@ impl Default for ExportConfig {
             zoom_out_ms: ZOOM_OUT_MS,
             zoom_hold_ms: ZOOM_HOLD_MS,
             pan_transition_ms: PAN_TRANSITION_MS,
+            crf: DEFAULT_CRF,
+            fps: DEFAULT_TARGET_FPS,
+        }
+    }
+}
+
+impl Default for ExportPreset {
+    fn default() -> ExportPreset {
+        ExportPreset::Balanced
+    }
+}
+
+impl ExportPreset {
+    fn config(self) -> ExportConfig {
+        let defaults = ExportConfig::default();
+        let (crf, fps) = match self {
+            ExportPreset::SmallFile => (28, 30),
+            ExportPreset::Balanced => (25, 30),
+            ExportPreset::HighQuality => (22, 60),
+        };
+
+        ExportConfig {
+            crf,
+            fps,
+            ..defaults
         }
     }
 }
@@ -242,11 +280,11 @@ fn export_edited_mp4_blocking(
     emit_export_progress(&app, 0.0);
 
     if timeline.is_empty() && clicks.is_empty() {
-        run_ffmpeg_copy(&app, &paths, video_info.duration)?;
+        run_ffmpeg_copy(&app, &paths, video_info.duration, config)?;
     } else {
         let filter = build_export_filter(&timeline, &clicks, video_info, config);
         write_filter_script(&paths.filter_script_path, &filter)?;
-        let export_result = run_ffmpeg_zoom_export(&app, &paths, video_info.duration);
+        let export_result = run_ffmpeg_zoom_export(&app, &paths, video_info.duration, config);
         if let Err(error) = remove_filter_script(&paths) {
             eprintln!("{error}");
         }
@@ -254,6 +292,7 @@ fn export_edited_mp4_blocking(
     }
 
     replace_output_file(&paths.temp_output_path, &paths.output_path)?;
+    mark_session_exported(&paths)?;
     emit_export_progress(&app, 100.0);
 
     Ok(ExportStatus {
@@ -266,6 +305,7 @@ fn export_edited_mp4_blocking(
 
 #[derive(Debug, Clone)]
 struct ExportPaths {
+    session_dir: PathBuf,
     input_path: PathBuf,
     timeline_path: PathBuf,
     clicks_path: PathBuf,
@@ -293,6 +333,7 @@ impl ExportPaths {
 
     fn from_session_dir(session_dir: PathBuf) -> ExportPaths {
         ExportPaths {
+            session_dir: session_dir.clone(),
             input_path: session_dir.join(OUTPUT_FILE_NAME),
             timeline_path: session_dir.join(TIMELINE_FILE_NAME),
             clicks_path: session_dir.join(CLICKS_FILE_NAME),
@@ -301,6 +342,19 @@ impl ExportPaths {
             filter_script_path: session_dir.join(FILTER_SCRIPT_FILE_NAME),
         }
     }
+}
+
+fn mark_session_exported(paths: &ExportPaths) -> ExportCommandResult<()> {
+    crate::recorder::mark_session_exported(&paths.session_dir).map_err(|error| {
+        ExportError::new(
+            error.code,
+            format!(
+                "Could not update session export metadata: {}",
+                error.message
+            ),
+            error.recoverable,
+        )
+    })
 }
 
 fn latest_session_dir(recordings_dir: &Path) -> ExportCommandResult<PathBuf> {
@@ -827,13 +881,14 @@ fn build_export_filter(
         };
     }
 
-    build_interval_filter(&intervals, clicks, info)
+    build_interval_filter(&intervals, clicks, info, config)
 }
 
 fn build_interval_filter(
     intervals: &[CameraInterval],
     clicks: &[ClickEvent],
     info: VideoInfo,
+    config: ExportConfig,
 ) -> String {
     let mut chains = Vec::with_capacity(intervals.len() + 1);
     let mut labels = Vec::with_capacity(intervals.len());
@@ -858,7 +913,12 @@ fn build_interval_filter(
         }
 
         chain.push(',');
-        chain.push_str(&zoompan_interval_filter(interval, &output_label, info));
+        chain.push_str(&zoompan_interval_filter(
+            interval,
+            &output_label,
+            info,
+            config,
+        ));
         chains.push(chain);
 
         if intervals.len() > 1 {
@@ -881,6 +941,7 @@ fn zoompan_interval_filter(
     interval: &CameraInterval,
     output_label: &str,
     info: VideoInfo,
+    config: ExportConfig,
 ) -> String {
     let duration = (interval.end - interval.start).max(MIN_CAMERA_INTERVAL_SECONDS);
     let zoom = interpolate_expression(interval.from.zoom, interval.to.zoom, duration);
@@ -895,7 +956,7 @@ fn zoompan_interval_filter(
         duration_frames = ZOOMPAN_FRAMES_PER_INPUT,
         width = info.width,
         height = info.height,
-        fps = TARGET_FPS,
+        fps = config.fps,
         output_label = output_label
     )
 }
@@ -1236,6 +1297,7 @@ fn run_ffmpeg_zoom_export(
     app: &AppHandle,
     paths: &ExportPaths,
     duration_seconds: f64,
+    config: ExportConfig,
 ) -> ExportCommandResult<()> {
     run_ffmpeg(
         app,
@@ -1252,14 +1314,14 @@ fn run_ffmpeg_zoom_export(
             "-map".to_string(),
             "[v]".to_string(),
             "-r".to_string(),
-            TARGET_FPS.to_string(),
+            config.fps.to_string(),
             "-an".to_string(),
             "-c:v".to_string(),
             "libx264".to_string(),
             "-preset".to_string(),
             "veryfast".to_string(),
             "-crf".to_string(),
-            "22".to_string(),
+            config.crf.to_string(),
             "-pix_fmt".to_string(),
             "yuv420p".to_string(),
             "-movflags".to_string(),
@@ -1274,6 +1336,7 @@ fn run_ffmpeg_copy(
     app: &AppHandle,
     paths: &ExportPaths,
     duration_seconds: f64,
+    config: ExportConfig,
 ) -> ExportCommandResult<()> {
     run_ffmpeg(
         app,
@@ -1285,8 +1348,17 @@ fn run_ffmpeg_copy(
             "-y".to_string(),
             "-i".to_string(),
             path_to_string(&paths.input_path)?,
-            "-c".to_string(),
-            "copy".to_string(),
+            "-r".to_string(),
+            config.fps.to_string(),
+            "-an".to_string(),
+            "-c:v".to_string(),
+            "libx264".to_string(),
+            "-preset".to_string(),
+            "veryfast".to_string(),
+            "-crf".to_string(),
+            config.crf.to_string(),
+            "-pix_fmt".to_string(),
+            "yuv420p".to_string(),
             "-movflags".to_string(),
             "+faststart".to_string(),
             path_to_string(&paths.temp_output_path)?,

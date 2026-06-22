@@ -1,4 +1,10 @@
-import { type CSSProperties, useEffect, useMemo, useState } from "react";
+import {
+  type CSSProperties,
+  type PointerEvent,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -32,16 +38,60 @@ type ExportProgress = {
 };
 
 type ExportSettings = {
+  preset: ExportPresetKey;
   zoomScale: number;
   zoomInMs: number;
   zoomOutMs: number;
   panTransitionMs: number;
 };
 
+type ExportPresetKey = "smallFile" | "balanced" | "highQuality";
+
+type RecordingSourceMode = "screen" | "window" | "region";
+
+type RecordableWindow = {
+  id: string;
+  title: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type RegionSelection = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type RegionDraft = {
+  startX: number;
+  startY: number;
+  currentX: number;
+  currentY: number;
+};
+
+type RecordingSourcePayload =
+  | { type: "screen" }
+  | { type: "window"; hwnd: string; title: string }
+  | { type: "region"; x: number; y: number; width: number; height: number };
+
+type RecentSession = {
+  sessionId: string;
+  createdAt: string;
+  durationSeconds: number;
+  recordingSource: string;
+  exported: boolean;
+  sessionPath: string;
+  editedVideoPath: string | null;
+};
+
 const EXPORT_PROGRESS_EVENT = "export-progress";
 const RECORDING_STATUS_CHANGED_EVENT = "recording-status-changed";
 const EXPORT_SETTINGS_STORAGE_KEY = "focusflow.exportSettings";
 const DEFAULT_EXPORT_SETTINGS: ExportSettings = {
+  preset: "balanced",
   zoomScale: 2.3,
   zoomInMs: 180,
   zoomOutMs: 220,
@@ -58,6 +108,8 @@ const FRIENDLY_ERROR_MESSAGES: Record<string, string> = {
     "FocusFlow could not create the recordings folder. Check disk access and try again.",
   create_session_dir_failed:
     "FocusFlow could not create a new session folder. Check disk access and try again.",
+  delete_session_failed:
+    "FocusFlow could not delete that recording session. Close any open files in the folder and try again.",
   drag_tracker_state_poisoned:
     "FocusFlow could not read the captured drag data. Start a new recording and try again.",
   export_join_failed:
@@ -78,12 +130,22 @@ const FRIENDLY_ERROR_MESSAGES: Record<string, string> = {
     "FocusFlow could not stop FFmpeg cleanly. Start a new recording and try again.",
   input_missing:
     "Required session files are missing. Record a new session and try again.",
+  invalid_capture_region:
+    "Select a recording region that is at least 16 by 16 pixels.",
+  invalid_session_id:
+    "FocusFlow could not identify that recording session. Refresh the session list and try again.",
+  invalid_window_source:
+    "The selected window is no longer valid. Refresh the window list and choose again.",
+  monitor_query_failed:
+    "FocusFlow could not read monitor information for that capture area.",
   non_utf8_path:
     "One of the session paths contains unsupported characters.",
   parse_clicks_failed:
     "FocusFlow could not read the click data for this session.",
   parse_drags_failed:
     "FocusFlow could not read the drag data for this session.",
+  parse_session_failed:
+    "FocusFlow could not read one of the saved session summaries.",
   parse_timeline_failed:
     "FocusFlow could not read the zoom timeline for this session.",
   primary_monitor_unavailable:
@@ -94,8 +156,14 @@ const FRIENDLY_ERROR_MESSAGES: Record<string, string> = {
     "FocusFlow could not open the click data for this session.",
   read_drags_failed:
     "FocusFlow could not open the drag data for this session.",
+  read_recording_entry_failed:
+    "FocusFlow could not read one of the saved recording sessions.",
+  read_recording_entry_type_failed:
+    "FocusFlow could not read one of the saved recording folders.",
   read_recordings_dir_failed:
     "FocusFlow could not read the recordings folder.",
+  read_session_failed:
+    "FocusFlow could not open one of the saved session summaries.",
   read_timeline_failed:
     "FocusFlow could not open the zoom timeline for this session.",
   recorder_already_running: "A recording is already in progress.",
@@ -116,6 +184,12 @@ const FRIENDLY_ERROR_MESSAGES: Record<string, string> = {
     "FocusFlow could not clean up a temporary export file. Close the video if it is open and try again.",
   replace_output_failed:
     "FocusFlow could not save edited.mp4. Close the video if it is open and try again.",
+  resolve_recordings_dir_failed:
+    "FocusFlow could not verify the recordings folder. Restart the app and try again.",
+  resolve_session_dir_failed:
+    "That recording session folder is no longer available.",
+  serialize_session_failed:
+    "FocusFlow could not prepare the session summary.",
   unsupported_platform:
     "This FocusFlow build currently supports recording and export on Windows.",
   video_dimensions_missing:
@@ -128,8 +202,16 @@ const FRIENDLY_ERROR_MESSAGES: Record<string, string> = {
     "FocusFlow could not save drag data for this recording.",
   write_filter_script_failed:
     "FocusFlow could not prepare the export filter file. Check disk access and try again.",
+  write_metadata_failed:
+    "FocusFlow could not save recording metadata for this session.",
+  write_session_failed:
+    "FocusFlow could not save the session summary.",
   write_timeline_failed:
     "FocusFlow could not save the zoom timeline for this recording.",
+  window_enumeration_failed:
+    "FocusFlow could not read the list of available windows.",
+  window_source_unavailable:
+    "The selected window is no longer available. Refresh the list and choose again.",
 };
 
 function App() {
@@ -143,9 +225,24 @@ function App() {
   const [exportProgressPercentage, setExportProgressPercentage] = useState<
     number | null
   >(null);
-  const [exportSettings, setExportSettings] = useState<ExportSettings>(() =>
+  const [exportSettings] = useState<ExportSettings>(() =>
     loadExportSettings(),
   );
+  const [recentSessions, setRecentSessions] = useState<RecentSession[]>([]);
+  const [selectedSessionId, setSelectedSessionId] = useState("");
+  const [isLoadingSessions, setIsLoadingSessions] = useState(false);
+  const [recordingSourceMode, setRecordingSourceMode] =
+    useState<RecordingSourceMode>("screen");
+  const [recordableWindows, setRecordableWindows] = useState<
+    RecordableWindow[]
+  >([]);
+  const [selectedWindowId, setSelectedWindowId] = useState("");
+  const [isLoadingWindows, setIsLoadingWindows] = useState(false);
+  const [selectedRegion, setSelectedRegion] =
+    useState<RegionSelection | null>(null);
+  const [isSelectingRegion, setIsSelectingRegion] = useState(false);
+  const [regionDraft, setRegionDraft] = useState<RegionDraft | null>(null);
+  const [regionWindowOffset, setRegionWindowOffset] = useState({ x: 0, y: 0 });
 
   const statusLabel = useMemo(() => {
     if (countdown !== null) return "Starting...";
@@ -165,10 +262,95 @@ function App() {
     () => sessionPathFromOutput(exportOutputPath ?? ""),
     [exportOutputPath],
   );
+  const activeSession = useMemo(() => {
+    if (selectedSessionId) {
+      const selectedSession = recentSessions.find(
+        (session) => session.sessionId === selectedSessionId,
+      );
+
+      if (selectedSession) {
+        return selectedSession;
+      }
+    }
+
+    const currentPath = currentSessionPath || editedVideoFolderPath;
+
+    if (currentPath) {
+      const matchingSession = recentSessions.find(
+        (session) => session.sessionPath === currentPath,
+      );
+
+      if (matchingSession) {
+        return matchingSession;
+      }
+    }
+
+    return recentSessions[0] ?? null;
+  }, [
+    currentSessionPath,
+    editedVideoFolderPath,
+    recentSessions,
+    selectedSessionId,
+  ]);
+  const activeSessionFolderPath =
+    activeSession?.sessionPath ?? currentSessionPath;
+  const activeEditedVideoFolderPath =
+    activeSession?.editedVideoPath !== null && activeSession?.editedVideoPath
+      ? sessionPathFromOutput(activeSession.editedVideoPath)
+      : editedVideoFolderPath;
+  const selectedWindow = useMemo(
+    () =>
+      recordableWindows.find((window) => window.id === selectedWindowId) ??
+      null,
+    [recordableWindows, selectedWindowId],
+  );
+  const recordingSourcePayload = useMemo(
+    () =>
+      buildRecordingSourcePayload(
+        recordingSourceMode,
+        selectedWindow,
+        selectedRegion,
+      ),
+    [recordingSourceMode, selectedRegion, selectedWindow],
+  );
+  const recordingSourceReady = recordingSourcePayload !== null;
+  const startDisabledReason = recordingSourceReady
+    ? undefined
+    : sourceValidationMessage(recordingSourceMode);
 
   useEffect(() => {
     void refreshStatus();
+    void refreshRecentSessions(false);
   }, []);
+
+  useEffect(() => {
+    if (!isSelectingRegion) return;
+
+    function handleRegionKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        void cancelRegionSelection();
+        return;
+      }
+
+      if (event.key === "Enter") {
+        event.preventDefault();
+        void confirmRegionSelection();
+      }
+    }
+
+    window.addEventListener("keydown", handleRegionKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", handleRegionKeyDown);
+    };
+  }, [isSelectingRegion, selectedRegion]);
+
+  useEffect(() => {
+    if (recordingSourceMode === "window" && recordableWindows.length === 0) {
+      void refreshRecordableWindows();
+    }
+  }, [recordableWindows.length, recordingSourceMode]);
 
   useEffect(() => {
     let isDisposed = false;
@@ -256,7 +438,132 @@ function App() {
     }
   }
 
+  async function refreshRecentSessions(clearError = true) {
+    setIsLoadingSessions(true);
+
+    try {
+      const sessions = await invoke<RecentSession[]>("list_recent_sessions");
+      setRecentSessions(sessions);
+      if (clearError) {
+        setError(null);
+      }
+    } catch (caught) {
+      setError(formatError(caught));
+    } finally {
+      setIsLoadingSessions(false);
+    }
+  }
+
+  async function refreshRecordableWindows() {
+    setIsLoadingWindows(true);
+    setError(null);
+
+    try {
+      const windows = await invoke<RecordableWindow[]>("list_recordable_windows");
+      setRecordableWindows(windows);
+      setSelectedWindowId((current) =>
+        windows.some((window) => window.id === current) ? current : "",
+      );
+    } catch (caught) {
+      setError(formatError(caught));
+    } finally {
+      setIsLoadingWindows(false);
+    }
+  }
+
+  function updateRecordingSourceMode(nextMode: RecordingSourceMode) {
+    setRecordingSourceMode(nextMode);
+    setError(null);
+  }
+
+  async function beginRegionSelection() {
+    setError(null);
+    setRegionDraft(null);
+    setIsSelectingRegion(true);
+
+    try {
+      const appWindow = getCurrentWindow();
+      await appWindow.setFullscreen(true);
+      await wait(120);
+      const position = await appWindow.outerPosition();
+      setRegionWindowOffset({ x: position.x, y: position.y });
+    } catch (caught) {
+      setIsSelectingRegion(false);
+      setRegionDraft(null);
+      await exitFullscreenSelection();
+      setError(`Region selection could not start: ${formatError(caught)}`);
+    }
+  }
+
+  async function confirmRegionSelection() {
+    if (!selectedRegion) return;
+
+    setIsSelectingRegion(false);
+    setRegionDraft(null);
+    await exitFullscreenSelection();
+  }
+
+  async function cancelRegionSelection() {
+    setIsSelectingRegion(false);
+    setRegionDraft(null);
+    setSelectedRegion(null);
+    await exitFullscreenSelection();
+  }
+
+  function handleRegionPointerDown(event: PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setSelectedRegion(null);
+    setRegionDraft({
+      startX: event.clientX,
+      startY: event.clientY,
+      currentX: event.clientX,
+      currentY: event.clientY,
+    });
+  }
+
+  function handleRegionPointerMove(event: PointerEvent<HTMLDivElement>) {
+    setRegionDraft((current) =>
+      current
+        ? {
+            ...current,
+            currentX: event.clientX,
+            currentY: event.clientY,
+          }
+        : current,
+    );
+  }
+
+  function handleRegionPointerUp(event: PointerEvent<HTMLDivElement>) {
+    setRegionDraft((current) => {
+      if (!current) return current;
+
+      const draft = {
+        ...current,
+        currentX: event.clientX,
+        currentY: event.clientY,
+      };
+      const nextRegion = physicalRegionFromDraft(draft, regionWindowOffset);
+
+      if (nextRegion.width < 16 || nextRegion.height < 16) {
+        setSelectedRegion(null);
+        setError("Select a region that is at least 16 by 16 pixels.");
+      } else {
+        setSelectedRegion(nextRegion);
+        setError(null);
+      }
+
+      return draft;
+    });
+  }
+
   async function startRecording() {
+    if (!recordingSourcePayload) {
+      setError(sourceValidationMessage(recordingSourceMode));
+      return;
+    }
+
     setIsBusy(true);
     setCountdown(null);
     setError(null);
@@ -273,7 +580,9 @@ function App() {
       await minimizeFocusFlowWindow();
       didMinimizeWindow = true;
 
-      const nextStatus = await invoke<RecordingStatus>("start_recording");
+      const nextStatus = await invoke<RecordingStatus>("start_recording", {
+        source: recordingSourcePayload,
+      });
       setStatus(nextStatus);
     } catch (caught) {
       if (didMinimizeWindow) {
@@ -294,6 +603,7 @@ function App() {
     try {
       const nextStatus = await invoke<RecordingStatus>("stop_recording");
       setStatus(nextStatus);
+      await refreshRecentSessions(false);
       await restoreFocusFlowWindow();
     } catch (caught) {
       setError(formatError(caught));
@@ -319,6 +629,7 @@ function App() {
       setExportMessage("Export completed.");
       setExportOutputPath(exportStatus.outputPath);
       setExportProgressPercentage(100);
+      await refreshRecentSessions(false);
     } catch (caught) {
       setError(formatError(caught));
       setExportProgressPercentage(null);
@@ -328,11 +639,36 @@ function App() {
     }
   }
 
-  function updateExportSetting(key: keyof ExportSettings, value: number) {
-    setExportSettings((current) => ({
-      ...current,
-      [key]: value,
-    }));
+  async function deleteSession(session: RecentSession) {
+    const confirmed = window.confirm(
+      `Delete recording session ${session.sessionId}?`,
+    );
+
+    if (!confirmed) return;
+
+    setIsBusy(true);
+    setError(null);
+
+    try {
+      await invoke("delete_recording_session", {
+        sessionId: session.sessionId,
+      });
+      if (currentSessionPath === session.sessionPath) {
+        setStatus(null);
+      }
+      if (selectedSessionId === session.sessionId) {
+        setSelectedSessionId("");
+      }
+      if (editedVideoFolderPath === session.sessionPath) {
+        setExportOutputPath(null);
+        setExportMessage(null);
+      }
+      await refreshRecentSessions(false);
+    } catch (caught) {
+      setError(formatError(caught));
+    } finally {
+      setIsBusy(false);
+    }
   }
 
   async function openFolder(
@@ -385,272 +721,439 @@ function App() {
           </span>
         </header>
 
-        <section style={styles.card}>
-          <div style={styles.cardHeader}>
-            <div>
-              <p style={styles.label}>Session</p>
-              <p style={styles.cardTitle}>Recording overview</p>
-            </div>
-          </div>
-
-          <div style={styles.statusPanel}>
-            <div style={styles.statTile}>
-              <p style={styles.label}>Recording status</p>
-              <p style={styles.statusValue}>{statusLabel}</p>
-            </div>
-            <div style={styles.statTile}>
-              <p style={styles.label}>Elapsed time</p>
-              <p
-                style={{
-                  ...styles.elapsedValue,
-                  ...(isRecording ? styles.elapsedValueLive : {}),
-                }}
-              >
-                {elapsedLabel}
-              </p>
-            </div>
-          </div>
-        </section>
-
-        <section style={styles.card}>
-          <div style={styles.cardHeader}>
-            <div>
-              <p style={styles.label}>Export settings</p>
-              <p style={styles.cardTitle}>Auto zoom tuning</p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setExportSettings(DEFAULT_EXPORT_SETTINGS)}
-              disabled={isBusy}
-              style={{
-                ...styles.ghostButton,
-                ...(isBusy ? styles.disabledButton : {}),
-              }}
-            >
-              Reset
-            </button>
-          </div>
-
-          <div style={styles.settingsGrid}>
-            <label style={styles.settingField}>
-              <span style={styles.settingLabel}>Zoom Scale</span>
-              <input
-                type="number"
-                min="1.1"
-                max="6"
-                step="0.1"
-                value={exportSettings.zoomScale}
-                onChange={(event) =>
-                  updateExportSetting(
-                    "zoomScale",
-                    parseNumberInput(
-                      event.currentTarget.value,
-                      DEFAULT_EXPORT_SETTINGS.zoomScale,
-                    ),
-                  )
-                }
-                style={styles.numberInput}
-              />
-            </label>
-
-            <label style={styles.settingField}>
-              <span style={styles.settingLabel}>Zoom In Duration</span>
-              <input
-                type="number"
-                min="1"
-                step="10"
-                value={exportSettings.zoomInMs}
-                onChange={(event) =>
-                  updateExportSetting(
-                    "zoomInMs",
-                    parseNumberInput(
-                      event.currentTarget.value,
-                      DEFAULT_EXPORT_SETTINGS.zoomInMs,
-                    ),
-                  )
-                }
-                style={styles.numberInput}
-              />
-            </label>
-
-            <label style={styles.settingField}>
-              <span style={styles.settingLabel}>Zoom Out Duration</span>
-              <input
-                type="number"
-                min="1"
-                step="10"
-                value={exportSettings.zoomOutMs}
-                onChange={(event) =>
-                  updateExportSetting(
-                    "zoomOutMs",
-                    parseNumberInput(
-                      event.currentTarget.value,
-                      DEFAULT_EXPORT_SETTINGS.zoomOutMs,
-                    ),
-                  )
-                }
-                style={styles.numberInput}
-              />
-            </label>
-
-            <label style={styles.settingField}>
-              <span style={styles.settingLabel}>Pan Transition Duration</span>
-              <input
-                type="number"
-                min="1"
-                step="10"
-                value={exportSettings.panTransitionMs}
-                onChange={(event) =>
-                  updateExportSetting(
-                    "panTransitionMs",
-                    parseNumberInput(
-                      event.currentTarget.value,
-                      DEFAULT_EXPORT_SETTINGS.panTransitionMs,
-                    ),
-                  )
-                }
-                style={styles.numberInput}
-              />
-            </label>
-          </div>
-        </section>
-
-        <section style={styles.card}>
-          <div style={styles.cardHeader}>
-            <div>
-              <p style={styles.label}>Recorder</p>
-              <p style={styles.cardTitle}>Session controls</p>
-            </div>
-          </div>
-
-          <div style={styles.controls}>
-            <button
-              type="button"
-              onClick={startRecording}
-              disabled={isBusy || isRecording}
-              style={{
-                ...styles.startButton,
-                ...(isBusy || isRecording ? styles.disabledButton : {}),
-              }}
-            >
-              Start Recording
-            </button>
-
-            <button
-              type="button"
-              onClick={stopRecording}
-              disabled={isBusy || !isRecording}
-              style={{
-                ...styles.secondaryButton,
-                ...(isBusy || !isRecording ? styles.disabledButton : {}),
-              }}
-            >
-              Stop Recording
-            </button>
-
-            <button
-              type="button"
-              onClick={exportEditedVideo}
-              disabled={isBusy || isRecording}
-              style={{
-                ...styles.secondaryButton,
-                ...(isBusy || isRecording ? styles.disabledButton : {}),
-              }}
-            >
-              Export
-            </button>
-          </div>
-
-          {isExporting && exportProgressPercentage !== null ? (
-            <div style={styles.exportProgress}>
-              <div style={styles.progressHeader}>
-                <span style={styles.settingLabel}>Export progress</span>
-                <span style={styles.progressValue}>
-                  {formatProgressPercentage(exportProgressPercentage)}
-                </span>
+        <div style={styles.workspace}>
+          <div style={styles.leftColumn}>
+            <section style={styles.card}>
+              <div style={styles.cardHeader}>
+                <div>
+                  <p style={styles.label}>Status</p>
+                  <p style={styles.cardTitle}>Recording overview</p>
+                </div>
               </div>
-              <div
-                aria-label="Export progress"
-                aria-valuemax={100}
-                aria-valuemin={0}
-                aria-valuenow={Math.round(exportProgressPercentage)}
-                role="progressbar"
-                style={styles.progressTrack}
-              >
-                <div
+
+              <div style={styles.statusPanel}>
+                <div style={styles.statTile}>
+                  <p style={styles.label}>State</p>
+                  <p style={styles.statusValue}>{statusLabel}</p>
+                </div>
+                <div style={styles.statTile}>
+                  <p style={styles.label}>Elapsed</p>
+                  <p
+                    style={{
+                      ...styles.elapsedValue,
+                      ...(isRecording ? styles.elapsedValueLive : {}),
+                    }}
+                  >
+                    {elapsedLabel}
+                  </p>
+                </div>
+              </div>
+            </section>
+
+            <section style={styles.card}>
+              <div style={styles.cardHeader}>
+                <div>
+                  <p style={styles.label}>Recorder</p>
+                  <p style={styles.cardTitle}>Capture source</p>
+                </div>
+              </div>
+
+              <div style={styles.sourceSection}>
+                <div style={styles.sourceModeGrid}>
+                  {(
+                    ["screen", "window", "region"] as RecordingSourceMode[]
+                  ).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => updateRecordingSourceMode(mode)}
+                      disabled={isBusy || isRecording}
+                      style={{
+                        ...styles.sourceModeButton,
+                        ...(recordingSourceMode === mode
+                          ? styles.sourceModeButtonActive
+                          : {}),
+                        ...(isBusy || isRecording
+                          ? styles.disabledButton
+                          : {}),
+                      }}
+                    >
+                      {sourceModeLabel(mode)}
+                    </button>
+                  ))}
+                </div>
+
+                {recordingSourceMode === "window" ? (
+                  <div style={styles.sourceDetails}>
+                    <select
+                      value={selectedWindowId}
+                      onChange={(event) =>
+                        setSelectedWindowId(event.currentTarget.value)
+                      }
+                      disabled={isBusy || isRecording || isLoadingWindows}
+                      style={styles.selectInput}
+                    >
+                      <option value="">Choose window...</option>
+                      {recordableWindows.map((window) => (
+                        <option key={window.id} value={window.id}>
+                          {window.title}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => void refreshRecordableWindows()}
+                      disabled={isBusy || isRecording || isLoadingWindows}
+                      style={{
+                        ...styles.ghostButton,
+                        ...(isBusy || isRecording || isLoadingWindows
+                          ? styles.disabledButton
+                          : {}),
+                      }}
+                    >
+                      {isLoadingWindows ? "Loading" : "Refresh"}
+                    </button>
+                  </div>
+                ) : null}
+
+                {recordingSourceMode === "region" ? (
+                  <div style={styles.sourceDetails}>
+                    <p style={styles.sourceSummary}>
+                      {selectedRegion
+                        ? formatRegionSelection(selectedRegion)
+                        : "No region selected"}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => void beginRegionSelection()}
+                      disabled={isBusy || isRecording}
+                      style={{
+                        ...styles.ghostButton,
+                        ...(isBusy || isRecording ? styles.disabledButton : {}),
+                      }}
+                    >
+                      Select Region
+                    </button>
+                  </div>
+                ) : null}
+
+                {!recordingSourceReady ? (
+                  <p style={styles.sourceHint}>
+                    {sourceValidationMessage(recordingSourceMode)}
+                  </p>
+                ) : null}
+              </div>
+
+              <div style={styles.controls}>
+                <button
+                  type="button"
+                  onClick={startRecording}
+                  disabled={isBusy || isRecording || !recordingSourceReady}
+                  title={startDisabledReason}
                   style={{
-                    ...styles.progressFill,
-                    width: `${exportProgressPercentage}%`,
+                    ...styles.startButton,
+                    ...(isBusy || isRecording || !recordingSourceReady
+                      ? styles.disabledButton
+                      : {}),
                   }}
-                />
+                >
+                  Start Recording
+                </button>
+
+                <button
+                  type="button"
+                  onClick={stopRecording}
+                  disabled={isBusy || !isRecording}
+                  style={{
+                    ...styles.secondaryButton,
+                    ...(isBusy || !isRecording ? styles.disabledButton : {}),
+                  }}
+                >
+                  Stop Recording
+                </button>
+
+                <button
+                  type="button"
+                  onClick={exportEditedVideo}
+                  disabled={isBusy || isRecording}
+                  style={{
+                    ...styles.secondaryButton,
+                    ...(isBusy || isRecording ? styles.disabledButton : {}),
+                  }}
+                >
+                  Export
+                </button>
               </div>
-            </div>
-          ) : null}
-        </section>
 
-        <section style={styles.card}>
-          <div style={styles.cardHeader}>
-            <div>
-              <p style={styles.label}>Output</p>
-              <p style={styles.cardTitle}>Generated files</p>
-            </div>
+              {isExporting && exportProgressPercentage !== null ? (
+                <div style={styles.exportProgress}>
+                  <div style={styles.progressHeader}>
+                    <span style={styles.settingLabel}>Export progress</span>
+                    <span style={styles.progressValue}>
+                      {formatProgressPercentage(exportProgressPercentage)}
+                    </span>
+                  </div>
+                  <div
+                    aria-label="Export progress"
+                    aria-valuemax={100}
+                    aria-valuemin={0}
+                    aria-valuenow={Math.round(exportProgressPercentage)}
+                    role="progressbar"
+                    style={styles.progressTrack}
+                  >
+                    <div
+                      style={{
+                        ...styles.progressFill,
+                        width: `${exportProgressPercentage}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              ) : null}
+            </section>
+
+            {exportMessage ? (
+              <p style={styles.success}>{exportMessage}</p>
+            ) : null}
+
+            {error ? <p style={styles.error}>{error}</p> : null}
           </div>
 
-          <div style={styles.folderActions}>
-            <button
-              type="button"
-              onClick={() =>
-                void openFolder("open_recordings_folder", "Recordings folder")
-              }
-              style={styles.folderButton}
-            >
-              Open Recordings Folder
-            </button>
+          <aside style={styles.rightColumn}>
+            <section style={styles.card}>
+              <div style={styles.cardHeader}>
+                <div>
+                  <p style={styles.label}>Recent sessions</p>
+                  <p style={styles.cardTitle}>Saved recordings</p>
+                </div>
+              </div>
 
-            <button
-              type="button"
-              onClick={() =>
-                void openFolder(
-                  "open_recording_session_folder",
-                  "Session folder",
-                  currentSessionPath || null,
-                )
-              }
-              style={{
-                ...styles.folderButton,
-              }}
-            >
-              Open Session Folder
-            </button>
+              <div style={styles.sessionList}>
+                {recentSessions.length === 0 ? (
+                  <p style={styles.emptyState}>
+                    {isLoadingSessions ? "Loading sessions..." : "No sessions"}
+                  </p>
+                ) : (
+                  recentSessions.map((session) => (
+                    <button
+                      key={session.sessionId}
+                      type="button"
+                      onClick={() => setSelectedSessionId(session.sessionId)}
+                      style={{
+                        ...styles.sessionRow,
+                        ...(activeSession?.sessionId === session.sessionId
+                          ? styles.sessionRowActive
+                          : {}),
+                      }}
+                    >
+                      <div style={styles.sessionMeta}>
+                        <div style={styles.sessionTitleRow}>
+                          <span style={styles.sessionId}>
+                            {session.sessionId}
+                          </span>
+                          <span
+                            style={{
+                              ...styles.exportBadge,
+                              ...(session.exported
+                                ? styles.exportBadgeReady
+                                : {}),
+                            }}
+                          >
+                            {session.exported ? "Exported" : "Draft"}
+                          </span>
+                        </div>
+                        <p style={styles.sessionDetail}>
+                          {formatSessionDate(session.createdAt)} -{" "}
+                          {formatSessionDuration(session.durationSeconds)}
+                        </p>
+                      </div>
+                    </button>
+                  ))
+                )}
+              </div>
+            </section>
 
-            <button
-              type="button"
-              onClick={() =>
-                void openFolder(
-                  "open_edited_video_folder",
-                  "Edited video folder",
-                  editedVideoFolderPath,
-                )
-              }
-              disabled={!editedVideoFolderPath}
-              style={{
-                ...styles.folderButton,
-                ...(!editedVideoFolderPath ? styles.disabledButton : {}),
-              }}
-            >
-              Open Edited Video Folder
-            </button>
-          </div>
-        </section>
+            <section style={styles.card}>
+              <div style={styles.cardHeader}>
+                <div>
+                  <p style={styles.label}>Metadata</p>
+                  <p style={styles.cardTitle}>Current session</p>
+                </div>
+              </div>
 
-        {exportMessage ? <p style={styles.success}>{exportMessage}</p> : null}
+              {activeSession ? (
+                <div style={styles.metadataGrid}>
+                  <div style={styles.metadataRow}>
+                    <span style={styles.metadataLabel}>ID</span>
+                    <span style={styles.metadataValue}>
+                      {activeSession.sessionId}
+                    </span>
+                  </div>
+                  <div style={styles.metadataRow}>
+                    <span style={styles.metadataLabel}>Date</span>
+                    <span style={styles.metadataValue}>
+                      {formatSessionDate(activeSession.createdAt)}
+                    </span>
+                  </div>
+                  <div style={styles.metadataRow}>
+                    <span style={styles.metadataLabel}>Duration</span>
+                    <span style={styles.metadataValue}>
+                      {formatSessionDuration(activeSession.durationSeconds)}
+                    </span>
+                  </div>
+                  <div style={styles.metadataRow}>
+                    <span style={styles.metadataLabel}>Source</span>
+                    <span style={styles.metadataValue}>
+                      {sourceModeLabelFromMetadata(
+                        activeSession.recordingSource,
+                      )}
+                    </span>
+                  </div>
+                  <div style={styles.metadataRow}>
+                    <span style={styles.metadataLabel}>Export</span>
+                    <span style={styles.metadataValue}>
+                      {activeSession.exported ? "Ready" : "Pending"}
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <p style={styles.emptyState}>No session selected.</p>
+              )}
+            </section>
 
-        {error ? <p style={styles.error}>{error}</p> : null}
+            <section style={styles.card}>
+              <div style={styles.cardHeader}>
+                <div>
+                  <p style={styles.label}>Actions</p>
+                  <p style={styles.cardTitle}>Session folders</p>
+                </div>
+              </div>
+
+              <div style={styles.folderActions}>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void openFolder(
+                      "open_recordings_folder",
+                      "Recordings folder",
+                    )
+                  }
+                  style={styles.folderButton}
+                >
+                  Recordings
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    void openFolder(
+                      "open_recording_session_folder",
+                      "Session folder",
+                      activeSessionFolderPath || null,
+                    )
+                  }
+                  style={styles.folderButton}
+                >
+                  Session
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    void openFolder(
+                      "open_edited_video_folder",
+                      "Edited video folder",
+                      activeEditedVideoFolderPath,
+                    )
+                  }
+                  disabled={!activeEditedVideoFolderPath}
+                  style={{
+                    ...styles.folderButton,
+                    ...(!activeEditedVideoFolderPath
+                      ? styles.disabledButton
+                      : {}),
+                  }}
+                >
+                  Edited
+                </button>
+
+                {activeSession ? (
+                  <button
+                    type="button"
+                    onClick={() => void deleteSession(activeSession)}
+                    disabled={isBusy}
+                    style={{
+                      ...styles.dangerFolderButton,
+                      ...(isBusy ? styles.disabledButton : {}),
+                    }}
+                  >
+                    Delete
+                  </button>
+                ) : null}
+              </div>
+            </section>
+          </aside>
+        </div>
       </section>
 
       {countdown !== null ? (
         <div aria-live="assertive" style={styles.countdownOverlay}>
           <span style={styles.countdownValue}>{countdown}</span>
+        </div>
+      ) : null}
+
+      {isSelectingRegion ? (
+        <div
+          role="presentation"
+          style={styles.regionOverlay}
+          onPointerDown={handleRegionPointerDown}
+          onPointerMove={handleRegionPointerMove}
+          onPointerUp={handleRegionPointerUp}
+        >
+          <div
+            style={styles.regionToolbar}
+            onPointerDown={(event) => event.stopPropagation()}
+            onPointerMove={(event) => event.stopPropagation()}
+            onPointerUp={(event) => event.stopPropagation()}
+          >
+            <div>
+              <p style={styles.regionToolbarTitle}>Select recording region</p>
+              <p style={styles.regionToolbarText}>
+                Drag to draw the capture area. Enter confirms, Esc cancels.
+              </p>
+            </div>
+            <div style={styles.regionToolbarActions}>
+              <button
+                type="button"
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={() => void cancelRegionSelection()}
+                style={styles.secondaryButton}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={() => void confirmRegionSelection()}
+                disabled={!selectedRegion}
+                style={{
+                  ...styles.startButton,
+                  ...(!selectedRegion ? styles.disabledButton : {}),
+                }}
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+
+          {regionDraft ? (
+            <>
+              <div style={regionDraftBoxStyle(regionDraft)} />
+              <div style={regionDraftBadgeStyle(regionDraft)}>
+                {formatRegionDraftDimensions(regionDraft)}
+              </div>
+            </>
+          ) : null}
         </div>
       ) : null}
     </main>
@@ -736,6 +1239,168 @@ function friendlyStringError(message: string) {
   return "FocusFlow could not complete that action. Try again.";
 }
 
+function buildRecordingSourcePayload(
+  mode: RecordingSourceMode,
+  selectedWindow: RecordableWindow | null,
+  selectedRegion: RegionSelection | null,
+): RecordingSourcePayload | null {
+  if (mode === "screen") {
+    return { type: "screen" };
+  }
+
+  if (mode === "window") {
+    if (!selectedWindow) return null;
+
+    return {
+      type: "window",
+      hwnd: selectedWindow.id,
+      title: selectedWindow.title,
+    };
+  }
+
+  if (!selectedRegion) return null;
+
+  return {
+    type: "region",
+    x: selectedRegion.x,
+    y: selectedRegion.y,
+    width: selectedRegion.width,
+    height: selectedRegion.height,
+  };
+}
+
+function sourceModeLabel(mode: RecordingSourceMode) {
+  switch (mode) {
+    case "screen":
+      return "Entire Screen";
+    case "window":
+      return "Window";
+    case "region":
+      return "Region";
+  }
+}
+
+function sourceModeLabelFromMetadata(source: string) {
+  switch (source) {
+    case "screen":
+      return "Entire Screen";
+    case "window":
+      return "Window";
+    case "region":
+      return "Region";
+    default:
+      return "Unknown source";
+  }
+}
+
+function sourceValidationMessage(mode: RecordingSourceMode) {
+  switch (mode) {
+    case "screen":
+      return "";
+    case "window":
+      return "Choose a window before starting.";
+    case "region":
+      return "Select a region before starting.";
+  }
+}
+
+function formatRegionSelection(region: RegionSelection) {
+  return `${region.width} x ${region.height} at ${region.x}, ${region.y}`;
+}
+
+function formatRegionDraftDimensions(draft: RegionDraft) {
+  const region = logicalRegionFromDraft(draft);
+  const scale = window.devicePixelRatio || 1;
+  const width = Math.round(region.width * scale);
+  const height = Math.round(region.height * scale);
+
+  return `${width} x ${height}`;
+}
+
+function physicalRegionFromDraft(
+  draft: RegionDraft,
+  windowOffset: { x: number; y: number },
+): RegionSelection {
+  const logicalRegion = logicalRegionFromDraft(draft);
+  const scale = window.devicePixelRatio || 1;
+
+  return {
+    x: Math.round(windowOffset.x + logicalRegion.x * scale),
+    y: Math.round(windowOffset.y + logicalRegion.y * scale),
+    width: Math.round(logicalRegion.width * scale),
+    height: Math.round(logicalRegion.height * scale),
+  };
+}
+
+function logicalRegionFromDraft(draft: RegionDraft) {
+  const x = Math.min(draft.startX, draft.currentX);
+  const y = Math.min(draft.startY, draft.currentY);
+  const width = Math.abs(draft.currentX - draft.startX);
+  const height = Math.abs(draft.currentY - draft.startY);
+
+  return { x, y, width, height };
+}
+
+function regionDraftBoxStyle(draft: RegionDraft): CSSProperties {
+  const region = logicalRegionFromDraft(draft);
+
+  return {
+    ...styles.regionSelectionBox,
+    left: `${region.x}px`,
+    top: `${region.y}px`,
+    width: `${region.width}px`,
+    height: `${region.height}px`,
+  };
+}
+
+function regionDraftBadgeStyle(draft: RegionDraft): CSSProperties {
+  const region = logicalRegionFromDraft(draft);
+  const left = Math.min(region.x + region.width + 12, window.innerWidth - 132);
+  const top = Math.max(12, region.y - 38);
+
+  return {
+    ...styles.regionDimensionBadge,
+    left: `${left}px`,
+    top: `${top}px`,
+  };
+}
+
+function formatSessionDate(value: string) {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return value || "Unknown date";
+  }
+
+  return date.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function formatSessionDuration(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return "00:00";
+  }
+
+  const totalSeconds = Math.floor(seconds);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const remainingSeconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return [hours, minutes, remainingSeconds]
+      .map((part) => part.toString().padStart(2, "0"))
+      .join(":");
+  }
+
+  return [minutes, remainingSeconds]
+    .map((part) => part.toString().padStart(2, "0"))
+    .join(":");
+}
+
 function sessionPathFromOutput(outputPath: string) {
   if (!outputPath) return "";
 
@@ -777,6 +1442,7 @@ function normalizeExportSettings(value: unknown): ExportSettings {
   const settings = value as Partial<Record<keyof ExportSettings, unknown>>;
 
   return {
+    preset: normalizeExportPreset(settings.preset),
     zoomScale: positiveNumberOrDefault(
       settings.zoomScale,
       DEFAULT_EXPORT_SETTINGS.zoomScale,
@@ -796,16 +1462,22 @@ function normalizeExportSettings(value: unknown): ExportSettings {
   };
 }
 
+function normalizeExportPreset(value: unknown): ExportPresetKey {
+  if (
+    value === "smallFile" ||
+    value === "balanced" ||
+    value === "highQuality"
+  ) {
+    return value;
+  }
+
+  return DEFAULT_EXPORT_SETTINGS.preset;
+}
+
 function positiveNumberOrDefault(value: unknown, fallback: number) {
   return typeof value === "number" && Number.isFinite(value) && value > 0
     ? value
     : fallback;
-}
-
-function parseNumberInput(value: string, fallback: number) {
-  const parsed = Number(value);
-
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function normalizeProgressPercentage(value: unknown) {
@@ -841,6 +1513,14 @@ async function restoreFocusFlowWindow() {
   }
 }
 
+async function exitFullscreenSelection() {
+  try {
+    await getCurrentWindow().setFullscreen(false);
+  } catch (caught) {
+    console.error("Could not exit region selection fullscreen", caught);
+  }
+}
+
 const styles = {
   page: {
     width: "100vw",
@@ -856,17 +1536,42 @@ const styles = {
       "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
   },
   shell: {
-    width: "min(760px, 100%)",
+    width: "min(1120px, 100%)",
+    height: "100%",
     maxHeight: "100%",
     boxSizing: "border-box",
     display: "grid",
-    gap: "8px",
+    gridTemplateRows: "auto minmax(0, 1fr)",
+    gap: "10px",
     overflow: "hidden",
-    padding: "16px",
+    padding: "14px",
     border: "1px solid #27272a",
-    borderRadius: "12px",
+    borderRadius: "14px",
     background: "#0f1014",
     boxShadow: "0 24px 64px rgba(0, 0, 0, 0.42)",
+  },
+  workspace: {
+    minHeight: 0,
+    display: "grid",
+    gridTemplateColumns: "minmax(0, 7fr) minmax(224px, 3fr)",
+    gap: "10px",
+    overflow: "hidden",
+  },
+  leftColumn: {
+    minWidth: 0,
+    minHeight: 0,
+    display: "grid",
+    alignContent: "start",
+    gap: "10px",
+    overflow: "hidden",
+  },
+  rightColumn: {
+    minWidth: 0,
+    minHeight: 0,
+    display: "grid",
+    gridTemplateRows: "minmax(0, 1fr) auto auto",
+    gap: "10px",
+    overflow: "hidden",
   },
   header: {
     display: "flex",
@@ -987,7 +1692,7 @@ const styles = {
   },
   statusPanel: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
     gap: "10px",
   },
   statTile: {
@@ -1001,6 +1706,42 @@ const styles = {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
     gap: "10px",
+  },
+  presetGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+    gap: "8px",
+    marginBottom: "10px",
+  },
+  presetButton: {
+    minHeight: "52px",
+    display: "grid",
+    alignContent: "center",
+    gap: "3px",
+    padding: "8px 10px",
+    border: "1px solid #27272a",
+    borderRadius: "8px",
+    background: "#09090b",
+    color: "#e4e4e7",
+    font: "inherit",
+    textAlign: "left",
+    cursor: "pointer",
+  },
+  presetButtonActive: {
+    borderColor: "#86efac",
+    background: "#0d2a1d",
+    color: "#bbf7d0",
+  },
+  presetLabel: {
+    fontSize: "12px",
+    fontWeight: 700,
+    lineHeight: 1.2,
+  },
+  presetDetail: {
+    color: "#a1a1aa",
+    fontSize: "11px",
+    fontWeight: 500,
+    lineHeight: 1.25,
   },
   settingField: {
     display: "grid",
@@ -1070,10 +1811,196 @@ const styles = {
     gridTemplateColumns: "minmax(200px, 1.35fr) repeat(2, minmax(112px, 0.65fr))",
     gap: "8px",
   },
+  sourceSection: {
+    display: "grid",
+    gap: "8px",
+    marginBottom: "8px",
+  },
+  sourceModeGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+    gap: "6px",
+  },
+  sourceModeButton: {
+    minHeight: "34px",
+    padding: "0 10px",
+    border: "1px solid #27272a",
+    borderRadius: "8px",
+    background: "#09090b",
+    color: "#e4e4e7",
+    font: "inherit",
+    fontSize: "12px",
+    fontWeight: 650,
+    cursor: "pointer",
+  },
+  sourceModeButtonActive: {
+    borderColor: "#86efac",
+    background: "#0d2a1d",
+    color: "#bbf7d0",
+  },
+  sourceDetails: {
+    display: "grid",
+    gridTemplateColumns: "minmax(0, 1fr) auto",
+    gap: "8px",
+    alignItems: "center",
+  },
+  sourceSummary: {
+    minHeight: "34px",
+    display: "flex",
+    alignItems: "center",
+    margin: 0,
+    padding: "0 10px",
+    border: "1px solid #27272a",
+    borderRadius: "8px",
+    background: "#09090b",
+    color: "#d4d4d8",
+    fontSize: "12px",
+    lineHeight: 1.35,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  sourceHint: {
+    margin: 0,
+    color: "#fbbf24",
+    fontSize: "12px",
+    lineHeight: 1.35,
+  },
+  selectInput: {
+    width: "100%",
+    minHeight: "34px",
+    minWidth: 0,
+    boxSizing: "border-box",
+    border: "1px solid #27272a",
+    borderRadius: "8px",
+    background: "#09090b",
+    color: "#fafafa",
+    padding: "0 10px",
+    font: "inherit",
+    fontSize: "13px",
+    fontWeight: 500,
+  },
   folderActions: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+    gap: "6px",
+  },
+  sessionList: {
+    display: "grid",
+    alignContent: "start",
+    gap: "6px",
+    minHeight: 0,
+    maxHeight: "100%",
+    overflowX: "hidden",
+    overflowY: "auto",
+    paddingRight: "2px",
+  },
+  emptyState: {
+    margin: 0,
+    padding: "10px",
+    border: "1px dashed #27272a",
+    borderRadius: "8px",
+    color: "#a1a1aa",
+    fontSize: "13px",
+    lineHeight: 1.4,
+  },
+  sessionRow: {
+    display: "grid",
+    width: "100%",
+    gridTemplateColumns: "minmax(0, 1fr)",
+    gap: "6px",
+    alignItems: "center",
+    minWidth: 0,
+    margin: 0,
+    padding: "8px",
+    border: "1px solid #27272a",
+    borderRadius: "8px",
+    background: "#0f1014",
+    color: "inherit",
+    font: "inherit",
+    textAlign: "left",
+    cursor: "pointer",
+  },
+  sessionRowActive: {
+    borderColor: "#86efac",
+    background: "#102016",
+  },
+  sessionMeta: {
+    display: "grid",
+    gap: "4px",
+    minWidth: 0,
+  },
+  sessionTitleRow: {
+    display: "flex",
+    alignItems: "center",
     gap: "8px",
+    minWidth: 0,
+  },
+  sessionId: {
+    minWidth: 0,
+    overflow: "hidden",
+    color: "#fafafa",
+    fontSize: "13px",
+    fontWeight: 700,
+    lineHeight: 1.2,
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  sessionDetail: {
+    margin: 0,
+    overflow: "hidden",
+    color: "#a1a1aa",
+    fontSize: "12px",
+    lineHeight: 1.35,
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  exportBadge: {
+    flex: "0 0 auto",
+    minHeight: "22px",
+    display: "inline-flex",
+    alignItems: "center",
+    padding: "0 8px",
+    border: "1px solid #3f3f46",
+    borderRadius: "999px",
+    background: "#18181b",
+    color: "#d4d4d8",
+    fontSize: "11px",
+    fontWeight: 700,
+  },
+  exportBadgeReady: {
+    borderColor: "#14532d",
+    background: "#0d2a1d",
+    color: "#86efac",
+  },
+  sessionActions: {
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+  },
+  miniButton: {
+    minHeight: "30px",
+    padding: "0 9px",
+    border: "1px solid #27272a",
+    borderRadius: "8px",
+    background: "#09090b",
+    color: "#e4e4e7",
+    font: "inherit",
+    fontSize: "12px",
+    fontWeight: 650,
+    cursor: "pointer",
+  },
+  dangerMiniButton: {
+    minHeight: "30px",
+    padding: "0 9px",
+    border: "1px solid #7f1d1d",
+    borderRadius: "8px",
+    background: "#2a1113",
+    color: "#fecaca",
+    font: "inherit",
+    fontSize: "12px",
+    fontWeight: 650,
+    cursor: "pointer",
   },
   exportProgress: {
     display: "grid",
@@ -1131,16 +2058,56 @@ const styles = {
     cursor: "pointer",
   },
   folderButton: {
-    minHeight: "36px",
-    padding: "0 14px",
+    minHeight: "32px",
+    padding: "0 10px",
     border: "1px solid #27272a",
     borderRadius: "8px",
     background: "#09090b",
     color: "#e4e4e7",
     font: "inherit",
-    fontSize: "13px",
+    fontSize: "12px",
     fontWeight: 600,
     cursor: "pointer",
+  },
+  dangerFolderButton: {
+    minHeight: "32px",
+    padding: "0 10px",
+    border: "1px solid #7f1d1d",
+    borderRadius: "8px",
+    background: "#2a1113",
+    color: "#fecaca",
+    font: "inherit",
+    fontSize: "12px",
+    fontWeight: 650,
+    cursor: "pointer",
+  },
+  metadataGrid: {
+    display: "grid",
+    gap: "6px",
+  },
+  metadataRow: {
+    display: "grid",
+    gridTemplateColumns: "70px minmax(0, 1fr)",
+    gap: "8px",
+    alignItems: "center",
+    minHeight: "24px",
+  },
+  metadataLabel: {
+    color: "#71717a",
+    fontSize: "10px",
+    fontWeight: 700,
+    lineHeight: 1.2,
+    textTransform: "uppercase",
+  },
+  metadataValue: {
+    minWidth: 0,
+    overflow: "hidden",
+    color: "#e4e4e7",
+    fontSize: "12px",
+    fontWeight: 600,
+    lineHeight: 1.3,
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
   },
   disabledButton: {
     opacity: 0.45,
@@ -1165,6 +2132,80 @@ const styles = {
     fontSize: "13px",
     lineHeight: 1.5,
     color: "#86efac",
+  },
+  regionOverlay: {
+    position: "fixed",
+    inset: 0,
+    zIndex: 20,
+    overflow: "hidden",
+    background: "rgba(2, 6, 23, 0.82)",
+    cursor: "crosshair",
+    userSelect: "none",
+  },
+  regionToolbar: {
+    position: "absolute",
+    top: "16px",
+    left: "50%",
+    zIndex: 22,
+    width: "min(680px, calc(100vw - 32px))",
+    minHeight: "58px",
+    transform: "translateX(-50%)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "16px",
+    padding: "10px 12px",
+    border: "1px solid #27272a",
+    borderRadius: "10px",
+    background: "rgba(9, 9, 11, 0.92)",
+    boxShadow: "0 18px 48px rgba(0, 0, 0, 0.36)",
+    cursor: "default",
+  },
+  regionToolbarTitle: {
+    margin: 0,
+    color: "#fafafa",
+    fontSize: "14px",
+    fontWeight: 700,
+    lineHeight: 1.2,
+  },
+  regionToolbarText: {
+    margin: "4px 0 0",
+    color: "#a1a1aa",
+    fontSize: "12px",
+    lineHeight: 1.35,
+  },
+  regionToolbarActions: {
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+  },
+  regionSelectionBox: {
+    position: "absolute",
+    zIndex: 21,
+    border: "2px solid #86efac",
+    borderRadius: "4px",
+    background: "rgba(134, 239, 172, 0.12)",
+    boxShadow:
+      "0 0 0 9999px rgba(2, 6, 23, 0.52), 0 0 0 1px rgba(9, 9, 11, 0.85) inset",
+    pointerEvents: "none",
+  },
+  regionDimensionBadge: {
+    position: "absolute",
+    zIndex: 23,
+    minWidth: "112px",
+    minHeight: "28px",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "0 9px",
+    border: "1px solid #27272a",
+    borderRadius: "999px",
+    background: "rgba(9, 9, 11, 0.92)",
+    color: "#fafafa",
+    fontSize: "12px",
+    fontWeight: 700,
+    fontVariantNumeric: "tabular-nums",
+    pointerEvents: "none",
   },
 } satisfies Record<string, CSSProperties>;
 

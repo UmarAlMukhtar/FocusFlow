@@ -1,4 +1,5 @@
 [package]
+default-run = "FocusFlow"
 name = "FocusFlow"
 version = "0.1.0"
 description = "A Tauri App"
@@ -23,8 +24,10 @@ tauri-plugin-opener = "2"
 tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+windows-capture = "2.0.0"
 windows = { version = "0.61.3", features = [
   "Win32_Foundation",
+  "Win32_System_Threading",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
 ] }

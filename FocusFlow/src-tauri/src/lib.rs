@@ -268,7 +268,7 @@ fn handle_start_recording_hotkey(app: &AppHandle) {
         minimize_main_window(&app);
         let state = app.state::<recorder::RecorderState>();
 
-        match recorder::start_recording(app.clone(), state).await {
+        match recorder::start_recording(app.clone(), state, None).await {
             Ok(_) => emit_recording_status_changed(&app),
             Err(error) => eprintln!("FocusFlow start recording hotkey failed: {error}"),
         }
@@ -338,7 +338,10 @@ pub fn run() {
             open_edited_video_folder,
             recorder::start_recording,
             recorder::stop_recording,
-            recorder::recording_status
+            recorder::recording_status,
+            recorder::list_recordable_windows,
+            recorder::list_recent_sessions,
+            recorder::delete_recording_session
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
