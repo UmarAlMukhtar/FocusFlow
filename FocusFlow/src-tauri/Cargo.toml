@@ -1,17 +1,23 @@
 [package]
 default-run = "FocusFlow"
 name = "FocusFlow"
-version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+version = "0.1.1"
+description = "Screen recording that edits itself"
+authors = ["Umar Al Mukhtar"]
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/UmarAlMukhtar/FocusFlow"
+homepage = "https://focusflow.demosnap.tech"
+readme = "../README.md"
+keywords = ["screen-recording", "tauri", "rust", "ffmpeg", "tutorials"]
+categories = ["multimedia", "gui"]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+# See more keys and their definitions at:
+# https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
-# The `_lib` suffix may seem redundant but it is necessary
-# to make the lib name unique and wouldn't conflict with the bin name.
-# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+# The `_lib` suffix keeps the library name distinct from the binary name.
+# This avoids naming conflicts on Windows.
 name = "focusflow_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
@@ -22,9 +28,12 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-shell = "2"
+
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
 windows-capture = "2.0.0"
+
 windows = { version = "0.61.3", features = [
   "Win32_Foundation",
   "Win32_System_Threading",
