@@ -34,6 +34,12 @@ serde_json = "1"
 
 windows-capture = "2.0.0"
 
+# Audio recording (Phase 1 — mic capture backend)
+# cpal uses the Windows WASAPI backend for low-latency, reliable mic access.
+# hound writes PCM samples to WAV; pure-Rust, no unsafe code in our layer.
+cpal  = "0.15"
+hound = "3.5"
+
 windows = { version = "0.61.3", features = [
   "Win32_Foundation",
   "Win32_System_Threading",

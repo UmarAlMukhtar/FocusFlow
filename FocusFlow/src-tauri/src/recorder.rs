@@ -1,3 +1,4 @@
+use crate::audio_recorder::AudioRecorder;
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::{c_void, OsStr},
@@ -51,6 +52,7 @@ const DRAGS_FILE_NAME: &str = "drags.json";
 const EDITED_FILE_NAME: &str = "edited.mp4";
 const FFMPEG_SIDECAR_NAME: &str = "ffmpeg";
 const METADATA_FILE_NAME: &str = "metadata.json";
+const MIC_AUDIO_FILE_NAME: &str = "mic.wav";
 const OUTPUT_FILE_NAME: &str = "screen.mp4";
 const OUTPUT_RECORDINGS_DIR_NAME: &str = "Recordings";
 const SESSION_FILE_NAME: &str = "session.json";
@@ -180,6 +182,11 @@ struct SessionMetadata {
     source: RecordingSource,
     capture_bounds: CaptureBounds,
     capture_backend: CaptureBackend,
+    /// Whether `mic.wav` was successfully recorded in this session.
+    has_mic_audio: bool,
+    /// Name of the microphone device used, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mic_device_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -276,6 +283,10 @@ struct RecorderRuntime {
 
 struct ActiveRecording {
     capture: ActiveCapture,
+    /// Running microphone recorder, or `None` when mic was not enabled.
+    audio_recorder: Option<AudioRecorder>,
+    /// Human-readable name of the mic device that was selected.
+    mic_device_name: Option<String>,
     click_tracker: ClickTracker,
     output_path: PathBuf,
     started_at: Instant,
@@ -299,6 +310,13 @@ impl ActiveCapture {
         match self {
             ActiveCapture::Ffmpeg { child } => Some(child.id()),
             ActiveCapture::WindowsCapture { .. } => None,
+        }
+    }
+
+    fn backend(&self) -> CaptureBackend {
+        match self {
+            ActiveCapture::Ffmpeg { .. } => CaptureBackend::Ffmpeg,
+            ActiveCapture::WindowsCapture { .. } => CaptureBackend::WindowsCapture,
         }
     }
 }
@@ -652,13 +670,16 @@ pub async fn start_recording(
     app: AppHandle,
     state: State<'_, RecorderState>,
     source: Option<RecordingSource>,
+    // Microphone device ID (WASAPI device name).  Pass `None` or omit to
+    // record without microphone audio.
+    audio_device_id: Option<String>,
 ) -> RecorderResult<RecordingStatus> {
-    start_recording_with_source(&app, &state, source.unwrap_or_default()).await
+    start_recording_with_source(&app, state.inner(), source.unwrap_or_default(), audio_device_id).await
 }
 
 #[tauri::command]
 pub async fn stop_recording(state: State<'_, RecorderState>) -> RecorderResult<RecordingStatus> {
-    stop_active_recording(&state).await
+    stop_active_recording(state.inner()).await
 }
 
 #[tauri::command]
@@ -666,7 +687,7 @@ pub fn recording_status(
     app: AppHandle,
     state: State<'_, RecorderState>,
 ) -> RecorderResult<RecordingStatus> {
-    current_recording_status(&app, &state)
+    current_recording_status(&app, state.inner())
 }
 
 #[tauri::command]
@@ -733,6 +754,7 @@ async fn start_recording_with_source(
     app: &AppHandle,
     state: &RecorderState,
     source: RecordingSource,
+    audio_device_id: Option<String>,
 ) -> RecorderResult<RecordingStatus> {
     ensure_windows()?;
 
@@ -772,11 +794,59 @@ async fn start_recording_with_source(
     })?;
 
     let capture_plan = capture_plan_for_source(app, source, &output_path)?;
+
+    // ── Microphone recording ───────────────────────────────────────────────
+    //
+    // Start audio *before* writing metadata so that a failure here prevents
+    // an orphaned session folder with no video.
+    let mic_device_id_ref = audio_device_id
+        .as_deref()
+        .filter(|s| !s.is_empty());
+
+    let (audio_recorder, mic_device_name) = match mic_device_id_ref {
+        Some(device_name) => {
+            let mic_path = output_dir.join(MIC_AUDIO_FILE_NAME);
+            println!(
+                "[FocusFlow audio] Starting microphone recording: {device_name}"
+            );
+            println!(
+                "[FocusFlow audio] Writing mic.wav: {}",
+                mic_path.display()
+            );
+
+            match AudioRecorder::start(Some(device_name), &mic_path) {
+                Ok(recorder) => (Some(recorder), Some(device_name.to_string())),
+                Err(audio_error) => {
+                    // Audio start failure is fatal: return a clear error so
+                    // the user knows mic recording did not work before video
+                    // starts (avoids a recording with no audio despite asking).
+                    if let Err(cleanup_error) = fs::remove_dir_all(output_dir) {
+                        eprintln!(
+                            "[FocusFlow audio] Could not clean up session dir after audio start failure: {cleanup_error}"
+                        );
+                    }
+                    return Err(RecorderError::new(
+                        "mic_start_failed",
+                        format!(
+                            "Could not start microphone recording ({}): {}",
+                            audio_error.code, audio_error.message
+                        ),
+                        true,
+                    ));
+                }
+            }
+        }
+        None => (None, None),
+    };
+    // ── End microphone recording setup ────────────────────────────────────
+
     write_session_metadata(
         &output_path,
         &capture_plan.source,
         capture_plan.bounds,
         capture_plan.backend,
+        false, // has_mic_audio is set to true on successful stop
+        mic_device_name.clone(),
     )?;
     write_session_json(&output_path, &capture_plan.source, 0.0, false)?;
     let monitor = capture_plan.monitor.clone();
@@ -791,6 +861,15 @@ async fn start_recording_with_source(
     ) {
         Ok(capture) => capture,
         Err(error) => {
+            // Video capture failed after audio was already started.
+            // Stop the audio recorder (best-effort) before returning the error.
+            if let Some(recorder) = audio_recorder {
+                if let Err(audio_error) = recorder.stop() {
+                    eprintln!(
+                        "[FocusFlow audio] Failed to stop mic recorder after video start failure: {audio_error}"
+                    );
+                }
+            }
             if let Err(cleanup_error) = fs::remove_dir_all(output_dir) {
                 eprintln!(
                     "Could not remove failed recording session directory {}: {cleanup_error}",
@@ -809,6 +888,8 @@ async fn start_recording_with_source(
 
     let active = ActiveRecording {
         capture,
+        audio_recorder,
+        mic_device_name,
         click_tracker,
         output_path: output_path.clone(),
         started_at,
@@ -972,6 +1053,8 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
 
     let ActiveRecording {
         capture,
+        audio_recorder,
+        mic_device_name,
         click_tracker,
         output_path,
         started_at,
@@ -984,8 +1067,17 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
 
     click_tracker.request_stop();
 
+    let backend = capture.backend();
     let capture_stop = stop_capture_backend(capture, &log).await;
     let interactions = click_tracker.finish();
+
+    // ── Stop microphone recording ─────────────────────────────────────────
+    //
+    // Stop audio after video so we don't hold the WASAPI stream open while
+    // the video finalizes.  Audio stop failure is non-fatal: the video
+    // session is still saved and `has_mic_audio` is set to false in metadata.
+    let has_mic_audio = stop_audio_recorder(audio_recorder, &output_path);
+    // ── End microphone stop ───────────────────────────────────────────────
 
     if let Err(error) = capture_stop {
         state.clear_finalizing()?;
@@ -1053,6 +1145,18 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
         return Err(error);
     }
 
+    if let Err(error) = write_session_metadata(
+        &output_path,
+        &source,
+        capture_bounds,
+        backend,
+        has_mic_audio,
+        mic_device_name.clone(),
+    ) {
+        state.clear_finalizing()?;
+        return Err(error);
+    }
+
     let completed = CompletedRecording {
         output_path: output_path.clone(),
         monitor: monitor.clone(),
@@ -1075,6 +1179,48 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
         elapsed_ms: completed.duration_ms,
         file_size_bytes: Some(completed.file_size_bytes),
     })
+}
+
+fn stop_audio_recorder(audio_recorder: Option<AudioRecorder>, output_path: &Path) -> bool {
+    let Some(recorder) = audio_recorder else {
+        return false;
+    };
+
+    println!("[FocusFlow audio] Stopped microphone recording");
+
+    // Stop the audio recorder and finalize the WAV file.
+    let stop_result = recorder.stop();
+
+    // Check if the WAV file exists and is non-empty.
+    let mic_path = match output_path.parent() {
+        Some(parent) => parent.join(MIC_AUDIO_FILE_NAME),
+        None => {
+            eprintln!("[FocusFlow audio] Could not resolve session folder to check mic.wav");
+            return false;
+        }
+    };
+
+    if let Err(error) = stop_result {
+        eprintln!("[FocusFlow audio] Failed to stop/finalize mic recording: {}", error);
+        return false;
+    }
+
+    match fs::metadata(&mic_path) {
+        Ok(metadata) => {
+            let size = metadata.len();
+            if size > 0 {
+                println!("[FocusFlow audio] mic.wav size: {}", size);
+                true
+            } else {
+                eprintln!("[FocusFlow audio] mic.wav is empty");
+                false
+            }
+        }
+        Err(error) => {
+            eprintln!("[FocusFlow audio] mic.wav does not exist or is unreadable: {}", error);
+            false
+        }
+    }
 }
 
 async fn stop_capture_backend(
@@ -2389,12 +2535,16 @@ fn write_session_metadata(
     source: &RecordingSource,
     capture_bounds: CaptureBounds,
     capture_backend: CaptureBackend,
+    has_mic_audio: bool,
+    mic_device_name: Option<String>,
 ) -> RecorderResult<()> {
     let metadata = SessionMetadata {
         version: 1,
         source: source.clone(),
         capture_bounds,
         capture_backend,
+        has_mic_audio,
+        mic_device_name,
     };
     let json = serde_json::to_vec_pretty(&metadata).map_err(|error| {
         RecorderError::new(

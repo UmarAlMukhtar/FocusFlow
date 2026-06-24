@@ -49,6 +49,18 @@ type ExportPresetKey = "smallFile" | "balanced" | "highQuality";
 
 type RecordingSourceMode = "screen" | "window" | "region";
 
+// ── Phase 1 audio test types (remove in Phase 3 UI) ──────────────────────
+type AudioDevice = {
+  id: string;
+  name: string;
+};
+
+type AudioError = {
+  code: string;
+  message: string;
+  recoverable: boolean;
+};
+
 type RecordableWindow = {
   id: string;
   title: string;
@@ -582,6 +594,7 @@ function App() {
 
       const nextStatus = await invoke<RecordingStatus>("start_recording", {
         source: recordingSourcePayload,
+        audioDeviceId: micEnabled ? (selectedDeviceId || null) : null,
       });
       setStatus(nextStatus);
     } catch (caught) {
@@ -686,6 +699,48 @@ function App() {
       setError(`${label} could not be opened: ${formatError(caught)}`);
     }
   }
+
+  // ── Phase 2 audio backend test UI ──────────────────────────────────────
+  const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
+  const [isLoadingDevices, setIsLoadingDevices] = useState(false);
+  const [audioTestError, setAudioTestError] = useState<string | null>(null);
+  const [micEnabled, setMicEnabled] = useState(false);
+  const [selectedDeviceId, setSelectedDeviceId] = useState("");
+
+  async function refreshAudioDevices() {
+    setIsLoadingDevices(true);
+    setAudioTestError(null);
+    try {
+      const devices = await invoke<AudioDevice[]>("list_audio_input_devices");
+      console.log("[FocusFlow audio] list_audio_input_devices →", devices);
+      setAudioDevices(devices);
+      if (devices.length > 0) {
+        setSelectedDeviceId((prev) => {
+          if (prev && devices.some(d => d.id === prev)) {
+            return prev;
+          }
+          return devices[0].id;
+        });
+      } else {
+        setSelectedDeviceId("");
+      }
+    } catch (caught) {
+      const err = caught as AudioError;
+      const msg = err?.message ?? String(caught);
+      console.error("[FocusFlow audio] list_audio_input_devices failed:", caught);
+      setAudioTestError(msg);
+    } finally {
+      setIsLoadingDevices(false);
+    }
+  }
+
+  async function handleMicToggle(enabled: boolean) {
+    setMicEnabled(enabled);
+    if (enabled) {
+      await refreshAudioDevices();
+    }
+  }
+  // ── End Phase 2 audio test ────────────────────────────────────────────
 
   return (
     <main style={styles.page}>
@@ -911,6 +966,81 @@ function App() {
                 </div>
               ) : null}
             </section>
+
+            {/* ── TEMP: Phase 2 audio test ── */}
+            <section style={styles.card}>
+              <div style={styles.cardHeader}>
+                <div>
+                  <p style={styles.label}>🎙️ Microphone Settings</p>
+                  <p style={styles.cardTitle}>Audio Recording</p>
+                </div>
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: "10px", cursor: "pointer", fontSize: "14px", color: "#fafafa" }}>
+                  <input
+                    type="checkbox"
+                    checked={micEnabled}
+                    onChange={(e) => void handleMicToggle(e.target.checked)}
+                    disabled={isBusy || isRecording}
+                    style={{ cursor: "pointer" }}
+                  />
+                  Enable Microphone
+                </label>
+
+                {micEnabled && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                    <label style={{ fontSize: "12px", color: "#a1a1aa" }}>Input Device</label>
+                    <div style={{ display: "flex", gap: "8px" }}>
+                      <select
+                        value={selectedDeviceId}
+                        onChange={(e) => setSelectedDeviceId(e.target.value)}
+                        disabled={isBusy || isRecording || isLoadingDevices}
+                        style={{
+                          flex: 1,
+                          background: "#1c1c20",
+                          border: "1px solid #27272a",
+                          color: "#fafafa",
+                          borderRadius: "6px",
+                          padding: "6px 10px",
+                          fontSize: "13px",
+                          outline: "none",
+                        }}
+                      >
+                        {audioDevices.length === 0 ? (
+                          <option value="">No microphone devices found</option>
+                        ) : (
+                          audioDevices.map((device) => (
+                            <option key={device.id} value={device.id}>
+                              {device.name}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => void refreshAudioDevices()}
+                        disabled={isBusy || isRecording || isLoadingDevices}
+                        style={{
+                          ...styles.ghostButton,
+                          padding: "6px 12px",
+                          ...(isLoadingDevices ? styles.disabledButton : {}),
+                        }}
+                      >
+                        Refresh
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {audioTestError ? (
+                  <p style={{ ...styles.error, margin: 0 }}>
+                    ⚠ {audioTestError}
+                  </p>
+                ) : null}
+              </div>
+            </section>
+            {/* ── End TEMP audio test ── */}
 
             {exportMessage ? (
               <p style={styles.success}>{exportMessage}</p>
