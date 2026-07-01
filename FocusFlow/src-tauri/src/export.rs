@@ -1,3 +1,4 @@
+use hound::WavReader;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt, fs,
@@ -23,6 +24,8 @@ const FFMPEG_SIDECAR_NAME: &str = "ffmpeg";
 const FILTER_SCRIPT_FILE_NAME: &str = "edited.filter_complex.txt";
 const MAX_CAPTURED_LOG_BYTES: usize = 96 * 1024;
 const OUTPUT_FILE_NAME: &str = "screen.mp4";
+const MIC_AUDIO_FILE_NAME: &str = "mic.wav";
+const WAV_HEADER_SIZE_BYTES: u64 = 44;
 const DEFAULT_TARGET_FPS: u32 = 30;
 const DEFAULT_CRF: u8 = 25;
 const TIMELINE_FILE_NAME: &str = "timeline.json";
@@ -297,7 +300,9 @@ fn export_edited_mp4_blocking(
     );
 
     let mic_detected = paths.mic_path.is_some();
-    let mic_size_bytes = paths.mic_path.as_ref()
+    let mic_size_bytes = paths
+        .mic_path
+        .as_ref()
         .and_then(|p| fs::metadata(p).ok())
         .map(|m| m.len())
         .unwrap_or(0);
@@ -314,7 +319,8 @@ fn export_edited_mp4_blocking(
     emit_export_progress(&app, 0.0);
 
     if timeline.is_empty() && clicks.is_empty() {
-        let mut export_result = run_ffmpeg_copy(&app, &paths, video_info.duration, config, use_audio);
+        let mut export_result =
+            run_ffmpeg_copy(&app, &paths, video_info.duration, config, use_audio);
         if use_audio && export_result.is_err() {
             let err = export_result.as_ref().err().unwrap();
             eprintln!(
@@ -335,10 +341,10 @@ fn export_edited_mp4_blocking(
         write_filter_script(&paths.filter_script_path, &filter)?;
         println!(
             "[FocusFlow export] filter script size: {} bytes  expected output duration: ≈{:.3}s",
-            filter_bytes,
-            video_info.duration
+            filter_bytes, video_info.duration
         );
-        let mut export_result = run_ffmpeg_zoom_export(&app, &paths, video_info.duration, config, use_audio);
+        let mut export_result =
+            run_ffmpeg_zoom_export(&app, &paths, video_info.duration, config, use_audio);
         if use_audio && export_result.is_err() {
             let err = export_result.as_ref().err().unwrap();
             eprintln!(
@@ -350,7 +356,8 @@ fn export_edited_mp4_blocking(
             }
             use_audio = false;
             println!("[FocusFlow export] export is using audio: {}", use_audio);
-            export_result = run_ffmpeg_zoom_export(&app, &paths, video_info.duration, config, use_audio);
+            export_result =
+                run_ffmpeg_zoom_export(&app, &paths, video_info.duration, config, use_audio);
         }
         if let Err(error) = remove_filter_script(&paths) {
             eprintln!("{error}");
@@ -416,8 +423,8 @@ impl ExportPaths {
     }
 
     fn from_session_dir(session_dir: PathBuf) -> ExportPaths {
-        let mic_path = session_dir.join("mic.wav");
-        let mic_path = if mic_path.exists() && fs::metadata(&mic_path).map(|m| m.len() > 0).unwrap_or(false) {
+        let mic_path = session_dir.join(MIC_AUDIO_FILE_NAME);
+        let mic_path = if is_usable_mic_wav(&mic_path) {
             Some(mic_path)
         } else {
             None
@@ -434,6 +441,22 @@ impl ExportPaths {
             filter_script_path: session_dir.join(FILTER_SCRIPT_FILE_NAME),
         }
     }
+}
+
+fn is_usable_mic_wav(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+
+    if metadata.len() <= WAV_HEADER_SIZE_BYTES {
+        return false;
+    }
+
+    let Ok(reader) = WavReader::open(path) else {
+        return false;
+    };
+
+    reader.duration() > 0
 }
 
 fn mark_session_exported(paths: &ExportPaths) -> ExportCommandResult<()> {

@@ -27,11 +27,6 @@
 //! channel.  The writer thread exits its `recv` loop and calls
 //! `WavWriter::finalize()`, writing the WAV chunk-size header.
 
-// Phase 1: AudioRecorder and its helpers are defined here but not yet called
-// from recorder.rs.  They will be wired into ActiveRecording in Phase 2.
-// Suppress dead_code warnings until that integration is complete.
-#![allow(dead_code)]
-
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     SampleFormat,
@@ -71,11 +66,7 @@ pub struct AudioError {
 }
 
 impl AudioError {
-    fn new(
-        code: impl Into<String>,
-        message: impl Into<String>,
-        recoverable: bool,
-    ) -> Self {
+    fn new(code: impl Into<String>, message: impl Into<String>, recoverable: bool) -> Self {
         AudioError {
             code: code.into(),
             message: message.into(),
@@ -182,10 +173,7 @@ impl AudioRecorder {
     ///
     /// `output_path` should be the full path to `mic.wav` inside the current
     /// session folder, e.g. `…/Recordings/2026-06-24T09-00-00/mic.wav`.
-    pub fn start(
-        device_name: Option<&str>,
-        output_path: &Path,
-    ) -> AudioResult<AudioRecorder> {
+    pub fn start(device_name: Option<&str>, output_path: &Path) -> AudioResult<AudioRecorder> {
         let host = cpal::default_host();
 
         let device = match device_name {
@@ -229,10 +217,7 @@ impl AudioRecorder {
         Self::start_for_device(&device, output_path)
     }
 
-    fn start_for_device(
-        device: &cpal::Device,
-        output_path: &Path,
-    ) -> AudioResult<AudioRecorder> {
+    fn start_for_device(device: &cpal::Device, output_path: &Path) -> AudioResult<AudioRecorder> {
         // Query the device's preferred input configuration (sample rate,
         // channel count, sample format).  This is what WASAPI reports as the
         // device's native mix format.
@@ -289,9 +274,7 @@ impl AudioRecorder {
                 )
             })?;
 
-        let device_label = device
-            .name()
-            .unwrap_or_else(|_| "<unknown>".to_string());
+        let device_label = device.name().unwrap_or_else(|_| "<unknown>".to_string());
 
         println!(
             "[FocusFlow audio] Recording started \
@@ -337,16 +320,14 @@ impl AudioRecorder {
         // The thread's return value is `AudioResult<()>`, which propagates
         // any WAV write or finalize errors back to the caller.
         let writer_result = if let Some(handle) = writer_thread.take() {
-            handle
-                .join()
-                .map_err(|_| {
-                    AudioError::new(
-                        "writer_thread_panicked",
-                        "Audio writer thread panicked before mic.wav was finalized. \
+            handle.join().map_err(|_| {
+                AudioError::new(
+                    "writer_thread_panicked",
+                    "Audio writer thread panicked before mic.wav was finalized. \
                          The recording may be unreadable.",
-                        true,
-                    )
-                })?
+                    true,
+                )
+            })?
         } else {
             Ok(())
         };
@@ -387,13 +368,13 @@ fn build_input_stream(
         SampleFormat::F64 => build_typed_input_stream::<f64>(device, config, tx, f64_to_i16),
 
         // Signed integer formats
-        SampleFormat::I8  => build_typed_input_stream::<i8> (device, config, tx, i8_to_i16),
+        SampleFormat::I8 => build_typed_input_stream::<i8>(device, config, tx, i8_to_i16),
         SampleFormat::I16 => build_typed_input_stream::<i16>(device, config, tx, i16_identity),
         SampleFormat::I32 => build_typed_input_stream::<i32>(device, config, tx, i32_to_i16),
         SampleFormat::I64 => build_typed_input_stream::<i64>(device, config, tx, i64_to_i16),
 
         // Unsigned integer formats
-        SampleFormat::U8  => build_typed_input_stream::<u8> (device, config, tx, u8_to_i16),
+        SampleFormat::U8 => build_typed_input_stream::<u8>(device, config, tx, u8_to_i16),
         SampleFormat::U16 => build_typed_input_stream::<u16>(device, config, tx, u16_to_i16),
         SampleFormat::U32 => build_typed_input_stream::<u32>(device, config, tx, u32_to_i16),
         SampleFormat::U64 => build_typed_input_stream::<u64>(device, config, tx, u64_to_i16),

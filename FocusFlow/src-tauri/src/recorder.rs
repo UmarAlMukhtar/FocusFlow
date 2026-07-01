@@ -1,4 +1,5 @@
 use crate::audio_recorder::AudioRecorder;
+use hound::WavReader;
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::{c_void, OsStr},
@@ -74,6 +75,7 @@ const TIMELINE_MERGE_WINDOW_SECONDS: f64 = 0.3;
 const TARGET_FPS: u32 = 30;
 const STOP_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_CAPTURED_LOG_BYTES: usize = 96 * 1024;
+const WAV_HEADER_SIZE_BYTES: u64 = 44;
 
 pub type RecorderResult<T> = Result<T, RecorderError>;
 
@@ -600,8 +602,9 @@ impl ClickTracker {
                 }
 
                 if right_is_down && !right_was_down {
-                    right_drag = push_click(&worker_clicks, started_at, ClickButton::Right, &filter)
-                        .map(|point| PendingDrag::new(ClickButton::Right, point));
+                    right_drag =
+                        push_click(&worker_clicks, started_at, ClickButton::Right, &filter)
+                            .map(|point| PendingDrag::new(ClickButton::Right, point));
                 } else if right_is_down {
                     update_pending_drag(&mut right_drag, started_at);
                 } else if right_was_down {
@@ -674,7 +677,13 @@ pub async fn start_recording(
     // record without microphone audio.
     audio_device_id: Option<String>,
 ) -> RecorderResult<RecordingStatus> {
-    start_recording_with_source(&app, state.inner(), source.unwrap_or_default(), audio_device_id).await
+    start_recording_with_source(
+        &app,
+        state.inner(),
+        source.unwrap_or_default(),
+        audio_device_id,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -799,20 +808,13 @@ async fn start_recording_with_source(
     //
     // Start audio *before* writing metadata so that a failure here prevents
     // an orphaned session folder with no video.
-    let mic_device_id_ref = audio_device_id
-        .as_deref()
-        .filter(|s| !s.is_empty());
+    let mic_device_id_ref = audio_device_id.as_deref().filter(|s| !s.is_empty());
 
     let (audio_recorder, mic_device_name) = match mic_device_id_ref {
         Some(device_name) => {
             let mic_path = output_dir.join(MIC_AUDIO_FILE_NAME);
-            println!(
-                "[FocusFlow audio] Starting microphone recording: {device_name}"
-            );
-            println!(
-                "[FocusFlow audio] Writing mic.wav: {}",
-                mic_path.display()
-            );
+            println!("[FocusFlow audio] Starting microphone recording: {device_name}");
+            println!("[FocusFlow audio] Writing mic.wav: {}", mic_path.display());
 
             match AudioRecorder::start(Some(device_name), &mic_path) {
                 Ok(recorder) => (Some(recorder), Some(device_name.to_string())),
@@ -1191,7 +1193,6 @@ fn stop_audio_recorder(audio_recorder: Option<AudioRecorder>, output_path: &Path
     // Stop the audio recorder and finalize the WAV file.
     let stop_result = recorder.stop();
 
-    // Check if the WAV file exists and is non-empty.
     let mic_path = match output_path.parent() {
         Some(parent) => parent.join(MIC_AUDIO_FILE_NAME),
         None => {
@@ -1201,26 +1202,45 @@ fn stop_audio_recorder(audio_recorder: Option<AudioRecorder>, output_path: &Path
     };
 
     if let Err(error) = stop_result {
-        eprintln!("[FocusFlow audio] Failed to stop/finalize mic recording: {}", error);
+        eprintln!(
+            "[FocusFlow audio] Failed to stop/finalize mic recording: {}",
+            error
+        );
         return false;
     }
 
-    match fs::metadata(&mic_path) {
-        Ok(metadata) => {
-            let size = metadata.len();
-            if size > 0 {
-                println!("[FocusFlow audio] mic.wav size: {}", size);
-                true
-            } else {
-                eprintln!("[FocusFlow audio] mic.wav is empty");
-                false
-            }
+    if is_usable_mic_wav(&mic_path) {
+        if let Ok(metadata) = fs::metadata(&mic_path) {
+            println!("[FocusFlow audio] mic.wav size: {}", metadata.len());
         }
-        Err(error) => {
-            eprintln!("[FocusFlow audio] mic.wav does not exist or is unreadable: {}", error);
-            false
-        }
+        println!(
+            "[FocusFlow audio] mic.wav is usable: {}",
+            mic_path.display()
+        );
+        true
+    } else {
+        eprintln!(
+            "[FocusFlow audio] mic.wav is missing, empty, header-only, or unreadable: {}",
+            mic_path.display()
+        );
+        false
     }
+}
+
+fn is_usable_mic_wav(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+
+    if metadata.len() <= WAV_HEADER_SIZE_BYTES {
+        return false;
+    }
+
+    let Ok(reader) = WavReader::open(path) else {
+        return false;
+    };
+
+    reader.duration() > 0
 }
 
 async fn stop_capture_backend(
@@ -1698,11 +1718,7 @@ fn window_rect_for_hwnd(_hwnd: usize) -> Option<(i32, i32)> {
 ///   matches the recorded window, then converts screen coordinates to
 ///   window-relative using the window's *current* position (live `GetWindowRect`
 ///   call). Out-of-bounds clicks (e.g. after a window resize) are discarded.
-fn apply_click_filter(
-    filter: &ClickFilter,
-    screen_x: i32,
-    screen_y: i32,
-) -> Option<(i32, i32)> {
+fn apply_click_filter(filter: &ClickFilter, screen_x: i32, screen_y: i32) -> Option<(i32, i32)> {
     match filter {
         ClickFilter::All => Some((screen_x, screen_y)),
         ClickFilter::Window {
@@ -1909,14 +1925,8 @@ fn build_timeline_segments(
     clicks: Vec<ClickEvent>,
     drags: Vec<DragInteraction>,
 ) -> Vec<TimelineSegment> {
-    println!(
-        "[FocusFlow timeline] raw click count: {}",
-        clicks.len()
-    );
-    println!(
-        "[FocusFlow timeline] raw drag count: {}",
-        drags.len()
-    );
+    println!("[FocusFlow timeline] raw click count: {}", clicks.len());
+    println!("[FocusFlow timeline] raw drag count: {}", drags.len());
 
     let mut timeline = build_click_timeline_segments(clicks);
     timeline.extend(build_drag_timeline_segments(drags));

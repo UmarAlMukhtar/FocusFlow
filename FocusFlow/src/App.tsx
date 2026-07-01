@@ -49,7 +49,6 @@ type ExportPresetKey = "smallFile" | "balanced" | "highQuality";
 
 type RecordingSourceMode = "screen" | "window" | "region";
 
-// ── Phase 1 audio test types (remove in Phase 3 UI) ──────────────────────
 type AudioDevice = {
   id: string;
   name: string;
@@ -102,6 +101,7 @@ type RecentSession = {
 const EXPORT_PROGRESS_EVENT = "export-progress";
 const RECORDING_STATUS_CHANGED_EVENT = "recording-status-changed";
 const EXPORT_SETTINGS_STORAGE_KEY = "focusflow.exportSettings";
+const MIC_DEVICE_STORAGE_KEY = "focusflow.selectedMicDevice";
 const DEFAULT_EXPORT_SETTINGS: ExportSettings = {
   preset: "balanced",
   zoomScale: 2.3,
@@ -148,6 +148,8 @@ const FRIENDLY_ERROR_MESSAGES: Record<string, string> = {
     "FocusFlow could not identify that recording session. Refresh the session list and try again.",
   invalid_window_source:
     "The selected window is no longer valid. Refresh the window list and choose again.",
+  mic_start_failed:
+    "FocusFlow could not start microphone recording. Check microphone access and try again.",
   monitor_query_failed:
     "FocusFlow could not read monitor information for that capture area.",
   non_utf8_path:
@@ -255,6 +257,13 @@ function App() {
   const [isSelectingRegion, setIsSelectingRegion] = useState(false);
   const [regionDraft, setRegionDraft] = useState<RegionDraft | null>(null);
   const [regionWindowOffset, setRegionWindowOffset] = useState({ x: 0, y: 0 });
+  const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
+  const [isLoadingDevices, setIsLoadingDevices] = useState(false);
+  const [micError, setMicError] = useState<string | null>(null);
+  const [micEnabled, setMicEnabled] = useState(false);
+  const [selectedDeviceId, setSelectedDeviceId] = useState(() =>
+    loadSelectedMicDevice(),
+  );
 
   const statusLabel = useMemo(() => {
     if (countdown !== null) return "Starting...";
@@ -265,6 +274,8 @@ function App() {
   }, [countdown, isBusy, isExporting, status]);
 
   const isRecording = status?.phase === "recording";
+  const isFinalizing = status?.phase === "finalizing";
+  const micControlsDisabled = isBusy || isRecording || isFinalizing;
   const elapsedLabel = formatElapsedTime(status?.elapsedMs ?? 0);
   const currentSessionPath = useMemo(
     () => sessionPathFromOutput(status?.outputPath ?? ""),
@@ -438,6 +449,10 @@ function App() {
     saveExportSettings(exportSettings);
   }, [exportSettings]);
 
+  useEffect(() => {
+    saveSelectedMicDevice(selectedDeviceId);
+  }, [selectedDeviceId]);
+
   async function refreshStatus(clearError = true) {
     try {
       const nextStatus = await invoke<RecordingStatus>("recording_status");
@@ -576,9 +591,33 @@ function App() {
       return;
     }
 
+    if (micEnabled && !selectedDeviceId) {
+      setMicError("Choose a microphone before starting, or turn microphone off.");
+      return;
+    }
+
+    if (micEnabled && isLoadingDevices) {
+      setMicError("Wait for the microphone list to finish loading.");
+      return;
+    }
+
+    if (micEnabled && audioDevices.length === 0) {
+      setMicError("No microphone is available. Connect one or turn microphone off.");
+      return;
+    }
+
+    if (
+      micEnabled &&
+      !audioDevices.some((device) => device.id === selectedDeviceId)
+    ) {
+      setMicError("Selected microphone is unavailable. Refresh devices or choose another mic.");
+      return;
+    }
+
     setIsBusy(true);
     setCountdown(null);
     setError(null);
+    setMicError(null);
     setExportMessage(null);
     let didMinimizeWindow = false;
 
@@ -700,35 +739,27 @@ function App() {
     }
   }
 
-  // ── Phase 2 audio backend test UI ──────────────────────────────────────
-  const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
-  const [isLoadingDevices, setIsLoadingDevices] = useState(false);
-  const [audioTestError, setAudioTestError] = useState<string | null>(null);
-  const [micEnabled, setMicEnabled] = useState(false);
-  const [selectedDeviceId, setSelectedDeviceId] = useState("");
-
   async function refreshAudioDevices() {
     setIsLoadingDevices(true);
-    setAudioTestError(null);
+    setMicError(null);
     try {
       const devices = await invoke<AudioDevice[]>("list_audio_input_devices");
-      console.log("[FocusFlow audio] list_audio_input_devices →", devices);
       setAudioDevices(devices);
       if (devices.length > 0) {
         setSelectedDeviceId((prev) => {
-          if (prev && devices.some(d => d.id === prev)) {
+          if (prev && devices.some((device) => device.id === prev)) {
             return prev;
           }
           return devices[0].id;
         });
       } else {
         setSelectedDeviceId("");
+        setMicError("No microphone is available. Connect one or turn microphone off.");
       }
     } catch (caught) {
       const err = caught as AudioError;
       const msg = err?.message ?? String(caught);
-      console.error("[FocusFlow audio] list_audio_input_devices failed:", caught);
-      setAudioTestError(msg);
+      setMicError(msg);
     } finally {
       setIsLoadingDevices(false);
     }
@@ -740,7 +771,6 @@ function App() {
       await refreshAudioDevices();
     }
   }
-  // ── End Phase 2 audio test ────────────────────────────────────────────
 
   return (
     <main style={styles.page}>
@@ -967,12 +997,11 @@ function App() {
               ) : null}
             </section>
 
-            {/* ── TEMP: Phase 2 audio test ── */}
             <section style={styles.card}>
               <div style={styles.cardHeader}>
                 <div>
-                  <p style={styles.label}>🎙️ Microphone Settings</p>
-                  <p style={styles.cardTitle}>Audio Recording</p>
+                  <p style={styles.label}>Microphone</p>
+                  <p style={styles.cardTitle}>Audio recording</p>
                 </div>
               </div>
 
@@ -982,8 +1011,10 @@ function App() {
                     type="checkbox"
                     checked={micEnabled}
                     onChange={(e) => void handleMicToggle(e.target.checked)}
-                    disabled={isBusy || isRecording}
-                    style={{ cursor: "pointer" }}
+                    disabled={micControlsDisabled}
+                    style={{
+                      cursor: micControlsDisabled ? "not-allowed" : "pointer",
+                    }}
                   />
                   Enable Microphone
                 </label>
@@ -995,7 +1026,7 @@ function App() {
                       <select
                         value={selectedDeviceId}
                         onChange={(e) => setSelectedDeviceId(e.target.value)}
-                        disabled={isBusy || isRecording || isLoadingDevices}
+                        disabled={micControlsDisabled || isLoadingDevices}
                         style={{
                           flex: 1,
                           background: "#1c1c20",
@@ -1020,11 +1051,13 @@ function App() {
                       <button
                         type="button"
                         onClick={() => void refreshAudioDevices()}
-                        disabled={isBusy || isRecording || isLoadingDevices}
+                        disabled={micControlsDisabled || isLoadingDevices}
                         style={{
                           ...styles.ghostButton,
                           padding: "6px 12px",
-                          ...(isLoadingDevices ? styles.disabledButton : {}),
+                          ...(micControlsDisabled || isLoadingDevices
+                            ? styles.disabledButton
+                            : {}),
                         }}
                       >
                         Refresh
@@ -1033,14 +1066,13 @@ function App() {
                   </div>
                 )}
 
-                {audioTestError ? (
+                {micError ? (
                   <p style={{ ...styles.error, margin: 0 }}>
-                    ⚠ {audioTestError}
+                    {micError}
                   </p>
                 ) : null}
               </div>
             </section>
-            {/* ── End TEMP audio test ── */}
 
             {exportMessage ? (
               <p style={styles.success}>{exportMessage}</p>
@@ -1561,6 +1593,26 @@ function saveExportSettings(settings: ExportSettings) {
     );
   } catch {
     // Ignore storage failures; export still uses the in-memory settings.
+  }
+}
+
+function loadSelectedMicDevice() {
+  try {
+    return window.localStorage.getItem(MIC_DEVICE_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function saveSelectedMicDevice(deviceId: string) {
+  try {
+    if (deviceId) {
+      window.localStorage.setItem(MIC_DEVICE_STORAGE_KEY, deviceId);
+    } else {
+      window.localStorage.removeItem(MIC_DEVICE_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage failures; mic selection still works in memory.
   }
 }
 
