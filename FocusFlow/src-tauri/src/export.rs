@@ -1,3 +1,4 @@
+use hound::WavReader;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt, fs,
@@ -23,6 +24,8 @@ const FFMPEG_SIDECAR_NAME: &str = "ffmpeg";
 const FILTER_SCRIPT_FILE_NAME: &str = "edited.filter_complex.txt";
 const MAX_CAPTURED_LOG_BYTES: usize = 96 * 1024;
 const OUTPUT_FILE_NAME: &str = "screen.mp4";
+const MIC_AUDIO_FILE_NAME: &str = "mic.wav";
+const WAV_HEADER_SIZE_BYTES: u64 = 44;
 const DEFAULT_TARGET_FPS: u32 = 30;
 const DEFAULT_CRF: u8 = 25;
 const TIMELINE_FILE_NAME: &str = "timeline.json";
@@ -296,6 +299,19 @@ fn export_edited_mp4_blocking(
         timeline.len()
     );
 
+    let mic_detected = paths.mic_path.is_some();
+    let mic_size_bytes = paths
+        .mic_path
+        .as_ref()
+        .and_then(|p| fs::metadata(p).ok())
+        .map(|m| m.len())
+        .unwrap_or(0);
+    println!("[FocusFlow export] mic.wav detected: {}", mic_detected);
+    println!("[FocusFlow export] mic.wav size: {} bytes", mic_size_bytes);
+
+    let mut use_audio = mic_detected;
+    println!("[FocusFlow export] export is using audio: {}", use_audio);
+
     if paths.temp_output_path.exists() {
         remove_file(&paths.temp_output_path)?;
     }
@@ -303,17 +319,46 @@ fn export_edited_mp4_blocking(
     emit_export_progress(&app, 0.0);
 
     if timeline.is_empty() && clicks.is_empty() {
-        run_ffmpeg_copy(&app, &paths, video_info.duration, config)?;
+        let mut export_result =
+            run_ffmpeg_copy(&app, &paths, video_info.duration, config, use_audio);
+        if use_audio && export_result.is_err() {
+            let err = export_result.as_ref().err().unwrap();
+            eprintln!(
+                "[FocusFlow export] Audio copy export failed, falling back to no-audio export. Reason: {:?}",
+                err
+            );
+            if paths.temp_output_path.exists() {
+                let _ = remove_file(&paths.temp_output_path);
+            }
+            use_audio = false;
+            println!("[FocusFlow export] export is using audio: {}", use_audio);
+            export_result = run_ffmpeg_copy(&app, &paths, video_info.duration, config, use_audio);
+        }
+        export_result?;
     } else {
         let filter = build_export_filter(&timeline, &clicks, video_info, config);
         let filter_bytes = filter.len() as u64;
         write_filter_script(&paths.filter_script_path, &filter)?;
         println!(
             "[FocusFlow export] filter script size: {} bytes  expected output duration: ≈{:.3}s",
-            filter_bytes,
-            video_info.duration
+            filter_bytes, video_info.duration
         );
-        let export_result = run_ffmpeg_zoom_export(&app, &paths, video_info.duration, config);
+        let mut export_result =
+            run_ffmpeg_zoom_export(&app, &paths, video_info.duration, config, use_audio);
+        if use_audio && export_result.is_err() {
+            let err = export_result.as_ref().err().unwrap();
+            eprintln!(
+                "[FocusFlow export] Audio zoom export failed, falling back to no-audio export. Reason: {:?}",
+                err
+            );
+            if paths.temp_output_path.exists() {
+                let _ = remove_file(&paths.temp_output_path);
+            }
+            use_audio = false;
+            println!("[FocusFlow export] export is using audio: {}", use_audio);
+            export_result =
+                run_ffmpeg_zoom_export(&app, &paths, video_info.duration, config, use_audio);
+        }
         if let Err(error) = remove_filter_script(&paths) {
             eprintln!("{error}");
         }
@@ -325,13 +370,12 @@ fn export_edited_mp4_blocking(
     emit_export_progress(&app, 100.0);
 
     // Diagnostics: output
-    let output_size_kb = fs::metadata(&paths.output_path)
-        .map(|m| m.len() / 1024)
+    let output_size_bytes = fs::metadata(&paths.output_path)
+        .map(|m| m.len())
         .unwrap_or(0);
     println!(
-        "[FocusFlow export] output size: {} KB  path: {}",
-        output_size_kb,
-        paths.output_path.display()
+        "[FocusFlow export] final edited.mp4 size: {} bytes",
+        output_size_bytes
     );
 
     export_edited_mp4_ok_result(&paths, timeline.len())
@@ -353,6 +397,7 @@ fn export_edited_mp4_ok_result(
 struct ExportPaths {
     session_dir: PathBuf,
     input_path: PathBuf,
+    mic_path: Option<PathBuf>,
     timeline_path: PathBuf,
     clicks_path: PathBuf,
     output_path: PathBuf,
@@ -378,9 +423,17 @@ impl ExportPaths {
     }
 
     fn from_session_dir(session_dir: PathBuf) -> ExportPaths {
+        let mic_path = session_dir.join(MIC_AUDIO_FILE_NAME);
+        let mic_path = if is_usable_mic_wav(&mic_path) {
+            Some(mic_path)
+        } else {
+            None
+        };
+
         ExportPaths {
             session_dir: session_dir.clone(),
             input_path: session_dir.join(OUTPUT_FILE_NAME),
+            mic_path,
             timeline_path: session_dir.join(TIMELINE_FILE_NAME),
             clicks_path: session_dir.join(CLICKS_FILE_NAME),
             output_path: session_dir.join(EDITED_FILE_NAME),
@@ -388,6 +441,22 @@ impl ExportPaths {
             filter_script_path: session_dir.join(FILTER_SCRIPT_FILE_NAME),
         }
     }
+}
+
+fn is_usable_mic_wav(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+
+    if metadata.len() <= WAV_HEADER_SIZE_BYTES {
+        return false;
+    }
+
+    let Ok(reader) = WavReader::open(path) else {
+        return false;
+    };
+
+    reader.duration() > 0
 }
 
 fn mark_session_exported(paths: &ExportPaths) -> ExportCommandResult<()> {
@@ -1413,38 +1482,62 @@ fn run_ffmpeg_zoom_export(
     paths: &ExportPaths,
     duration_seconds: f64,
     config: ExportConfig,
+    use_audio: bool,
 ) -> ExportCommandResult<()> {
-    run_ffmpeg(
-        app,
-        [
-            "-hide_banner".to_string(),
-            "-nostats".to_string(),
-            "-progress".to_string(),
-            "pipe:1".to_string(),
-            "-y".to_string(),
-            "-i".to_string(),
-            path_to_string(&paths.input_path)?,
-            "-filter_complex_script".to_string(),
-            path_to_string(&paths.filter_script_path)?,
-            "-map".to_string(),
-            "[v]".to_string(),
-            "-r".to_string(),
-            config.fps.to_string(),
-            "-an".to_string(),
-            "-c:v".to_string(),
-            "libx264".to_string(),
-            "-preset".to_string(),
-            "veryfast".to_string(),
-            "-crf".to_string(),
-            config.crf.to_string(),
-            "-pix_fmt".to_string(),
-            "yuv420p".to_string(),
-            "-movflags".to_string(),
-            "+faststart".to_string(),
-            path_to_string(&paths.temp_output_path)?,
-        ],
-        duration_seconds,
-    )
+    let mut args = vec![
+        "-hide_banner".to_string(),
+        "-nostats".to_string(),
+        "-progress".to_string(),
+        "pipe:1".to_string(),
+        "-y".to_string(),
+        "-i".to_string(),
+        path_to_string(&paths.input_path)?,
+    ];
+
+    if use_audio {
+        if let Some(ref mic_path) = paths.mic_path {
+            args.push("-i".to_string());
+            args.push(path_to_string(mic_path)?);
+        }
+    }
+
+    args.push("-filter_complex_script".to_string());
+    args.push(path_to_string(&paths.filter_script_path)?);
+
+    args.push("-map".to_string());
+    args.push("[v]".to_string());
+
+    if use_audio && paths.mic_path.is_some() {
+        args.push("-map".to_string());
+        args.push("1:a".to_string());
+    }
+
+    args.push("-r".to_string());
+    args.push(config.fps.to_string());
+
+    if use_audio && paths.mic_path.is_some() {
+        args.push("-c:a".to_string());
+        args.push("aac".to_string());
+        args.push("-b:a".to_string());
+        args.push("128k".to_string());
+        args.push("-shortest".to_string());
+    } else {
+        args.push("-an".to_string());
+    }
+
+    args.push("-c:v".to_string());
+    args.push("libx264".to_string());
+    args.push("-preset".to_string());
+    args.push("veryfast".to_string());
+    args.push("-crf".to_string());
+    args.push(config.crf.to_string());
+    args.push("-pix_fmt".to_string());
+    args.push("yuv420p".to_string());
+    args.push("-movflags".to_string());
+    args.push("+faststart".to_string());
+    args.push(path_to_string(&paths.temp_output_path)?);
+
+    run_ffmpeg(app, args, duration_seconds)
 }
 
 fn run_ffmpeg_copy(
@@ -1452,34 +1545,59 @@ fn run_ffmpeg_copy(
     paths: &ExportPaths,
     duration_seconds: f64,
     config: ExportConfig,
+    use_audio: bool,
 ) -> ExportCommandResult<()> {
-    run_ffmpeg(
-        app,
-        [
-            "-hide_banner".to_string(),
-            "-nostats".to_string(),
-            "-progress".to_string(),
-            "pipe:1".to_string(),
-            "-y".to_string(),
-            "-i".to_string(),
-            path_to_string(&paths.input_path)?,
-            "-r".to_string(),
-            config.fps.to_string(),
-            "-an".to_string(),
-            "-c:v".to_string(),
-            "libx264".to_string(),
-            "-preset".to_string(),
-            "veryfast".to_string(),
-            "-crf".to_string(),
-            config.crf.to_string(),
-            "-pix_fmt".to_string(),
-            "yuv420p".to_string(),
-            "-movflags".to_string(),
-            "+faststart".to_string(),
-            path_to_string(&paths.temp_output_path)?,
-        ],
-        duration_seconds,
-    )
+    let mut args = vec![
+        "-hide_banner".to_string(),
+        "-nostats".to_string(),
+        "-progress".to_string(),
+        "pipe:1".to_string(),
+        "-y".to_string(),
+        "-i".to_string(),
+        path_to_string(&paths.input_path)?,
+    ];
+
+    if use_audio {
+        if let Some(ref mic_path) = paths.mic_path {
+            args.push("-i".to_string());
+            args.push(path_to_string(mic_path)?);
+        }
+    }
+
+    args.push("-map".to_string());
+    args.push("0:v".to_string());
+
+    if use_audio && paths.mic_path.is_some() {
+        args.push("-map".to_string());
+        args.push("1:a".to_string());
+    }
+
+    args.push("-r".to_string());
+    args.push(config.fps.to_string());
+
+    if use_audio && paths.mic_path.is_some() {
+        args.push("-c:a".to_string());
+        args.push("aac".to_string());
+        args.push("-b:a".to_string());
+        args.push("128k".to_string());
+        args.push("-shortest".to_string());
+    } else {
+        args.push("-an".to_string());
+    }
+
+    args.push("-c:v".to_string());
+    args.push("libx264".to_string());
+    args.push("-preset".to_string());
+    args.push("veryfast".to_string());
+    args.push("-crf".to_string());
+    args.push(config.crf.to_string());
+    args.push("-pix_fmt".to_string());
+    args.push("yuv420p".to_string());
+    args.push("-movflags".to_string());
+    args.push("+faststart".to_string());
+    args.push(path_to_string(&paths.temp_output_path)?);
+
+    run_ffmpeg(app, args, duration_seconds)
 }
 
 fn run_ffmpeg<I>(app: &AppHandle, args: I, duration_seconds: f64) -> ExportCommandResult<()>
