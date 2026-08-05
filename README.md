@@ -106,6 +106,10 @@ FocusFlow is distributed as a native Windows application.
 > [!NOTE]
 > FocusFlow bundles the required FFmpeg binary as a Tauri sidecar. No separate installation of FFmpeg is required.
 
+### Windows SmartScreen notice
+
+FocusFlow is a new open-source Windows application. Microsoft Defender SmartScreen may display a warning because the installer is not yet code-signed and has not built download reputation. You can inspect the source code in this repository before installing. If you trust the release, select **More info → Run anyway** to continue.
+
 ---
 
 ## Usage
@@ -237,6 +241,18 @@ We welcome contributions of all levels! Please read our [CONTRIBUTING.md](CONTRI
 * Work with the Rust backend and React frontend.
 * Write clean commits and verify your changes.
 * Open bug reports and feature requests.
+
+Development prerequisites, local setup, and build commands are documented in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+
+## Release Checklist
+
+- [ ] Run `cargo check` from `FocusFlow/src-tauri/`.
+- [ ] Run `cargo build` from `FocusFlow/src-tauri/`.
+- [ ] Run `pnpm run build` from `FocusFlow/`.
+- [ ] Run `pnpm tauri build` from `FocusFlow/`.
+- [ ] Manually record and export a session with the microphone ON.
+- [ ] Manually record and export a session with the microphone OFF.
+- [ ] Generate and publish a SHA256 checksum for the MSI installer.
 
 ---
 

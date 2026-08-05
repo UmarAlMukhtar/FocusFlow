@@ -30,16 +30,18 @@ Current release target:
 
 Important paths:
 
-- `src/App.tsx` â€” main frontend UI and Tauri invoke calls
-- `src/App.css` â€” frontend styling
-- `src-tauri/src/lib.rs` â€” Tauri command registration and app setup
-- `src-tauri/src/recorder.rs` â€” recording lifecycle, session metadata, click/drag tracking
-- `src-tauri/src/audio_recorder.rs` â€” microphone device enumeration and WAV recording
-- `src-tauri/src/export.rs` â€” FFmpeg export pipeline
-- `src-tauri/Cargo.toml` â€” Rust dependencies and app version
-- `src-tauri/tauri.conf.json` â€” Tauri app metadata and bundle config
-- `package.json` â€” frontend package metadata and app version
-- `CHANGELOG.md` â€” release notes
+- `FocusFlow/src/App.tsx` - main frontend UI and Tauri invoke calls
+- `FocusFlow/src/App.css` - frontend styling
+- `FocusFlow/src-tauri/src/lib.rs` - Tauri command registration and app setup
+- `FocusFlow/src-tauri/src/recorder.rs` - recording lifecycle, session metadata, click/drag tracking
+- `FocusFlow/src-tauri/src/audio_recorder.rs` - microphone device enumeration and WAV recording
+- `FocusFlow/src-tauri/src/export.rs` - FFmpeg export pipeline
+- `FocusFlow/package.json` - frontend package metadata and app version
+- `FocusFlow/src-tauri/Cargo.toml` - Rust dependencies and app version
+- `FocusFlow/src-tauri/tauri.conf.json` - Tauri app metadata and bundle config
+- `CHANGELOG.md` - authoritative release notes
+- `README.md` - public project documentation
+- `docs/DEVELOPMENT.md` - local setup and build documentation
 
 ## General Coding Rules
 
@@ -117,7 +119,7 @@ Do not add system audio unless explicitly requested.
 
 ## FFmpeg / Export Rules
 
-Export logic lives in `src-tauri/src/export.rs`.
+Export logic lives in `FocusFlow/src-tauri/src/export.rs`.
 
 Rules:
 
@@ -149,9 +151,9 @@ Rules:
 
 Version files must stay consistent:
 
-- `package.json`
-- `src-tauri/Cargo.toml`
-- `src-tauri/tauri.conf.json`
+- `FocusFlow/package.json`
+- `FocusFlow/src-tauri/Cargo.toml`
+- `FocusFlow/src-tauri/tauri.conf.json`
 
 Release naming:
 
@@ -168,25 +170,22 @@ Before release, update:
 
 ## Testing Commands
 
-From the project root:
+Run frontend and Tauri commands from the application directory:
 
 ```powershell
+cd FocusFlow
 pnpm run build
-````
+pnpm tauri dev
+pnpm tauri build
+```
 
-From `src-tauri`:
+Run Rust commands from the Tauri directory:
 
 ```powershell
+cd FocusFlow/src-tauri
 cargo check
 cargo build
 cargo test
-```
-
-For full app testing:
-
-```powershell
-pnpm tauri dev
-pnpm tauri build
 ```
 
 Manual tests required for audio work:
@@ -250,4 +249,3 @@ After coding:
 3. Explain behavior changes.
 4. List manual tests still required.
 5. Do not commit or tag unless explicitly asked.
-
