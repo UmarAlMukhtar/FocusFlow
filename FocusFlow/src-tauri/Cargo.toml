@@ -8,7 +8,7 @@ edition = "2021"
 license = "MIT"
 repository = "https://github.com/UmarAlMukhtar/FocusFlow"
 homepage = "https://focusflow.demosnap.tech"
-readme = "../README.md"
+readme = "../../README.md"
 keywords = ["screen-recording", "tauri", "rust", "ffmpeg", "tutorials"]
 categories = ["multimedia", "gui"]
 
