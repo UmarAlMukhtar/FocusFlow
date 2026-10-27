@@ -3,7 +3,7 @@ use std::{cell::RefCell,sync::atomic::{AtomicU64,Ordering}};
 static NEXT:AtomicU64=AtomicU64::new(0);
 struct Fixture {root:PathBuf,dir:PathBuf}
 impl Fixture {
-    fn new()->Self {let root=std::env::temp_dir().join(format!("focusflow-windows-publish-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));let dir=root.join("fixture");fs::create_dir_all(&dir).unwrap();Self {root,dir}}
+    fn new()->Self {let root=std::env::temp_dir().join(format!("focusflow-windows-publish-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));let dir=root.join("fixture");fs::create_dir_all(&dir).unwrap();Self {root:root.canonicalize().unwrap(),dir:dir.canonicalize().unwrap()}}
 }
 impl Drop for Fixture {fn drop(&mut self){fs::remove_dir_all(&self.root).unwrap();}}
 fn start()->WindowsCaptureManifestV2 {decode_windows(include_bytes!("../../../tests/fixtures/windows-incomplete.json"),"fixture").unwrap()}

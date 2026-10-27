@@ -5,6 +5,8 @@ import re
 import tempfile
 import unittest
 import run
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 class Gates(unittest.TestCase):
@@ -22,6 +24,20 @@ class Gates(unittest.TestCase):
         for summary in ['17 passed; 0 failed; 0 ignored;', '14 passed; 0 failed; 1 ignored;', '15 passed; 0 failed; 1 ignored;']:
             with self.subTest(summary=summary), self.assertRaises(AssertionError):
                 run.require_test_count('test result: ok. ' + summary, run.WINDOWS_IMPORT_TEST_COUNT)
+
+    def test_import_command_skips_only_known_helper(self):
+        repo=Path(__file__).resolve().parents[2]
+        metadata={'packages':[{'name':'windows-capture','source':None,'manifest_path':str(repo/'FocusFlow/vendor/windows-capture/Cargo.toml')}]}
+        class ImportReached(BaseException):pass
+        def execute(argv,root,name,*args,**kwargs):
+            if name=='core-import':
+                self.assertEqual(argv[argv.index('--')+1:],['--test-threads=1','--nocapture','--skip','common::child_writer'])
+                raise ImportReached
+            log=root/(name+'.log');log.write_text('test result: ok. 10 passed; 0 failed; 0 ignored;');return log
+        with tempfile.TemporaryDirectory() as tmp:
+            args=SimpleNamespace(evidence=Path(tmp)/'evidence',ffmpeg=Path(tmp)/'ffmpeg',ffprobe=Path(tmp)/'ffprobe')
+            with patch('run.sys.platform','win32'),patch('run.os.chdir'),patch('run.source_manifest',return_value={}),patch('run.sha',side_effect=lambda p:run.FFMPEG_SHA if p==args.ffmpeg else run.FFPROBE_SHA),patch('run.subprocess.check_output',side_effect=lambda argv,**kw:json.dumps(metadata) if argv[0]=='cargo' else 'fixture-sha'),patch('run.execute',side_effect=execute):
+                with self.assertRaises(ImportReached):run.run(args)
 
     def test_exit7_requires_actual_exit_and_eof_without_other_failure(self):
         trace = dict(encoderExitCode=7, nonEncoderFailure=False, failure='Encoder exited 7', supervisorTerminated=None, overflow=False, selected=2, written=2, width=641, height=359, writes=[dict(ok=True, bytes=642*360*4)]*2)

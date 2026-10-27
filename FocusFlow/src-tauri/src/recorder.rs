@@ -1,4 +1,5 @@
 mod video_clock;
+mod session_path;
 #[cfg(any(windows, test))]
 mod owned_feed;
 #[cfg(any(windows, test))]
@@ -2546,7 +2547,12 @@ fn create_session_screen_output_path(app: &AppHandle) -> RecorderResult<PathBuf>
         let session_dir = recordings_dir.join(folder_name);
 
         match fs::create_dir(&session_dir) {
-            Ok(()) => return Ok(session_dir.join(OUTPUT_FILE_NAME)),
+            Ok(()) => {
+                let session_dir = session_path::resolve_created(&recordings_dir, &session_dir).map_err(|error| {
+                    RecorderError::new("resolve_session_dir_failed", format!("Could not resolve the new recording folder. Check access to the recordings directory and retry: {error}"), true)
+                })?;
+                return Ok(session_dir.join(OUTPUT_FILE_NAME));
+            },
             Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
             Err(error) => {
                 return Err(RecorderError::new(

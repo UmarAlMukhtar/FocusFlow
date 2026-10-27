@@ -16,7 +16,7 @@ impl TestDir {
                 NEXT_DIR.fetch_add(1, Ordering::Relaxed)
             ));
             match std::fs::create_dir(&path) {
-                Ok(()) => return Self(path),
+                Ok(()) => return Self(path.canonicalize().expect("Could not resolve test directory")),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => panic!("Could not create test directory: {error}"),
             }

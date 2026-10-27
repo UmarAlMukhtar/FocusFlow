@@ -75,9 +75,78 @@ def native_qpc():
     assert ctypes.WinDLL('kernel32',use_last_error=True).QueryPerformanceCounter(ctypes.byref(value))
     return value.value
 
+def fixture_write(path,value):
+    pending=path.with_suffix('.pending');write(pending,value);pending.replace(path)
+
+def fixture_read(path):
+    assert path.is_file() and not path.is_symlink() and path.stat().st_size<=1024,'source control must be a regular file <=1KiB'
+    return json.loads(path.read_text(encoding='utf-8'))
+
+def window_pid(hwnd):
+    user=ctypes.WinDLL('user32',use_last_error=True)
+    user.GetWindowThreadProcessId.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.DWORD)]
+    user.GetWindowThreadProcessId.restype=wintypes.DWORD
+    pid=wintypes.DWORD();assert user.GetWindowThreadProcessId(hwnd,ctypes.byref(pid)),'source HWND unavailable'
+    return pid.value
+
+class GeneratedSources:
+    def __init__(self,harness,root,env):self.harness=harness;self.root=root;self.env=env;self.children={}
+    def poll(self,driver_pid):
+        for request in self.root.glob('session-*/source-request.json'):
+            case=request.parent
+            if case in self.children:continue
+            assert not case.is_symlink() and case.name in {'session-0','session-1','session-2'} and len(self.children)<3,'unexpected source session'
+            data=fixture_read(request)
+            assert set(data)=={'width','height','nonce','animated'}
+            assert type(data['width']) is int and 160<=data['width']<=1920
+            assert type(data['height']) is int and 120<=data['height']<=1080
+            assert type(data['nonce']) is int and 0<=data['nonce']<=65535 and type(data['animated']) is bool
+            argv=[str(self.harness),'--source',str(case),str(data['width']),str(data['height']),str(data['nonce']),str(int(data['animated']))]
+            with (case/'source.log').open('wb') as out:
+                proc=subprocess.Popen(argv,stdin=subprocess.DEVNULL,stdout=out,stderr=subprocess.STDOUT,env=self.env)
+            # Retained Popen owns the exact process handle even before the HWND handshake succeeds.
+            self.children[case]=dict(proc=proc,argv=argv,observed=False,aliveBeforeParentKillQpc=None,aliveAfterProductExitQpc=None)
+        for case,item in self.children.items():
+            proc=item['proc'];code=proc.poll()
+            if code is not None:
+                if not (case/'source-exit.json').exists():fixture_write(case/'source-exit.json',dict(pid=proc.pid,exitCode=code))
+                assert code==0 and any(fixture_read(p).get('action')=='close' for p in case.glob('source-command-*.json')),'source exited unexpectedly'
+                continue
+            ready=case/'source-ready.json'
+            if not item['observed'] and ready.is_file():
+                data=fixture_read(ready)
+                assert set(data)=={'pid','hwnd'} and type(data['pid']) is int and type(data['hwnd']) is int
+                assert data['pid']==proc.pid!=driver_pid and data['hwnd']>0,'wrong source process identity'
+                assert window_pid(data['hwnd'])==proc.pid,'HWND does not belong to exact source process'
+                fixture_write(case/'source-observed.json',data);item['observed']=True
+    def require_alive(self,stage=None):
+        assert self.children and all(x['observed'] and x['proc'].poll() is None for x in self.children.values()),'source died before product Job observation'
+        assert not any(fixture_read(p).get('action')=='close' for case in self.children for p in case.glob('source-command-*.json')),'source close preceded product Job observation'
+        if stage:
+            assert stage in {'aliveBeforeParentKillQpc','aliveAfterProductExitQpc'}
+            for item in self.children.values():item[stage]=native_qpc()
+    def cleanup(self,error,parent_death=False):
+        failures=[]
+        for case,item in self.children.items():
+            proc=item['proc'];fallback=False;cleanup_error=None
+            try:
+                if error or parent_death:
+                    if proc.poll() is None:proc.kill()
+                else:
+                    try:proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:fallback=True;proc.kill()
+                proc.wait(timeout=3)
+                if not error and not parent_death:assert proc.returncode==0 and not fallback,'source required fallback cleanup'
+            except BaseException as exc:cleanup_error=repr(exc);failures.append(cleanup_error)
+            finally:
+                try:fixture_write(case/'source-cleanup.json',dict(pid=proc.pid,argv=item['argv'],observed=item['observed'],exitCode=proc.poll(),signaled=proc.poll() is not None,aliveBeforeParentKillQpc=item['aliveBeforeParentKillQpc'],aliveAfterProductExitQpc=item['aliveAfterProductExitQpc'],fallback=fallback,error=cleanup_error,reason='error' if error else 'after-product-job-observation' if parent_death else 'driver-close'))
+                except BaseException as exc:failures.append(repr(exc))
+        assert not failures,failures
+
 def execute(argv,root,name,timeout=600,env=None,observe=None,parent_death=False):
     started=time.monotonic();opened={};media={};killed_at=None;kill_qpc=None;receipts=[];error=None
     log=root/(name+'.log');receipt=root/(name+'-command.json')
+    sources=GeneratedSources(argv[0],observe,env) if observe else None
     with log.open('wb') as out:
         proc=subprocess.Popen([str(x) for x in argv],stdout=out,stderr=subprocess.STDOUT,env=env)
         try:
@@ -85,6 +154,7 @@ def execute(argv,root,name,timeout=600,env=None,observe=None,parent_death=False)
                 bound(root)
                 assert time.monotonic()-started<timeout,'outer watchdog fired; never product success'
                 if observe:
+                    sources.poll(proc.pid)
                     for path in observe.glob('session-*/owned.json'):
                         if path in opened:continue
                         try:data=json.loads(path.read_text(encoding='utf-8'))
@@ -104,6 +174,7 @@ def execute(argv,root,name,timeout=600,env=None,observe=None,parent_death=False)
                             gate.with_name('media-hashed').write_text('independent SHA256 retained before publication\n',encoding='utf-8')
                     if parent_death and opened and any(p.with_name('parked').is_file() for p in opened):
                         assert killed_at is None
+                        sources.require_alive('aliveBeforeParentKillQpc')
                         assert all(not h.signaled() for _,handles in opened.values() for h in handles), 'child died before parent kill'
                         kill_qpc=native_qpc();killed_at=time.monotonic();proc.kill()
                 time.sleep(.005)
@@ -120,6 +191,7 @@ def execute(argv,root,name,timeout=600,env=None,observe=None,parent_death=False)
                         if not h.signaled():h.kill()
                 receipts.append(item)
                 assert all(signaled),'exact handles not signaled before fallback/deadline'
+            if parent_death:sources.require_alive('aliveAfterProductExitQpc')
             if observe and not any(x in name for x in ['admission','marker-failure']):assert opened,'no independently held child handles'
             for gate,before in media.items():
                 after=sha(gate.with_name('screen.mp4'));write(gate.with_name('media-preservation.json'),dict(beforePublicationSha256=before,afterImportSha256=after,unchanged=before==after))
@@ -129,6 +201,9 @@ def execute(argv,root,name,timeout=600,env=None,observe=None,parent_death=False)
             error=repr(exc)
             if proc.poll() is None:proc.kill();proc.wait(timeout=5)
         finally:
+            if sources:
+                try:sources.cleanup(error is not None,parent_death=parent_death and error is None)
+                except BaseException as exc:error=error or repr(exc)
             for _,handles in opened.values():
                 for h in handles:
                     if not h.signaled():h.kill()
@@ -187,7 +262,7 @@ def run(a):
         log=execute(argv,evidence,name)
         require_test_count(log.read_text(encoding='utf-8',errors='replace'),count)
     attempt('core-publication',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',core,'--lib','capture::windows::tests::','--','--test-threads=1','--nocapture'],'core-publication',10))
-    attempt('core-import',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',core,'--test','windows_capture','--','--test-threads=1','--nocapture'],'core-import',WINDOWS_IMPORT_TEST_COUNT))
+    attempt('core-import',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',core,'--test','windows_capture','--','--test-threads=1','--nocapture','--skip','common::child_writer'],'core-import',WINDOWS_IMPORT_TEST_COUNT))
     attempt('mapping-debug',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',mapping,'--lib','frame::mapping_tests::','--','--test-threads=1','--nocapture'],'mapping-debug',4))
     def pipes():
         exe=build_exe(repo,evidence,core,'cfr_grid_windows',True);env=os.environ.copy();env['CORE_QUAL_EVIDENCE']=str(evidence/'core-pipes')

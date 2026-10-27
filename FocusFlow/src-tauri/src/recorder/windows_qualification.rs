@@ -1,6 +1,6 @@
 //! Owned generated HWND -> original Session -> original Completion -> public core import.
 use super::*;
-use std::{cell::RefCell, sync::mpsc, thread};
+use std::{cell::RefCell, thread};
 use ::windows::{core::w, Win32::{Foundation::{COLORREF,LRESULT,WPARAM},Graphics::Gdi::*,System::LibraryLoader::GetModuleHandleW,UI::{HiDpi::*,WindowsAndMessaging::*}}};
 use focusflow_core::{capture::{decode_windows,windows::*},ffmpeg::probe_cfr_grid,store::ProjectStore};
 type TestResult<T> = Result<T,Box<dyn std::error::Error+Send+Sync>>;
@@ -31,37 +31,80 @@ unsafe extern "system" fn wndproc(hwnd:HWND,msg:u32,wp:WPARAM,lp:LPARAM)->LRESUL
  // The OS supplies HWND; the BeginPaint/EndPaint pair borrows a valid window DC.
  unsafe{if msg==WM_PAINT{let mut ps=PAINTSTRUCT::default();let dc=BeginPaint(hwnd,&mut ps);let result=CANVAS.with(|c|Ok::<_, &str>(c.borrow().as_ref().map_or(Ok(()),|c|c.draw(dc))));if !matches!(result,Ok(Ok(()))){PAINT_FAILED.store(true,Ordering::SeqCst);}let _=EndPaint(hwnd,&ps);return LRESULT(0);}DefWindowProcW(hwnd,msg,wp,lp)}
 }
-enum WindowCommand{Close,Resize}
-struct GeneratedWindow{hwnd:usize,commands:mpsc::Sender<WindowCommand>,done:Option<thread::JoinHandle<TestResult<()>>>}
+fn fixture_json(path:&Path,value:&serde_json::Value)->TestResult<()> {
+ let pending=path.with_extension("pending");fs::write(&pending,serde_json::to_vec(value)?)?;fs::rename(pending,path)?;Ok(())
+}
+fn fixture_read(path:&Path)->TestResult<serde_json::Value> {
+ if fs::metadata(path)?.len()>1024{return Err("Generated source control exceeds 1 KiB".into());}
+ Ok(serde_json::from_slice(&fs::read(path)?)?)
+}
+fn wait_fixture(path:&Path)->TestResult<serde_json::Value> {
+ let end=Instant::now()+Duration::from_secs(5);
+ while !path.is_file(){if Instant::now()>=end{return Err(format!("Generated source handshake timed out: {}",path.display()).into());}thread::sleep(Duration::from_millis(5));}
+ fixture_read(path)
+}
+struct GeneratedWindow{hwnd:usize,dir:PathBuf,sequence:u32,closed:bool}
 impl GeneratedWindow{
  fn new(w:u32,h:u32,nonce:u16,animated:bool,dir:PathBuf)->TestResult<Self>{
-  let(tx,rx)=mpsc::channel();let(ready,result)=mpsc::sync_channel(1);
-  let done=thread::spawn(move||->TestResult<()>{
-   // Only this thread's window is created, resized and destroyed. Never sends input to user windows.
-   let hwnd=unsafe{let instance=GetModuleHandleW(None)?;let class=WNDCLASSW{lpfnWndProc:Some(wndproc),hInstance:instance.into(),lpszClassName:w!("FocusFlowOwnedQualification"),..Default::default()};let _=RegisterClassW(&class);
-    CreateWindowExW(WINDOW_EX_STYLE::default(),w!("FocusFlowOwnedQualification"),w!("FocusFlow generated owned content"),WS_POPUP|WS_VISIBLE,40,40,w as i32,h as i32,None,None,Some(instance.into()),None)?};
-   let dc=unsafe{GetDC(Some(hwnd))};let canvas=Canvas::new(dc,w as i32,h as i32,nonce);unsafe{ReleaseDC(Some(hwnd),dc);}
-   let canvas=canvas?;CANVAS.with(|slot|*slot.borrow_mut()=Some(canvas));
-   unsafe{let _=InvalidateRect(Some(hwnd),None,false);let _=UpdateWindow(hwnd);}
-   ready.send(hwnd.0 as usize)?;let mut paints=Vec::with_capacity(256);let start=Instant::now();let mut next=Instant::now();
-   let result=(||->TestResult<()>{loop{
-    match rx.try_recv(){Ok(WindowCommand::Close)=>break,Ok(WindowCommand::Resize)=>unsafe{SetWindowPos(hwnd,None,0,0,w as i32+2,h as i32+2,SWP_NOMOVE|SWP_NOZORDER)?;},Err(mpsc::TryRecvError::Disconnected)=>break,_=>{}}
-    if PAINT_FAILED.load(Ordering::SeqCst){return Err("Generated painting failed".into());}
-    if start.elapsed()>Duration::from_secs(40){return Err("Generated window escape deadline".into());}
-    if Instant::now()>=next{
-     if paints.len()>=1024{return Err("Paint history overflow".into());}
-     CANVAS.with(|c|{let mut c=c.borrow_mut();let c=c.as_mut().unwrap();if animated{c.paint+=1;}paints.push((c.paint,c.nonce));});
-     unsafe{let _=InvalidateRect(Some(hwnd),None,false);let _=UpdateWindow(hwnd);}next=Instant::now()+Duration::from_millis(50);
-    }
-    let mut message=MSG::default();unsafe{while PeekMessageW(&mut message,None,0,0,PM_REMOVE).as_bool(){let _=TranslateMessage(&message);DispatchMessageW(&message);}}thread::sleep(Duration::from_millis(2));
-   }Ok(())})();
-   unsafe{let _=DestroyWindow(hwnd);}CANVAS.with(|s|s.borrow_mut().take());fs::write(dir.join("paint-history.json"),serde_json::to_vec(&paints)?)?;result
-  });
-  Ok(Self{hwnd:result.recv_timeout(Duration::from_secs(3))?,commands:tx,done:Some(done)})
+  fixture_json(&dir.join("source-request.json"),&serde_json::json!({"width":w,"height":h,"nonce":nonce,"animated":animated}))?;
+  let ready=wait_fixture(&dir.join("source-observed.json"))?;
+  let hwnd=ready["hwnd"].as_u64().ok_or("Missing source HWND")? as usize;
+  let pid=u32::try_from(ready["pid"].as_u64().ok_or("Missing source PID")?)?;let mut owner=0;
+  // Query only the HWND supplied by our outer owner's exact-process handshake.
+  unsafe{GetWindowThreadProcessId(HWND(hwnd as *mut _),Some(&mut owner));}
+  if owner!=pid||owner==std::process::id()||owner==0{return Err("Generated HWND is not owned by the distinct source process".into());}
+  fixture_json(&dir.join("source-selection.json"),&serde_json::json!({"driverPid":std::process::id(),"sourcePid":pid,"hwnd":hwnd}))?;
+  Ok(Self{hwnd,dir,sequence:0,closed:false})
  }
- fn close(&mut self)->TestResult<()>{let _=self.commands.send(WindowCommand::Close);if let Some(h)=self.done.take(){h.join().map_err(|_|"Window thread panic")??;}Ok(())}
+ fn command(&mut self,action:&str)->TestResult<()> {
+  self.sequence+=1;if self.sequence>2{return Err("Too many generated source commands".into());}
+  fixture_json(&self.dir.join(format!("source-command-{}.json",self.sequence)),&serde_json::json!({"sequence":self.sequence,"action":action}))?;
+  let ack=wait_fixture(&self.dir.join(format!("source-ack-{}.json",self.sequence)))?;
+  if ack!=serde_json::json!({"sequence":self.sequence,"action":action}){return Err("Generated source acknowledgement mismatch".into());}Ok(())
+ }
+ fn resize(&mut self)->TestResult<()>{self.command("resize")}
+ fn close(&mut self)->TestResult<()>{
+  if !self.closed{self.command("close")?;self.closed=true;let exit=wait_fixture(&self.dir.join("source-exit.json"))?;if exit["exitCode"]!=0{return Err("Generated source failed".into());}}Ok(())
+ }
 }
 impl Drop for GeneratedWindow{fn drop(&mut self){let _=self.close();}}
+fn source(dir:&Path,w:u32,h:u32,nonce:u16,animated:bool)->TestResult<()> {
+ if !(160..=1920).contains(&w)||!(120..=1080).contains(&h){return Err("Generated geometry outside fixture bounds".into());}
+ // Only this process owns this HWND, its canvas and message loop; no input is sent to user windows.
+ let hwnd=unsafe{let instance=GetModuleHandleW(None)?;let class=WNDCLASSW{lpfnWndProc:Some(wndproc),hInstance:instance.into(),lpszClassName:w!("FocusFlowOwnedQualification"),..Default::default()};let _=RegisterClassW(&class);
+  CreateWindowExW(WINDOW_EX_STYLE::default(),w!("FocusFlowOwnedQualification"),w!("FocusFlow generated owned content"),WS_POPUP|WS_VISIBLE,40,40,w as i32,h as i32,None,None,Some(instance.into()),None)?};
+ let mut paints=Vec::with_capacity(256);let mut close_ack=None;
+ let result=(||->TestResult<()>{
+  let dc=unsafe{GetDC(Some(hwnd))};let canvas=Canvas::new(dc,w as i32,h as i32,nonce);unsafe{ReleaseDC(Some(hwnd),dc);}let canvas=canvas?;CANVAS.with(|slot|*slot.borrow_mut()=Some(canvas));
+  unsafe{let _=InvalidateRect(Some(hwnd),None,false);let _=UpdateWindow(hwnd);}
+  fixture_json(&dir.join("source-ready.json"),&serde_json::json!({"pid":std::process::id(),"hwnd":hwnd.0 as usize}))?;
+  let start=Instant::now();let mut next=Instant::now();let mut sequence=1;
+  loop{
+   let command=dir.join(format!("source-command-{sequence}.json"));
+   if command.is_file(){
+    if sequence>2{return Err("Too many generated source commands".into());}
+    let value=fixture_read(&command)?;if value["sequence"]!=sequence{return Err("Generated source command sequence mismatch".into());}
+    match value["action"].as_str(){
+     Some("close")=>{close_ack=Some((sequence,value));break;},
+     Some("resize")=>unsafe{SetWindowPos(hwnd,None,0,0,w as i32+2,h as i32+2,SWP_NOMOVE|SWP_NOZORDER)?;},
+     _=>return Err("Unknown generated source command".into())
+    }
+    fixture_json(&dir.join(format!("source-ack-{sequence}.json")),&value)?;sequence+=1;
+   }
+   if PAINT_FAILED.load(Ordering::SeqCst){return Err("Generated painting failed".into());}
+   // Independent escape only; never treat it as product Job-death success.
+   if start.elapsed()>Duration::from_secs(40){return Err("Generated window escape deadline".into());}
+   if Instant::now()>=next{
+    if paints.len()>=1024{return Err("Paint history overflow".into());}
+    CANVAS.with(|c|{let mut c=c.borrow_mut();let c=c.as_mut().unwrap();if animated{c.paint+=1;}paints.push((c.paint,c.nonce));});
+    unsafe{let _=InvalidateRect(Some(hwnd),None,false);let _=UpdateWindow(hwnd);}next=Instant::now()+Duration::from_millis(50);
+   }
+   let mut message=MSG::default();unsafe{while PeekMessageW(&mut message,None,0,0,PM_REMOVE).as_bool(){let _=TranslateMessage(&message);DispatchMessageW(&message);}}thread::sleep(Duration::from_millis(2));
+  }Ok(())
+ })();
+ unsafe{let _=DestroyWindow(hwnd);}CANVAS.with(|s|s.borrow_mut().take());fs::write(dir.join("paint-history.json"),serde_json::to_vec(&paints)?)?;
+ result?;if let Some((sequence,value))=close_ack{fixture_json(&dir.join(format!("source-ack-{sequence}.json")),&value)?;}Ok(())
+}
 fn incomplete(dir:&Path)->TestResult<()>{let m=decode_windows(&fs::read(dir.join("capture.json"))?,dir.file_name().unwrap().to_str().unwrap())?;assert!(matches!(m.state,WindowsCaptureStateV2::Incomplete{..}));assert!(!dir.join("project.json").exists());Ok(())}
 fn case(root:&Path,id:&str,mode:&str,w:u32,h:u32,nonce:u16,ffmpeg:&Path,worker:&Path,state:&RecorderState)->TestResult<()>{
  let dir=root.join(id);fs::create_dir(&dir)?;let dir=dir.canonicalize()?;
@@ -74,7 +117,7 @@ fn case(root:&Path,id:&str,mode:&str,w:u32,h:u32,nonce:u16,ffmpeg:&Path,worker:&
  let mut session=windows_capture::Session::prepare(&dir,&plan,defaults,ffmpeg,worker)?;
  assert!(!dir.join("screen.mp4").exists());assert!(!dir.join("capture.json").exists());
  if mode=="admission-close"{window.close()?;}
- if mode=="admission-resize"{window.commands.send(WindowCommand::Resize)?;thread::sleep(Duration::from_millis(150));}
+ if mode=="admission-resize"{window.resize()?;}
  if mode=="marker-failure"{fs::create_dir(dir.join("capture.windows-v2"))?;}
  let arm=session.arm(&dir,&mut reservation);
  if ["admission-close","admission-resize","marker-failure"].contains(&mode){assert!(arm.is_err());drop(session);if mode!="marker-failure"{incomplete(&dir)?;}assert!(!dir.join("screen.mp4").exists());fs::write(dir.join("result.json"),serde_json::to_vec(&serde_json::json!({"expectedArmFailure":arm.unwrap_err().to_string()}))?)?;return Ok(());}
@@ -87,7 +130,7 @@ fn case(root:&Path,id:&str,mode:&str,w:u32,h:u32,nonce:u16,ffmpeg:&Path,worker:&
   let deadline=Instant::now()+Duration::from_secs(3);while !dir.join("first-write-started.json").is_file(){if Instant::now()>=deadline{return Err("No first writer observation".into());}thread::sleep(Duration::from_millis(1));}
  }else{thread::sleep(Duration::from_millis(1200));}
  if mode=="close"{window.close()?;}
- if mode=="resize"{window.commands.send(WindowCommand::Resize)?;}
+ if mode=="resize"{window.resize()?;}
  if mode=="close"||mode=="resize"{let end=Instant::now()+Duration::from_secs(8);while !session.ended()?{if Instant::now()>=end{return Err("Natural window end not observed before Stop".into());}thread::sleep(Duration::from_millis(5));}}
  if ["transfer-shutdown","stop-shutdown","close-stop"].contains(&mode){
   let started_at=Instant::now();
@@ -147,7 +190,12 @@ fn platform(path:&Path)->TestResult<()> {
  fs::write(path,serde_json::to_vec_pretty(&serde_json::json!({"qpcFrequency":frequency,"qpc":qpc,"sessionId":session,"desktop":String::from_utf16_lossy(&desktop_name).trim_end_matches('\0'),"windowStation":String::from_utf16_lossy(&station_name).trim_end_matches('\0'),"wgcCapability":format!("{wgc:?}"),"runnerAlreadyInJob":nested.as_bool(),"warpAdapter":description,"vendorId":desc.VendorId,"deviceId":desc.DeviceId,"featureLevel":level.0,"debugLayerAvailable":debug_available,"debugHRESULT":debug_status,"noDebugCapabilityIsNotMappingQualification":true}))?)?;Ok(())
 }
 pub(crate) fn run()->TestResult<()>{
- let args:Vec<_>=std::env::args_os().skip(1).collect();if args.len()==2&&args[0]=="--platform"{return platform(Path::new(&args[1]));}if args.len()!=7{return Err("usage: harness ROOT MODE WIDTH HEIGHT NONCE FFMPEG WORKER".into());}
+ let args:Vec<_>=std::env::args_os().skip(1).collect();
+ if args.len()==6&&args[0]=="--source"{
+  unsafe{SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)?;}
+  return source(Path::new(&args[1]),args[2].to_str().ok_or("width")?.parse()?,args[3].to_str().ok_or("height")?.parse()?,args[4].to_str().ok_or("nonce")?.parse()?,args[5]=="1");
+ }
+ if args.len()==2&&args[0]=="--platform"{return platform(Path::new(&args[1]));}if args.len()!=7{return Err("usage: harness ROOT MODE WIDTH HEIGHT NONCE FFMPEG WORKER".into());}
  let root=PathBuf::from(&args[0]);fs::create_dir(&root)?;let root=root.canonicalize()?;
  let mode=args[1].to_str().ok_or("mode")?;let w=args[2].to_str().ok_or("width")?.parse()?;let h=args[3].to_str().ok_or("height")?.parse()?;let nonce:u16=args[4].to_str().ok_or("nonce")?.parse()?;
  if !["normal","static","repeat","close","resize","admission-close","admission-resize","marker-failure","blocked","partial","exit7","lost-worker","parent-death","transfer-shutdown","stop-shutdown","close-stop"].contains(&mode){return Err("Unknown generated case".into());}
