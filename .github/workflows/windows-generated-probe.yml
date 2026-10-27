@@ -1,0 +1,112 @@
+# Generated-only native evidence on the dedicated test branch.
+name: Generated Windows WGC evidence
+on:
+  push:
+    branches: [codex-windows-generated-probe]
+    paths:
+      - tools/windows-generated-probe/**
+      - .github/workflows/windows-generated-probe.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  generated-only:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: tools/windows-generated-probe
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/probe-target
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          sparse-checkout: tools/windows-generated-probe
+          sparse-checkout-cone-mode: true
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12.10'
+      - name: Exact Rust toolchain, locked dependencies, pure tests and native link
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup toolchain install 1.89.0 --profile minimal --no-self-update
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo +1.89.0 test --locked --all-targets
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo +1.89.0 build --locked
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Verify official encoder archive and extract only analysis executables
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          import hashlib, pathlib, urllib.request, zipfile
+          root = pathlib.Path('analysis-tools')
+          root.mkdir(exist_ok=False)
+          archive = root/'vendor.zip'
+          url = 'https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-essentials_build.zip'
+          with urllib.request.urlopen(url, timeout=60) as source, archive.open('wb') as dest:
+              while chunk := source.read(1024*1024):
+                  dest.write(chunk)
+          expected = 'e2aaeaa0fdbc397d4794828086424d4aaa2102cef1fb6874f6ffd29c0b88b673'
+          if hashlib.sha256(archive.read_bytes()).hexdigest() != expected:
+              raise SystemExit('vendor archive hash mismatch')
+          with zipfile.ZipFile(archive) as bundle:
+              for name in ('ffmpeg', 'ffprobe'):
+                  data = bundle.read('ffmpeg-8.0.1-essentials_build/bin/'+name+'.exe')
+                  (root/(name+'.exe')).write_bytes(data)
+          if hashlib.sha256((root/'ffmpeg.exe').read_bytes()).hexdigest() != '5af82a0d4fe2b9eae211b967332ea97edfc51c6b328ca35b827e73eac560dc0d':
+              raise SystemExit('encoder differs from recorded vendor provenance')
+          '@ | python -
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Independent analysis self-checks
+        run: |
+          $env:PROBE_FFMPEG = (Resolve-Path analysis-tools/ffmpeg.exe).Path
+          $env:PROBE_FFPROBE = (Resolve-Path analysis-tools/ffprobe.exe).Path
+          python -m unittest discover -s . -p test_analyze.py -v
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Generated HWND capture and exact saved-media analysis
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ffmpeg = (Resolve-Path analysis-tools/ffmpeg.exe).Path
+          $ffprobe = (Resolve-Path analysis-tools/ffprobe.exe).Path
+          $exe = Join-Path $env:CARGO_TARGET_DIR 'debug/focusflow-generated-windows-probe.exe'
+          python run_probe.py --exe $exe --ffmpeg $ffmpeg --ffprobe $ffprobe --evidence evidence
+          $probeExit = $LASTEXITCODE
+          if (Test-Path evidence) {
+            rustc +1.89.0 --version | Out-File evidence/tool-versions.txt
+            python --version | Out-File -Append evidence/tool-versions.txt
+            & $ffmpeg -version | Out-File -Append evidence/tool-versions.txt
+            & $ffprobe -version | Out-File -Append evidence/tool-versions.txt
+            Get-FileHash $ffmpeg, $ffprobe -Algorithm SHA256 | Format-List | Out-File evidence/analysis-tool-hashes.txt
+          }
+          if ($probeExit) { throw 'Native evidence unavailable, failed, or resampled/unresolved; inspect generated artifacts.' }
+      - name: Upload generated evidence allowlist, including failure receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-generated-wgc-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          include-hidden-files: false
+          path: |
+            tools/windows-generated-probe/evidence/summary.json
+            tools/windows-generated-probe/evidence/evidence-sha256.json
+            tools/windows-generated-probe/evidence/tool-versions.txt
+            tools/windows-generated-probe/evidence/analysis-tool-hashes.txt
+            tools/windows-generated-probe/evidence/*-parent.jsonl
+            tools/windows-generated-probe/evidence/*-parent.stderr
+            tools/windows-generated-probe/evidence/*/native.jsonl
+            tools/windows-generated-probe/evidence/*/worker.stderr
+            tools/windows-generated-probe/evidence/*/paint.jsonl
+            tools/windows-generated-probe/evidence/*/screen.mp4
+            tools/windows-generated-probe/evidence/*/frames.json
+            tools/windows-generated-probe/evidence/*/frames.json.stderr
+            tools/windows-generated-probe/evidence/*/packets.json
+            tools/windows-generated-probe/evidence/*/packets.json.stderr
+            tools/windows-generated-probe/evidence/*/decode-temporary.rgb.stderr
+            tools/windows-generated-probe/evidence/*/decoded-markers.json
+            tools/windows-generated-probe/evidence/*/analysis-commands.json
+            tools/windows-generated-probe/evidence/*/analysis.json
