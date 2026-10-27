@@ -6,7 +6,7 @@ use windows::{core::w, Win32::{Foundation::*, Graphics::{Gdi::*, Dwm::*}, System
     LibraryLoader::GetModuleHandleW, Performance::*, JobObjects::*, Threading::GetCurrentProcessId},
     UI::{WindowsAndMessaging::*, HiDpi::*}}};
 use windows_capture::{capture::{Context,GraphicsCaptureApiHandler}, encoder::{AudioSettingsBuilder,
-    ContainerSettingsBuilder,VideoEncoder,VideoSettingsBuilder}, frame::Frame,
+    ContainerSettingsBuilder,VideoEncoder,VideoSettingsBuilder,VideoSettingsSubType}, frame::Frame,
     graphics_capture_api::InternalCaptureControl,settings::*,window::Window};
 type Result<T> = std::result::Result<T,Box<dyn Error+Send+Sync>>;
 static ID: AtomicU16 = AtomicU16::new(0);
@@ -140,7 +140,7 @@ impl Capture {
 impl GraphicsCaptureApiHandler for Capture {
     type Flags=Flags; type Error=Box<dyn Error+Send+Sync>;
     fn new(ctx:Context<Flags>)->Result<Self> {
-        Ok(Self { encoder:Some(VideoEncoder::new(VideoSettingsBuilder::new(WIDTH as u32,HEIGHT as u32).frame_rate(30).bitrate(8_000_000),AudioSettingsBuilder::default().disabled(true),ContainerSettingsBuilder::default(),ctx.flags.out.join("screen.mp4"))?),count:0,first:None,flags:ctx.flags,freq:frequency()? })
+        Ok(Self { encoder:Some(VideoEncoder::new(VideoSettingsBuilder::new(WIDTH as u32,HEIGHT as u32).sub_type(VideoSettingsSubType::H264).frame_rate(30).bitrate(8_000_000),AudioSettingsBuilder::default().disabled(true),ContainerSettingsBuilder::default(),ctx.flags.out.join("screen.mp4"))?),count:0,first:None,flags:ctx.flags,freq:frequency()? })
     }
     fn on_frame_arrived(&mut self,frame:&mut Frame,control:InternalCaptureControl)->Result<()> {
         let before=qpc()?; let timestamp=frame.timestamp()?.Duration;
