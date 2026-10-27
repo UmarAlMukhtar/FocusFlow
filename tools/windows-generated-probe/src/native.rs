@@ -175,7 +175,7 @@ fn worker(hwnd:usize,pid:u32,scenario:&str,out:&Path)->Result<()> {
     println!("{{\"event\":\"startup\",\"qpc\":{},\"frequency\":{freq},\"pid\":{},\"ownerPid\":{pid},\"cursorRequest\":\"WithoutCursor\",\"configuredFps\":30}}",qpc()?,std::process::id());
     geometry(hwnd)?;
     // Explicit WithoutCursor is runtime-checked by pinned WGC; unsupported capability is an error.
-    let settings=Settings::new(window,CursorCaptureSettings::WithoutCursor,DrawBorderSettings::Default,SecondaryWindowSettings::Default,MinimumUpdateIntervalSettings::Default,DirtyRegionSettings::Default,ColorFormat::Rgba8,Flags{out:out.into(),stall:scenario=="stall"});
+    let settings=Settings::new(window,CursorCaptureSettings::WithoutCursor,DrawBorderSettings::Default,SecondaryWindowSettings::Default,MinimumUpdateIntervalSettings::Default,DirtyRegionSettings::Default,ColorFormat::Bgra8,Flags{out:out.into(),stall:scenario=="stall"});
     let capture=Capture::start_free_threaded(settings)?;
     println!("{{\"event\":\"captureStarted\",\"qpc\":{}}}",qpc()?);
     // This gate marks startup completion, never the first compositor or saved-frame timestamp.
