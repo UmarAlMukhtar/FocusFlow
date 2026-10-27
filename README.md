@@ -6,7 +6,9 @@
 [![License](https://img.shields.io/github/license/UmarAlMukhtar/FocusFlow?color=green)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows-blue)](https://github.com/UmarAlMukhtar/FocusFlow)
 
-FocusFlow is an open-source Windows desktop application that automatically transforms raw screen recordings into polished, professional tutorial and demo videos. By tracking user interactions (clicks and drags) and applying intelligent, smooth camera movements, FocusFlow edits your videos automatically.
+FocusFlow is an open-source desktop recorder and editor for product demos and tutorials. Its current development source adds a nondestructive timeline, frame styling, rendered previews and a local MCP server so compatible agents can inspect, edit and export projects through the same Rust core.
+
+**Development status:** This worktree is unreleased. Linux X11 has tested native screen, region and window capture, separate cursor recording, and Fixed/Follow timeline zooms shared with the local MCP server. [Cursor-follow verification](docs/cursor-follow-verification.md) records native save/reopen/history/conflict/playback and desktop/MCP preview/export parity; [Linux cursor lifecycle verification](docs/linux-cursor-lifecycle-verification.md) records production capture evidence. Windows native/device acceptance, Wayland, measured microphone/system-audio timing, installers and final release gates remain open. See [development setup](docs/DEVELOPMENT.md), [UI verification](docs/ui-polish-verification.md), [Linux playback fix](docs/linux-playback-verification.md), and [MCP setup](docs/MCP.md). Existing downloads below refer to prior releases.
 
 🌐 **Website:** [focusflow.demosnap.tech](https://focusflow.demosnap.tech/)  
 📦 **Downloads & Releases:** [GitHub Releases](https://github.com/UmarAlMukhtar/FocusFlow/releases)
@@ -61,7 +63,7 @@ FocusFlow provides a local, lightweight, and completely free open-source solutio
 * **Intelligent Timeline Optimization**: Merges nearby clicks and drag segments (within 300ms) to ensure continuous, natural camera flow.
 * **Bundled FFmpeg Sidecar**: No external dependencies or complicated command-line setups required.
 * **Windows File Explorer Integration**: Quick links to open your recordings and exports directories directly.
-* **Modern dark UI**: Clean, native-feeling desktop experience built with React and Tailwind CSS.
+* **Dark editing workspace**: Flat preview, inspector and timeline with bundled Manrope/Plex typography, Radix dropdowns and Lucide controls in current development source.
 * **Global Hotkeys**: Control recordings instantly using keyboard shortcuts:
   * `Ctrl + Shift + R`: Start Recording
   * `Ctrl + Shift + S`: Stop Recording
@@ -257,5 +259,7 @@ Development prerequisites, local setup, and build commands are documented in [do
 ---
 
 ## License
+
+FocusFlow source uses MIT. The bundled Windows FFmpeg is a separately licensed GPLv3 build; see [encoder provenance and pending distribution gates](docs/FFMPEG.md).
 
 FocusFlow is released under the [MIT License](LICENSE).

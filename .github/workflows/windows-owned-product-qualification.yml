@@ -1,0 +1,106 @@
+name: Windows owned product qualification
+on:
+  push:
+    branches: [codex-windows-owned-product-qualification]
+permissions:
+  contents: read
+concurrency:
+  group: windows-owned-product-qualification
+  cancel-in-progress: false
+jobs:
+  generated-native:
+    if: github.ref == 'refs/heads/codex-windows-owned-product-qualification'
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      PYTHONDONTWRITEBYTECODE: 1
+      CARGO_TERM_COLOR: never
+      CARGO_BUILD_JOBS: 2
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/owned-qualification
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /README.md
+            /FocusFlow/src-tauri/Cargo.toml
+            /FocusFlow/src-tauri/Cargo.lock
+            /FocusFlow/src-tauri/build.rs
+            /FocusFlow/src-tauri/tauri.conf.json
+            /FocusFlow/src-tauri/src/
+            /FocusFlow/src-tauri/tests/
+            /FocusFlow/src-tauri/capabilities/
+            /FocusFlow/src-tauri/icons/
+            /FocusFlow/crates/focusflow-core/Cargo.toml
+            /FocusFlow/crates/focusflow-core/Cargo.lock
+            /FocusFlow/crates/focusflow-core/src/
+            /FocusFlow/crates/focusflow-core/tests/
+            /FocusFlow/vendor/windows-capture/
+            /.superpowers/sdd/2026-10-27-windows-owned-product/fix-1-native-harness/Cargo.toml
+            /.superpowers/sdd/2026-10-27-windows-owned-product/fix-1-native-harness/Cargo.lock
+            /tools/windows-owned-product-qualification/
+            /.github/workflows/windows-owned-product-qualification.yml
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12.10'
+      - name: Pin toolchain and verified FFmpeg payload
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force qualification-setup | Out-Null
+          rustup toolchain install 1.89.0 --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw "Rust installation failed" }
+          cargo +1.89.0 --version | Out-File qualification-setup/toolchain.txt
+          rustc +1.89.0 -vV | Out-File -Append qualification-setup/toolchain.txt
+          python --version | Out-File -Append qualification-setup/toolchain.txt
+          $archive = Join-Path $env:RUNNER_TEMP 'focusflow-ffmpeg-8.0.1.zip'
+          Invoke-WebRequest 'https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-essentials_build.zip' -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLower() -ne 'e2aaeaa0fdbc397d4794828086424d4aaa2102cef1fb6874f6ffd29c0b88b673') { throw 'FFmpeg archive hash mismatch' }
+          $extract = Join-Path $env:RUNNER_TEMP 'focusflow-pinned-ffmpeg'
+          Expand-Archive $archive -DestinationPath $extract
+          $bin = Join-Path $extract 'ffmpeg-8.0.1-essentials_build/bin'
+          $ffmpeg = Join-Path $bin 'ffmpeg.exe'
+          $ffprobe = Join-Path $bin 'ffprobe.exe'
+          if ((Get-FileHash $ffmpeg -Algorithm SHA256).Hash.ToLower() -ne '5af82a0d4fe2b9eae211b967332ea97edfc51c6b328ca35b827e73eac560dc0d') { throw 'FFmpeg exe mismatch' }
+          if ((Get-FileHash $ffprobe -Algorithm SHA256).Hash.ToLower() -ne '192a1d6899059765ac8c39764fc3148d4e6049955956dc2029f81f4bd6a8972d') { throw 'FFprobe exe mismatch' }
+          Get-FileHash $archive,$ffmpeg,$ffprobe -Algorithm SHA256 | ConvertTo-Json | Out-File qualification-setup/encoder-hashes.json
+          "FOCUSFLOW_QUAL_FFMPEG=$ffmpeg" | Out-File -Append $env:GITHUB_ENV
+          "FOCUSFLOW_QUAL_FFPROBE=$ffprobe" | Out-File -Append $env:GITHUB_ENV
+          $bin | Out-File -Append $env:GITHUB_PATH
+          New-Item -ItemType Directory -Force FocusFlow/src-tauri/binaries | Out-Null
+          Copy-Item $ffmpeg FocusFlow/src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
+          $provenance = @{
+            ImageVersion=$env:ImageVersion; ImageOS=$env:ImageOS; OS=Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber,OSArchitecture
+            CPU=Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores; GPU=Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion,AdapterCompatibility
+            Session=$env:SESSIONNAME; SDK=(Get-ChildItem 'C:/Program Files (x86)/Windows Kits/10/Include' -Directory).Name
+            MSVC=(Get-ChildItem 'C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Tools/MSVC' -Directory).Name
+            DebugLayer=(Test-Path C:/Windows/System32/d3d11_3sdklayers.dll); Desktop='actual generated WGC and debug-layer tests are required; listing is not qualification'
+          }
+          $provenance | ConvertTo-Json -Depth 5 | Out-File qualification-setup/runner.json
+      - name: Analyzer negative controls
+        shell: pwsh
+        run: |
+          python -m unittest discover -s tools/windows-owned-product-qualification -v 2>&1 | Tee-Object qualification-setup/analyzer.log
+          if ($LASTEXITCODE -ne 0) { throw 'Analyzer checks failed' }
+      - name: Actual native modules and generated fixtures
+        shell: pwsh
+        run: |
+          python tools/windows-owned-product-qualification/run.py --evidence qualification-evidence --ffmpeg $env:FOCUSFLOW_QUAL_FFMPEG --ffprobe $env:FOCUSFLOW_QUAL_FFPROBE 2>&1 | Tee-Object qualification-setup/driver.log
+          if ($LASTEXITCODE -ne 0) { throw 'Native qualification is incomplete; inspect bounded evidence' }
+      - name: Prepare bounded explicit upload allowlist
+        if: always()
+        shell: pwsh
+        run: python tools/windows-owned-product-qualification/package_evidence.py qualification-evidence qualification-setup qualification-upload
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: windows-owned-product-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            qualification-upload/*.json
+            qualification-upload/*.txt
+            qualification-upload/*.log
+            qualification-upload/cases/**/*.json
+            qualification-upload/cases/**/capture.windows-v2
+            qualification-upload/cases/**/screen.mp4

@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 2,
+  "captureId": "fixture",
+  "source": {
+    "backend": "windowsWgcOwned", "kind": "window", "windowId": "4294967297",
+    "observedWindowBounds": {"x": -1920, "y": 64, "width": 655, "height": 399},
+    "rawSize": {"width": 641, "height": 359},
+    "encodedSize": {"width": 642, "height": 360},
+    "contentRect": {"x": 0, "y": 0, "width": 641, "height": 359},
+    "pointerOrigin": null
+  },
+  "initialDefaults": {
+    "frameStyle": {"canvas": "source", "background": {"type": "solid", "color": "#0b0d10"}, "paddingPx": 0, "cornerRadiusPx": 0, "shadow": false},
+    "camera": {"panTransitionUs": 200000, "settleUs": 100000}
+  },
+  "diagnostic": null,
+  "state": {
+    "status": "finalized",
+    "videoTiming": {
+      "endpoint": {"provenance": "savedPacketFullGrid", "endPts": 30000, "timeBase": {"numerator": 1, "denominator": 30000}, "interval": "halfOpen"},
+      "clock": {
+        "provenance": "ownedWgcCausalCfrV1",
+        "qpcFrequency": "3000000", "admissionQpc": "2997000", "epoch100ns": "10000000", "cutoffQpc": "6000000",
+        "cutoffReason": "stop", "completedFrames": 30, "workerExitCode": 0, "encoderExitCode": 0,
+        "interactions": "unmeasured", "audio": "unmeasured"
+      }
+    },
+    "cursorTiming": null,
+    "initialProject": {
+      "schemaVersion": 3, "projectId": "fixture", "revision": 0,
+      "video": {"path": "screen.mp4", "width": 642, "height": 360, "durationUs": 1000000, "cursor": "embedded"},
+      "cursor": null,
+      "cursorSettings": {"enabled": false, "scale": 1.0, "smoothingUs": 0, "style": "native"},
+      "microphone": null,
+      "timing": {"provenance": "legacyUnknown", "audioOffsetUs": null},
+      "camera": {"panTransitionUs": 200000, "settleUs": 100000},
+      "frameStyle": {"canvas": "source", "background": {"type": "solid", "color": "#0b0d10"}, "paddingPx": 0, "cornerRadiusPx": 0, "shadow": false},
+      "clips": [{"id": "clip-0", "inUs": 0, "outUs": 1000000}],
+      "zooms": [], "clicks": [], "warnings": ["embeddedCursor", "legacyTimingUnknown"]
+    }
+  }
+}

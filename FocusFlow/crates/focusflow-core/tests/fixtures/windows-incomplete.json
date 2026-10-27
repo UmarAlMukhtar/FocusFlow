@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 2,
+  "captureId": "fixture",
+  "source": {
+    "backend": "windowsWgcOwned", "kind": "window", "windowId": "4294967297",
+    "observedWindowBounds": {"x": -1920, "y": 64, "width": 655, "height": 399},
+    "rawSize": {"width": 641, "height": 359},
+    "encodedSize": {"width": 642, "height": 360},
+    "contentRect": {"x": 0, "y": 0, "width": 641, "height": 359},
+    "pointerOrigin": null
+  },
+  "initialDefaults": {
+    "frameStyle": {"canvas": "source", "background": {"type": "solid", "color": "#0b0d10"}, "paddingPx": 0, "cornerRadiusPx": 0, "shadow": false},
+    "camera": {"panTransitionUs": 200000, "settleUs": 100000}
+  },
+  "diagnostic": null,
+  "state": {"status": "incomplete", "videoPath": "screen.mp4", "videoCursor": "embedded"}
+}

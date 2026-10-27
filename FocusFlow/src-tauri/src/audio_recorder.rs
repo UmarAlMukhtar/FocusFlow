@@ -1,17 +1,17 @@
 //! Microphone audio recording backend for FocusFlow.
 //!
-//! Captures audio from a Windows WASAPI microphone using [`cpal`] and writes
+//! Captures audio from the platform microphone backend using [`cpal`] and writes
 //! 16-bit PCM samples to `mic.wav` in the active session folder using [`hound`].
 //!
 //! # Threading model
 //!
 //! ```text
-//!  WASAPI callback thread
+//!  CPAL callback thread
 //!  (realtime priority, short deadline)
 //!       │
 //!       │  Vec<i16>  (mpsc channel)
 //!       ▼
-//!  focusflow-audio-writer thread
+//!  focusflow-audio-owner thread
 //!  (normal priority, blocking I/O allowed)
 //!       │
 //!       ▼  hound::WavWriter
@@ -35,7 +35,7 @@ use hound::{WavSpec, WavWriter};
 use serde::Serialize;
 use std::{
     fmt,
-    path::{Path, PathBuf},
+    path::Path,
     sync::mpsc::{self, Sender},
     thread::{self, JoinHandle},
 };
@@ -87,13 +87,13 @@ impl std::error::Error for AudioError {}
 
 /// A discoverable microphone input device.
 ///
-/// The `id` is the WASAPI device name string.  It is used as the selector
+/// The `id` is the platform device name string.  It is used as the selector
 /// when calling [`AudioRecorder::start`].  On Windows, built-in device names
 /// are stable across reboots; USB device names may change when re-plugged.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioDevice {
-    /// Opaque selector — currently the WASAPI device name.
+    /// Opaque selector — currently the platform device name.
     pub id: String,
     /// Human-readable label shown in the UI microphone dropdown.
     pub name: String,
@@ -101,7 +101,7 @@ pub struct AudioDevice {
 
 // ── Tauri command ──────────────────────────────────────────────────────────
 
-/// Returns all available microphone input devices enumerated by WASAPI.
+/// Returns all available microphone input devices from the platform audio host.
 ///
 /// Devices that fail to return a name are silently skipped so a single
 /// broken device cannot prevent the list from loading.
@@ -141,39 +141,68 @@ pub fn list_audio_input_devices() -> AudioResult<Vec<AudioDevice>> {
 
 // ── AudioRecorder ──────────────────────────────────────────────────────────
 
-/// An active microphone recording session.
-///
-/// Create one with [`AudioRecorder::start`] and end it with
-/// [`AudioRecorder::stop`].
-///
-/// # Drop behaviour
-///
-/// If dropped without calling `stop()`, the WAV header will **not** be
-/// finalized and `mic.wav` will be unreadable.  Always call `stop()`.
+/// The CPAL stream is created, played, and dropped only on its owning thread.
+/// Dropping this handle also stops and finalizes the recording.
 pub struct AudioRecorder {
-    /// Holding the stream keeps the WASAPI callback alive.
-    ///
-    /// Dropping it closes the mpsc channel (the `Sender` captured inside the
-    /// callback closure is dropped), signalling the writer thread to exit.
-    stream: cpal::Stream,
-
-    /// Background thread that writes samples to mic.wav.
-    writer_thread: Option<JoinHandle<AudioResult<()>>>,
-
-    /// Path to the mic.wav being written — used for diagnostics only.
-    output_path: PathBuf,
+    stop: Option<Sender<()>>,
+    owner: Option<JoinHandle<AudioResult<()>>>,
 }
 
-unsafe impl Send for AudioRecorder {}
-unsafe impl Sync for AudioRecorder {}
-
 impl AudioRecorder {
-    /// Start recording from `device_name`, or from the system default
-    /// microphone when `device_name` is `None`.
-    ///
-    /// `output_path` should be the full path to `mic.wav` inside the current
-    /// session folder, e.g. `…/Recordings/2026-06-24T09-00-00/mic.wav`.
-    pub fn start(device_name: Option<&str>, output_path: &Path) -> AudioResult<AudioRecorder> {
+    pub fn start(device_name: Option<&str>, output_path: &Path) -> AudioResult<Self> {
+        let device_name = device_name.map(str::to_owned);
+        let output_path = output_path.to_path_buf();
+        let (stop, stop_rx) = mpsc::channel();
+        let (ready, ready_rx) = mpsc::sync_channel(1);
+        let owner = thread::Builder::new().name("focusflow-audio-owner".into()).spawn(move || {
+            let initialized = initialize_audio(device_name.as_deref(), &output_path);
+            let (stream, samples, mut writer) = match initialized {
+                Ok(value) => value,
+                Err(error) => { let _ = ready.send(Err(error.clone())); return Err(error); }
+            };
+            if ready.send(Ok(())).is_err() { drop(stream); return Ok(()); }
+            let write_samples = |writer: &mut WavWriter<std::io::BufWriter<std::fs::File>>, batch: Vec<i16>| -> AudioResult<()> {
+                for sample in batch { writer.write_sample(sample).map_err(wav_error)?; }
+                Ok(())
+            };
+            loop {
+                match stop_rx.try_recv() {
+                    Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
+                    Err(mpsc::TryRecvError::Empty) => {}
+                }
+                match samples.recv_timeout(std::time::Duration::from_millis(20)) {
+                    Ok(batch) => write_samples(&mut writer, batch)?,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {},
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            drop(stream);
+            for batch in samples { write_samples(&mut writer, batch)?; }
+            writer.finalize().map_err(wav_error)
+        }).map_err(|error| AudioError::new("audio_thread_failed", error.to_string(), true))?;
+        let startup_error = match ready_rx.recv() {
+            Ok(Ok(())) => return Ok(Self { stop: Some(stop), owner: Some(owner) }),
+            Ok(Err(error)) => error,
+            Err(error) => AudioError::new("audio_start_failed", error.to_string(), true),
+        };
+        drop(stop);
+        let _ = owner.join();
+        Err(startup_error)
+    }
+    pub fn stop(mut self) -> AudioResult<()> { self.finish() }
+    fn finish(&mut self) -> AudioResult<()> {
+        if let Some(stop) = self.stop.take() { let _ = stop.send(()); }
+        match self.owner.take() {
+            Some(owner) => owner.join().map_err(|_| AudioError::new("audio_thread_panicked", "Audio owner stopped unexpectedly", true))?,
+            None => Ok(()),
+        }
+    }
+}
+impl Drop for AudioRecorder {
+    fn drop(&mut self) { if let Err(error) = self.finish() { eprintln!("[FocusFlow audio] {error}"); } }
+}
+fn wav_error(error: hound::Error) -> AudioError { AudioError::new("wav_writer_failed", error.to_string(), true) }
+fn initialize_audio(device_name: Option<&str>, output_path: &Path) -> AudioResult<(cpal::Stream, mpsc::Receiver<Vec<i16>>, WavWriter<std::io::BufWriter<std::fs::File>>)> {
         let host = cpal::default_host();
 
         let device = match device_name {
@@ -208,16 +237,12 @@ impl AudioRecorder {
                     "no_input_device",
                     "No microphone input device was found. \
                      Check that a microphone is connected and that \
-                     Windows microphone access is enabled in Privacy settings.",
+                     microphone access is enabled in your system settings.",
                     true,
                 )
             })?,
         };
 
-        Self::start_for_device(&device, output_path)
-    }
-
-    fn start_for_device(device: &cpal::Device, output_path: &Path) -> AudioResult<AudioRecorder> {
         // Query the device's preferred input configuration (sample rate,
         // channel count, sample format).  This is what WASAPI reports as the
         // device's native mix format.
@@ -246,105 +271,12 @@ impl AudioRecorder {
             sample_format: hound::SampleFormat::Int,
         };
 
-        let (tx, rx) = mpsc::channel::<Vec<i16>>();
-
-        let stream = build_input_stream(device, &stream_config, sample_format, tx)?;
-
-        stream.play().map_err(|error| {
-            AudioError::new(
-                "stream_play_failed",
-                format!(
-                    "Could not start microphone stream: {error}. \
-                     Try selecting a different device or restarting FocusFlow."
-                ),
-                true,
-            )
-        })?;
-
-        let output_path_buf = output_path.to_path_buf();
-
-        let writer_thread = thread::Builder::new()
-            .name("focusflow-audio-writer".to_string())
-            .spawn(move || run_wav_writer(rx, output_path_buf, spec))
-            .map_err(|error| {
-                AudioError::new(
-                    "writer_thread_failed",
-                    format!("Could not start audio writer thread: {error}"),
-                    true,
-                )
-            })?;
-
-        let device_label = device.name().unwrap_or_else(|_| "<unknown>".to_string());
-
-        println!(
-            "[FocusFlow audio] Recording started \
-             device={device_label:?} rate={sample_rate} ch={channels} \
-             src_fmt={sample_format:?} → i16 PCM → {}",
-            output_path.display()
-        );
-
-        Ok(AudioRecorder {
-            stream,
-            writer_thread: Some(writer_thread),
-            output_path: output_path.to_path_buf(),
-        })
-    }
-
-    /// Stop the recording and finalize `mic.wav`.
-    ///
-    /// 1. Drops the WASAPI stream — stops the callback and closes the channel.
-    /// 2. Waits for the writer thread to flush remaining samples and write the
-    ///    WAV header via `WavWriter::finalize()`.
-    ///
-    /// Returns an error if the writer thread panicked or if `hound` could not
-    /// finalize the file.  The video session is unaffected either way — the
-    /// caller should treat audio errors as non-fatal.
-    pub fn stop(self) -> AudioResult<()> {
-        let AudioRecorder {
-            stream,
-            mut writer_thread,
-            output_path,
-        } = self;
-
-        // Step 1: drop the stream.
-        //
-        // This stops the WASAPI callback thread and drops the `Sender` that
-        // was captured inside the callback closure.  Dropping the last Sender
-        // closes the channel, causing `rx.recv()` in the writer thread to
-        // return `Err(RecvError)`, which breaks the write loop and triggers
-        // `WavWriter::finalize()`.
-        drop(stream);
-
-        // Step 2: join the writer thread.
-        //
-        // The thread's return value is `AudioResult<()>`, which propagates
-        // any WAV write or finalize errors back to the caller.
-        let writer_result = if let Some(handle) = writer_thread.take() {
-            handle.join().map_err(|_| {
-                AudioError::new(
-                    "writer_thread_panicked",
-                    "Audio writer thread panicked before mic.wav was finalized. \
-                         The recording may be unreadable.",
-                    true,
-                )
-            })?
-        } else {
-            Ok(())
-        };
-
-        match &writer_result {
-            Ok(()) => println!(
-                "[FocusFlow audio] Recording finalized: {}",
-                output_path.display()
-            ),
-            Err(error) => eprintln!(
-                "[FocusFlow audio] Finalize error for {}: {error}",
-                output_path.display()
-            ),
-        }
-
-        writer_result
-    }
+    // File creation is part of the readiness handshake, before video may start.
+    let writer = WavWriter::create(output_path, spec).map_err(wav_error)?;
+    let (tx, rx) = mpsc::channel();
+    let stream = build_input_stream(&device, &stream_config, sample_format, tx)?;
+    stream.play().map_err(|error| AudioError::new("stream_play_failed", error.to_string(), true))?;
+    Ok((stream, rx, writer))
 }
 
 // ── Stream construction ────────────────────────────────────────────────────
@@ -434,13 +366,13 @@ where
     )
 }
 
-/// WASAPI stream error handler.
+/// Platform stream error handler.
 ///
 /// Logs the error to stderr.  Returning from this function allows cpal to
 /// continue; transient errors will self-recover.  Fatal errors (e.g. device
 /// removed) will eventually cause the callback to stop being invoked.
 fn on_stream_error(error: cpal::StreamError) {
-    eprintln!("[FocusFlow audio] WASAPI stream error: {error}");
+    eprintln!("[FocusFlow audio] Stream error: {error}");
 }
 
 // ── WAV writer thread ──────────────────────────────────────────────────────
@@ -453,50 +385,6 @@ fn on_stream_error(error: cpal::StreamError) {
 ///
 /// Any I/O error is returned to the caller of [`AudioRecorder::stop`] which
 /// joins this thread.
-fn run_wav_writer(
-    rx: mpsc::Receiver<Vec<i16>>,
-    output_path: PathBuf,
-    spec: WavSpec,
-) -> AudioResult<()> {
-    let mut writer = WavWriter::create(&output_path, spec).map_err(|error| {
-        AudioError::new(
-            "wav_writer_failed",
-            format!(
-                "Could not create mic.wav at {}: {error}",
-                output_path.display()
-            ),
-            true,
-        )
-    })?;
-
-    // Write samples until the channel is closed.
-    while let Ok(samples) = rx.recv() {
-        for sample in samples {
-            writer.write_sample(sample).map_err(|error| {
-                AudioError::new(
-                    "wav_writer_failed",
-                    format!(
-                        "Could not write audio sample to mic.wav: {error}. \
-                         Check available disk space."
-                    ),
-                    true,
-                )
-            })?;
-        }
-    }
-
-    // Flush buffered samples and write RIFF chunk sizes in the header.
-    writer.finalize().map_err(|error| {
-        AudioError::new(
-            "wav_writer_failed",
-            format!("Could not finalize mic.wav: {error}"),
-            true,
-        )
-    })?;
-
-    Ok(())
-}
-
 // ── Sample conversion functions ────────────────────────────────────────────
 //
 // All conversions map the full range of the source type to [-32768, 32767].
@@ -569,4 +457,21 @@ fn u32_to_i16(sample: u32) -> i16 {
 #[inline]
 fn u64_to_i16(sample: u64) -> i16 {
     (sample.wrapping_sub(0x8000_0000_0000_0000_u64) >> 48) as i16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn owner_handle_is_send_sync_without_unsafe_impls() {
+        fn check<T: Send + Sync>() {}
+        check::<AudioRecorder>();
+    }
+    #[test]
+    fn unavailable_device_fails_before_returning_a_recording() {
+        let path = std::env::temp_dir().join("focusflow-nonexistent-device.wav");
+        let result = AudioRecorder::start(Some("focusflow-test-device-that-does-not-exist"), &path);
+        assert!(result.is_err());
+        assert!(!path.exists());
+    }
 }

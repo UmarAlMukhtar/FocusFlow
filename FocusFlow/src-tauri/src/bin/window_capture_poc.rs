@@ -1,3 +1,5 @@
+#[cfg(windows)]
+mod windows_poc {
 use std::{
     env,
     error::Error,
@@ -156,7 +158,7 @@ impl WindowCapturePoc {
     }
 }
 
-fn main() -> PocResult<()> {
+pub fn run() -> PocResult<()> {
     let args = CliArgs::parse()?;
     let window = Window::from_raw_hwnd(args.hwnd as *mut c_void);
 
@@ -201,7 +203,7 @@ fn main() -> PocResult<()> {
         SecondaryWindowSettings::Default,
         MinimumUpdateIntervalSettings::Default,
         DirtyRegionSettings::Default,
-        ColorFormat::Rgba8,
+        ColorFormat::Bgra8,
         CaptureFlags {
             output_path: args.output_path,
             width,
@@ -473,3 +475,9 @@ fn usage() -> Box<dyn Error + Send + Sync> {
     )
     .into()
 }
+
+}
+#[cfg(windows)]
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> { windows_poc::run() }
+#[cfg(not(windows))]
+fn main() { eprintln!("This capture probe requires Windows."); }

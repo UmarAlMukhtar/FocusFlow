@@ -1,12 +1,25 @@
+mod video_clock;
+#[cfg(any(windows, test))]
+mod owned_feed;
+#[cfg(any(windows, test))]
+mod windows_capture;
+#[cfg(windows)]
+pub(crate) use windows_capture::dispatch as dispatch_windows_capture;
+#[cfg(target_os = "linux")]
+mod cursor;
+#[cfg(target_os = "linux")]
+mod x11;
+#[cfg(target_os = "linux")]
+mod native_capture;
 use crate::audio_recorder::AudioRecorder;
 use hound::WavReader;
 use serde::{Deserialize, Serialize};
 use std::{
-    ffi::{c_void, OsStr},
+    ffi::OsStr,
     fmt, fs,
     io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, MutexGuard,
@@ -16,25 +29,12 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Manager, State};
-use tauri_plugin_shell::ShellExt;
-use windows_capture::{
-    capture::{
-        CaptureControl, CaptureControlError, Context, GraphicsCaptureApiError,
-        GraphicsCaptureApiHandler,
-    },
-    encoder::{
-        AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder,
-        VideoSettingsSubType,
-    },
-    frame::Frame,
-    graphics_capture_api::InternalCaptureControl,
-    settings::{
-        ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
-        MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
-    },
-    window::Window as WindowsCaptureWindow,
-};
 
+#[cfg(windows)]
+use ::windows_capture::window::Window as WindowsCaptureWindow;
+
+#[cfg(windows)]
+use std::ffi::c_void;
 #[cfg(target_os = "windows")]
 use windows::Win32::{
     Foundation::{HWND, LPARAM, POINT, RECT, TRUE},
@@ -42,7 +42,7 @@ use windows::Win32::{
         Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON},
         WindowsAndMessaging::{
             EnumWindows, GetAncestor, GetCursorPos, GetShellWindow, GetWindow, GetWindowRect,
-            GetWindowTextW, IsIconic, IsWindow, IsWindowVisible, WindowFromPoint, GA_ROOT,
+            GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, WindowFromPoint, GA_ROOT,
             GW_OWNER,
         },
     },
@@ -51,7 +51,6 @@ use windows::Win32::{
 const CLICKS_FILE_NAME: &str = "clicks.json";
 const DRAGS_FILE_NAME: &str = "drags.json";
 const EDITED_FILE_NAME: &str = "edited.mp4";
-const FFMPEG_SIDECAR_NAME: &str = "ffmpeg";
 const METADATA_FILE_NAME: &str = "metadata.json";
 const MIC_AUDIO_FILE_NAME: &str = "mic.wav";
 const OUTPUT_FILE_NAME: &str = "screen.mp4";
@@ -88,6 +87,8 @@ pub struct RecordingStatus {
     pub monitor: Option<MonitorInfo>,
     pub elapsed_ms: u64,
     pub file_size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -166,12 +167,15 @@ struct CapturePlan {
 #[serde(rename_all = "snake_case")]
 enum CaptureBackend {
     Ffmpeg,
+    #[cfg(windows)]
     WindowsCapture,
 }
 
 #[derive(Debug, Clone)]
 struct WindowCapturePlan {
     hwnd: usize,
+    #[cfg(windows)]
+    process_id: u32,
     title: String,
     width: u32,
     height: u32,
@@ -215,6 +219,7 @@ pub struct RecentSession {
     pub exported: bool,
     pub session_path: String,
     pub edited_video_path: Option<String>,
+    pub edited_job_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -257,6 +262,11 @@ impl RecorderState {
         RecorderState::default()
     }
 
+    pub fn request_shutdown(&self) -> RecorderResult<()> {
+        self.lock_runtime()?.shutting_down = true;
+        Ok(())
+    }
+
     fn lock_runtime(&self) -> RecorderResult<MutexGuard<'_, RecorderRuntime>> {
         self.runtime.lock().map_err(|_| {
             RecorderError::new(
@@ -267,10 +277,15 @@ impl RecorderState {
         })
     }
 
+    fn cleanup_runtime(&self) -> MutexGuard<'_, RecorderRuntime> {
+        self.runtime.lock().unwrap_or_else(|poisoned|poisoned.into_inner())
+    }
+
     fn clear_finalizing(&self) -> RecorderResult<()> {
-        let mut runtime = self.lock_runtime()?;
+        let mut runtime = self.cleanup_runtime();
         runtime.finalizing = false;
         runtime.finalizing_output_path = None;
+        runtime.notify_lifecycle_changed();
         Ok(())
     }
 }
@@ -278,13 +293,63 @@ impl RecorderState {
 #[derive(Default)]
 struct RecorderRuntime {
     active: Option<ActiveRecording>,
+    starting: bool,
+    shutting_down: bool,
+    lifecycle_waiters: Vec<tauri::async_runtime::Sender<()>>,
     finalizing: bool,
     finalizing_output_path: Option<PathBuf>,
     last_completed: Option<CompletedRecording>,
 }
 
+impl RecorderRuntime {
+    fn notify_lifecycle_changed(&mut self) {
+        for waiter in self.lifecycle_waiters.drain(..) {
+            let _ = waiter.try_send(());
+        }
+    }
+}
+
+/// Reserve before device/filesystem work; every failed start releases the slot and owned directory.
+struct StartReservation<'a> { state: &'a RecorderState, directory: Option<PathBuf> }
+impl<'a> StartReservation<'a> {
+    fn acquire(state: &'a RecorderState) -> RecorderResult<Self> {
+        let mut runtime = state.lock_runtime()?;
+        if runtime.shutting_down {
+            return Err(RecorderError::new("recorder_shutting_down", "FocusFlow is closing; a new recording cannot start", false));
+        }
+        if runtime.starting || runtime.finalizing || runtime.active.is_some() {
+            return Err(RecorderError::new("recorder_already_running", "A recording is starting, running, or finalizing", true));
+        }
+        runtime.starting = true;
+        Ok(Self { state, directory: None })
+    }
+    #[cfg(any(windows, test))]
+    fn publish_windows_incomplete(&mut self, dir:&Path, manifest:&focusflow_core::capture::windows::WindowsCaptureManifestV2) -> RecorderResult<()> {
+        self.directory = None;
+        focusflow_core::capture::publish_windows_incomplete(dir,manifest).map_err(windows_capture::recovery)
+    }
+    #[cfg(target_os = "linux")]
+    fn publish_incomplete(&mut self, dir:&Path, manifest:&focusflow_core::capture::CaptureManifestV1) -> RecorderResult<()> {
+        // A failed sync can follow a successful rename; never delete after an attempt.
+        self.directory = None;
+        focusflow_core::capture::publish(dir, manifest).map_err(native_capture::recovery)
+    }
+}
+impl Drop for StartReservation<'_> {
+    fn drop(&mut self) {
+        if let Some(dir) = self.directory.take() { if dir.exists() { if let Err(e) = fs::remove_dir_all(dir) { eprintln!("Failed-start cleanup: {e}"); } } }
+        let mut runtime = self.state.cleanup_runtime();
+        runtime.starting = false;
+        runtime.notify_lifecycle_changed();
+    }
+}
+
 struct ActiveRecording {
+    #[cfg(target_os = "linux")]
+    native_capture: Option<native_capture::Session>,
+    notice: Option<String>,
     capture: ActiveCapture,
+    video_clock: video_clock::Clock,
     /// Running microphone recorder, or `None` when mic was not enabled.
     audio_recorder: Option<AudioRecorder>,
     /// Human-readable name of the mic device that was selected.
@@ -295,178 +360,44 @@ struct ActiveRecording {
     monitor: MonitorInfo,
     capture_bounds: CaptureBounds,
     source: RecordingSource,
+    ffmpeg_path: PathBuf,
     log: Arc<Mutex<ProcessLog>>,
 }
 
 enum ActiveCapture {
     Ffmpeg {
         child: Child,
+        encoder_pid: u32,
     },
+    #[cfg(windows)]
     WindowsCapture {
-        capture: CaptureControl<WindowsWindowCapture, RecorderError>,
+        capture: windows_capture::Session,
     },
 }
 
 impl ActiveCapture {
     fn pid(&self) -> Option<u32> {
         match self {
-            ActiveCapture::Ffmpeg { child } => Some(child.id()),
-            ActiveCapture::WindowsCapture { .. } => None,
+            ActiveCapture::Ffmpeg { encoder_pid, .. } => Some(*encoder_pid),
+            #[cfg(windows)]
+            ActiveCapture::WindowsCapture { capture } => Some(capture.pid()),
         }
     }
 
     fn backend(&self) -> CaptureBackend {
         match self {
             ActiveCapture::Ffmpeg { .. } => CaptureBackend::Ffmpeg,
+            #[cfg(windows)]
             ActiveCapture::WindowsCapture { .. } => CaptureBackend::WindowsCapture,
         }
     }
 }
 
-struct WindowsCaptureFlags {
-    output_path: PathBuf,
-    hwnd: usize,
-    title: String,
-    width: u32,
-    height: u32,
-}
 
-struct WindowsWindowCapture {
-    encoder: Option<VideoEncoder>,
-    hwnd: usize,
-    title: String,
-    encoder_width: u32,
-    encoder_height: u32,
-    last_frame_size: Option<(u32, u32)>,
-    frame_count: u64,
-}
-
-impl WindowsWindowCapture {
-    fn finish_encoder(&mut self) -> RecorderResult<()> {
-        if let Some(encoder) = self.encoder.take() {
-            encoder.finish().map_err(|error| {
-                RecorderError::new(
-                    "windows_capture_finish_failed",
-                    format!("Could not finalize window recording: {error}"),
-                    true,
-                )
-            })?;
-        }
-
-        println!(
-            "[FocusFlow recorder] windows-capture frames encoded: {}",
-            self.frame_count
-        );
-
-        Ok(())
-    }
-
-    fn log_frame_size_change(&mut self, frame: &Frame) {
-        let frame_size = (frame.width(), frame.height());
-
-        if self.last_frame_size == Some(frame_size) {
-            return;
-        }
-
-        if let Some(previous_size) = self.last_frame_size {
-            println!(
-                "[FocusFlow recorder] Warning: window capture frame size changed from {}x{} to {}x{} for HWND 0x{:X} ({})",
-                previous_size.0,
-                previous_size.1,
-                frame_size.0,
-                frame_size.1,
-                self.hwnd,
-                self.title
-            );
-            println!(
-                "[FocusFlow recorder] Encoder remains locked to {}x{}; resize support requires segmented recording.",
-                self.encoder_width, self.encoder_height
-            );
-            // TODO: Restart capture into a new segment on resize and merge segments after stop.
-        } else {
-            println!(
-                "[FocusFlow recorder] First window capture frame size: {}x{}; encoder dimensions: {}x{}",
-                frame_size.0, frame_size.1, self.encoder_width, self.encoder_height
-            );
-        }
-
-        self.last_frame_size = Some(frame_size);
-    }
-}
-
-impl GraphicsCaptureApiHandler for WindowsWindowCapture {
-    type Flags = WindowsCaptureFlags;
-    type Error = RecorderError;
-
-    fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        println!(
-            "[FocusFlow recorder] Starting windows-capture encoder for HWND 0x{:X} ({}) at {}x{}",
-            ctx.flags.hwnd, ctx.flags.title, ctx.flags.width, ctx.flags.height
-        );
-
-        let video_settings = VideoSettingsBuilder::new(ctx.flags.width, ctx.flags.height)
-            .sub_type(VideoSettingsSubType::H264)
-            .frame_rate(TARGET_FPS)
-            .bitrate(12_000_000);
-
-        let encoder = VideoEncoder::new(
-            video_settings,
-            AudioSettingsBuilder::default().disabled(true),
-            ContainerSettingsBuilder::default(),
-            &ctx.flags.output_path,
-        )
-        .map_err(|error| {
-            RecorderError::new(
-                "windows_capture_encoder_failed",
-                format!("Could not initialize window recording encoder: {error}"),
-                true,
-            )
-        })?;
-
-        Ok(Self {
-            encoder: Some(encoder),
-            hwnd: ctx.flags.hwnd,
-            title: ctx.flags.title,
-            encoder_width: ctx.flags.width,
-            encoder_height: ctx.flags.height,
-            last_frame_size: None,
-            frame_count: 0,
-        })
-    }
-
-    fn on_frame_arrived(
-        &mut self,
-        frame: &mut Frame,
-        _capture_control: InternalCaptureControl,
-    ) -> Result<(), Self::Error> {
-        self.log_frame_size_change(frame);
-
-        if let Some(encoder) = self.encoder.as_mut() {
-            encoder.send_frame(frame).map_err(|error| {
-                RecorderError::new(
-                    "windows_capture_frame_failed",
-                    format!("Could not encode window recording frame: {error}"),
-                    true,
-                )
-            })?;
-            self.frame_count = self.frame_count.saturating_add(1);
-        }
-
-        Ok(())
-    }
-
-    fn on_closed(&mut self) -> Result<(), Self::Error> {
-        self.finish_encoder()?;
-        Err(RecorderError::new(
-            "window_capture_closed",
-            "Selected window closed during recording",
-            true,
-        ))
-    }
-}
 
 #[derive(Debug, Clone)]
 struct CompletedRecording {
+    notice: Option<String>,
     output_path: PathBuf,
     monitor: MonitorInfo,
     duration_ms: u64,
@@ -545,6 +476,7 @@ struct ClickTracker {
     join_handle: Option<JoinHandle<()>>,
 }
 
+#[derive(Clone)]
 struct InteractionEvents {
     clicks: Vec<ClickEvent>,
     drags: Vec<DragInteraction>,
@@ -582,7 +514,10 @@ impl ClickTracker {
         let worker_clicks = Arc::clone(&clicks);
         let worker_drags = Arc::clone(&drags);
 
-        let join_handle = thread::spawn(move || {
+        #[cfg(target_os = "linux")]
+        let join_handle = thread::Builder::new().name("focusflow-input".into()).spawn(move || x11::track(worker_stop_requested, worker_clicks, worker_drags, started_at, filter));
+        #[cfg(not(target_os = "linux"))]
+        let join_handle = thread::Builder::new().name("focusflow-input".into()).spawn(move || {
             let mut left_was_down = left_mouse_button_down();
             let mut right_was_down = right_mouse_button_down();
             let mut left_drag: Option<PendingDrag> = None;
@@ -596,9 +531,9 @@ impl ClickTracker {
                     left_drag = push_click(&worker_clicks, started_at, ClickButton::Left, &filter)
                         .map(|point| PendingDrag::new(ClickButton::Left, point));
                 } else if left_is_down {
-                    update_pending_drag(&mut left_drag, started_at);
+                    update_pending_drag(&mut left_drag, started_at, &filter);
                 } else if left_was_down {
-                    finish_pending_drag(&mut left_drag, &worker_drags, started_at);
+                    finish_pending_drag(&mut left_drag, &worker_drags, started_at, &filter);
                 }
 
                 if right_is_down && !right_was_down {
@@ -606,9 +541,9 @@ impl ClickTracker {
                         push_click(&worker_clicks, started_at, ClickButton::Right, &filter)
                             .map(|point| PendingDrag::new(ClickButton::Right, point));
                 } else if right_is_down {
-                    update_pending_drag(&mut right_drag, started_at);
+                    update_pending_drag(&mut right_drag, started_at, &filter);
                 } else if right_was_down {
-                    finish_pending_drag(&mut right_drag, &worker_drags, started_at);
+                    finish_pending_drag(&mut right_drag, &worker_drags, started_at, &filter);
                 }
 
                 left_was_down = left_is_down;
@@ -616,15 +551,18 @@ impl ClickTracker {
                 thread::sleep(CLICK_POLL_INTERVAL);
             }
 
-            finish_pending_drag(&mut left_drag, &worker_drags, started_at);
-            finish_pending_drag(&mut right_drag, &worker_drags, started_at);
+            finish_pending_drag(&mut left_drag, &worker_drags, started_at, &filter);
+            finish_pending_drag(&mut right_drag, &worker_drags, started_at, &filter);
         });
 
         ClickTracker {
             stop_requested,
             clicks,
             drags,
-            join_handle: Some(join_handle),
+            join_handle: match join_handle {
+                Ok(handle) => Some(handle),
+                Err(error) => { eprintln!("[FocusFlow input] Recording continues without interactions: {error}"); None },
+            },
         }
     }
 
@@ -676,12 +614,14 @@ pub async fn start_recording(
     // Microphone device ID (WASAPI device name).  Pass `None` or omit to
     // record without microphone audio.
     audio_device_id: Option<String>,
+    settings: Option<crate::export::ExportSettings>,
 ) -> RecorderResult<RecordingStatus> {
     start_recording_with_source(
         &app,
         state.inner(),
         source.unwrap_or_default(),
         audio_device_id,
+        settings,
     )
     .await
 }
@@ -692,16 +632,34 @@ pub async fn stop_recording(state: State<'_, RecorderState>) -> RecorderResult<R
 }
 
 #[tauri::command]
-pub fn recording_status(
+pub async fn recording_status(
     app: AppHandle,
     state: State<'_, RecorderState>,
 ) -> RecorderResult<RecordingStatus> {
+    let ended = {
+        let mut runtime = state.lock_runtime()?;
+        if let Some(active) = runtime.active.as_mut() {
+            match &mut active.capture {
+                ActiveCapture::Ffmpeg { child, .. } => {
+                    let mut ended = child.try_wait().map_err(|e| RecorderError::new("capture_status_failed", e.to_string(), true))?.is_some();
+                    #[cfg(target_os = "linux")]
+                    if let RecordingSource::Window { hwnd, .. } = &active.source {
+                        ended |= !x11::source_alive(hwnd, active.capture_bounds.width, active.capture_bounds.height);
+                    }
+                    ended
+                }
+                #[cfg(windows)]
+                ActiveCapture::WindowsCapture { capture } => capture.ended()?,
+            }
+        } else { false }
+    };
+    if ended { return stop_active_recording(state.inner()).await; }
     current_recording_status(&app, state.inner())
 }
 
 #[tauri::command]
 pub fn list_recordable_windows() -> RecorderResult<Vec<RecordableWindow>> {
-    ensure_windows()?;
+    ensure_capture_platform()?;
     enumerate_recordable_windows()
 }
 
@@ -736,7 +694,7 @@ pub fn list_recent_sessions(app: AppHandle) -> RecorderResult<Vec<RecentSession>
             continue;
         }
 
-        if let Some(session) = recent_session_from_dir(&entry.path())? {
+        if let Some(session) = recent_session_from_dir(&entry.path(), &app.state::<crate::export::DesktopProjects>())? {
             sessions.push(session);
         }
     }
@@ -746,17 +704,22 @@ pub fn list_recent_sessions(app: AppHandle) -> RecorderResult<Vec<RecentSession>
 }
 
 #[tauri::command]
-pub fn delete_recording_session(app: AppHandle, session_id: String) -> RecorderResult<()> {
+pub fn delete_recording_session(app: AppHandle, state: State<'_, RecorderState>, session_id: String) -> RecorderResult<()> {
     let recordings_dir = recordings_root_dir(&app)?;
     let session_dir = session_dir_from_id(&recordings_dir, &session_id)?;
 
-    fs::remove_dir_all(&session_dir).map_err(|error| {
-        RecorderError::new(
-            "delete_session_failed",
-            format!("Could not delete recording session: {error}"),
-            true,
-        )
-    })
+    let runtime = state.lock_runtime()?;
+    let belongs_to_session = |output: &Path| {
+        // Canonicalize Windows extended paths; unresolved live paths must block deletion.
+        output.parent().and_then(|path| path.canonicalize().ok())
+            .map(|path| path == session_dir).unwrap_or(true)
+    };
+    if runtime.starting || runtime.active.as_ref().is_some_and(|active| belongs_to_session(&active.output_path))
+        || runtime.finalizing_output_path.as_ref().is_some_and(|path| belongs_to_session(path)) {
+        return Err(RecorderError::new("recorder_already_running", "Cannot delete a recording that is active or finalizing", true));
+    }
+    app.state::<crate::export::DesktopProjects>().store.delete_project(&session_id)
+        .map_err(|error| RecorderError::new("delete_session_failed", error.to_string(), true))
 }
 
 async fn start_recording_with_source(
@@ -764,29 +727,16 @@ async fn start_recording_with_source(
     state: &RecorderState,
     source: RecordingSource,
     audio_device_id: Option<String>,
+    settings: Option<crate::export::ExportSettings>,
 ) -> RecorderResult<RecordingStatus> {
-    ensure_windows()?;
+    ensure_capture_platform()?;
 
-    {
-        let runtime = state.lock_runtime()?;
-        if runtime.finalizing {
-            return Err(RecorderError::new(
-                "recorder_finalizing",
-                "A recording is still finalizing",
-                true,
-            ));
-        }
-
-        if runtime.active.is_some() {
-            return Err(RecorderError::new(
-                "recorder_already_running",
-                "A screen recording is already running",
-                true,
-            ));
-        }
-    }
+    let mut reservation = StartReservation::acquire(state)?;
+    let _defaults = settings.unwrap_or_default().legacy_defaults().map_err(|error|
+        RecorderError::new("recording_settings_invalid", error.to_string(), true))?;
 
     let output_path = create_session_screen_output_path(app)?;
+    reservation.directory = output_path.parent().map(Path::to_path_buf);
     let output_dir = output_path.parent().ok_or_else(|| {
         RecorderError::new(
             "invalid_output_path",
@@ -803,6 +753,31 @@ async fn start_recording_with_source(
     })?;
 
     let capture_plan = capture_plan_for_source(app, source, &output_path)?;
+    let ffmpeg_path = PathBuf::from(ffmpeg_sidecar_command(app)?.get_program());
+    let guardian = std::env::current_exe().map_err(|error|RecorderError::new("ffmpeg_spawn_failed",error.to_string(),true))?;
+    start_prepared_recording(state, &mut reservation, output_path, capture_plan, ffmpeg_path, &guardian, _defaults, audio_device_id).await
+}
+
+// The UI and owned native fixtures share admission, launch and ownership transfer.
+async fn start_prepared_recording(state:&RecorderState, reservation:&mut StartReservation<'_>, output_path:PathBuf,
+    mut capture_plan:CapturePlan, ffmpeg_path:PathBuf, guardian:&Path,
+    _defaults:focusflow_core::legacy::LegacyDefaults, audio_device_id:Option<String>) -> RecorderResult<RecordingStatus> {
+    focusflow_core::legacy::validate_defaults(_defaults).map_err(|error|RecorderError::new("recording_settings_invalid",error.to_string(),true))?;
+    let output_dir = session_output_dir(&output_path)?;
+    #[cfg(windows)]
+    let mut windows_session = if capture_plan.backend == CaptureBackend::WindowsCapture {
+        Some(windows_capture::Session::prepare(output_dir,&capture_plan,_defaults,&ffmpeg_path,guardian)?)
+    } else {None};
+    let clock_capability = video_clock::Capability::probe(&ffmpeg_path);
+    clock_capability.configure(&mut capture_plan.ffmpeg_args);
+    #[cfg(target_os = "linux")]
+    let mut native_capture = if clock_capability.supported() {
+        Some(native_capture::Session::prepare(output_dir, &capture_plan, _defaults)?)
+    } else { None };
+    #[cfg(target_os = "linux")]
+    let notice = native_capture.is_none().then(||native_capture::EMBEDDED_NOTICE.to_owned());
+    #[cfg(not(target_os = "linux"))]
+    let notice = None;
 
     // ── Microphone recording ───────────────────────────────────────────────
     //
@@ -822,11 +797,6 @@ async fn start_recording_with_source(
                     // Audio start failure is fatal: return a clear error so
                     // the user knows mic recording did not work before video
                     // starts (avoids a recording with no audio despite asking).
-                    if let Err(cleanup_error) = fs::remove_dir_all(output_dir) {
-                        eprintln!(
-                            "[FocusFlow audio] Could not clean up session dir after audio start failure: {cleanup_error}"
-                        );
-                    }
                     return Err(RecorderError::new(
                         "mic_start_failed",
                         format!(
@@ -854,12 +824,28 @@ async fn start_recording_with_source(
     let monitor = capture_plan.monitor.clone();
     let capture_bounds = capture_plan.bounds;
     let log = Arc::new(Mutex::new(ProcessLog::default()));
+    write_clicks_json(&output_path, &[])?;
+    write_drags_json(&output_path, &[])?;
+    write_timeline_json(&output_path)?;
+    // This is a launch-relative interaction epoch, not a measured first-frame timestamp.
+    let started_at = Instant::now();
+    let mut video_clock = video_clock::Clock::start(clock_capability, started_at);
+    #[cfg(target_os = "linux")]
+    if let Some(session) = native_capture.as_mut() {
+        session.arm(output_dir, started_at, &video_clock, reservation, &mut capture_plan.ffmpeg_args)?;
+    }
+    #[cfg(windows)]
+    if let Some(session) = windows_session.as_mut() {session.arm(output_dir,reservation)?;}
     let capture = match start_capture_backend(
-        app,
+        &ffmpeg_path,
+        guardian,
         output_dir,
         &output_path,
         &capture_plan,
         Arc::clone(&log),
+        &mut video_clock,
+        #[cfg(windows)]
+        windows_session,
     ) {
         Ok(capture) => capture,
         Err(error) => {
@@ -872,24 +858,20 @@ async fn start_recording_with_source(
                     );
                 }
             }
-            if let Err(cleanup_error) = fs::remove_dir_all(output_dir) {
-                eprintln!(
-                    "Could not remove failed recording session directory {}: {cleanup_error}",
-                    output_dir.display()
-                );
-            }
-
             return Err(error);
         }
     };
     let pid = capture.pid();
 
-    let started_at = Instant::now();
     let click_filter = click_filter_for_source(&capture_plan);
     let click_tracker = ClickTracker::start(started_at, click_filter);
 
     let active = ActiveRecording {
+        #[cfg(target_os = "linux")]
+        native_capture,
+        notice: notice.clone(),
         capture,
+        video_clock,
         audio_recorder,
         mic_device_name,
         click_tracker,
@@ -898,12 +880,24 @@ async fn start_recording_with_source(
         monitor: monitor.clone(),
         capture_bounds,
         source: capture_plan.source.clone(),
+        ffmpeg_path,
         log,
     };
 
-    let mut runtime = state.lock_runtime()?;
-    runtime.last_completed = None;
-    runtime.active = Some(active);
+    if let Err((error, active)) = transfer_active(state, active) {
+        active.click_tracker.request_stop();
+        match active.capture {
+            ActiveCapture::Ffmpeg { child, .. } => crate::capture_guard::close_and_reap(child),
+            #[cfg(windows)]
+            ActiveCapture::WindowsCapture { capture } => {let _ = tauri::async_runtime::spawn_blocking(move || drop(capture)).await;}
+        }
+        let _ = active.click_tracker.finish();
+        #[cfg(target_os = "linux")]
+        drop(active.native_capture);
+        if let Some(audio) = active.audio_recorder {let _ = audio.stop();}
+        return Err(error);
+    }
+    reservation.directory = None;
 
     Ok(RecordingStatus {
         phase: RecordingPhase::Recording,
@@ -912,15 +906,28 @@ async fn start_recording_with_source(
         monitor: Some(monitor),
         elapsed_ms: 0,
         file_size_bytes: None,
+        notice,
     })
 }
 
+fn transfer_active(state:&RecorderState, active:ActiveRecording) -> Result<(), (RecorderError, ActiveRecording)> {
+    let mut runtime = match state.lock_runtime() {Ok(runtime)=>runtime,Err(error)=>return Err((error,active))};
+    if runtime.shutting_down {return Err((RecorderError::new("recorder_shutting_down","FocusFlow closed while recording was starting; files were retained for recovery",true),active));}
+    runtime.last_completed = None;
+    runtime.active = Some(active);
+    runtime.starting = false;
+    Ok(())
+}
+
 fn start_capture_backend(
-    app: &AppHandle,
+    ffmpeg_path: &Path,
+    guardian: &Path,
     output_dir: &Path,
     output_path: &Path,
     capture_plan: &CapturePlan,
     log: Arc<Mutex<ProcessLog>>,
+    clock: &mut video_clock::Clock,
+    #[cfg(windows)] windows_session: Option<windows_capture::Session>,
 ) -> RecorderResult<ActiveCapture> {
     println!(
         "[FocusFlow recorder] Capture backend: {:?}",
@@ -933,106 +940,74 @@ fn start_capture_backend(
 
     match capture_plan.backend {
         CaptureBackend::Ffmpeg => {
-            start_ffmpeg_capture(app, output_dir, &capture_plan.ffmpeg_args, Arc::clone(&log))
+            spawn_ffmpeg_capture_clock(Command::new(ffmpeg_path), output_dir, &capture_plan.ffmpeg_args, Arc::clone(&log), guardian, Some(clock))
         }
-        CaptureBackend::WindowsCapture => {
-            let window_capture = capture_plan.window_capture.as_ref().ok_or_else(|| {
-                RecorderError::new(
-                    "window_capture_plan_missing",
-                    "Window capture plan was not prepared",
-                    true,
-                )
-            })?;
-
-            start_windows_capture(window_capture, output_path)
-        }
+        #[cfg(windows)]
+        CaptureBackend::WindowsCapture => windows_session.map(|capture|ActiveCapture::WindowsCapture{capture})
+            .ok_or_else(||windows_capture::recovery("Owned Windows worker was not prepared")),
     }
 }
 
-fn start_ffmpeg_capture(
-    app: &AppHandle,
+#[cfg(test)]
+fn spawn_ffmpeg_capture_with_guardian(
+    command: Command,
     output_dir: &Path,
     args: &[String],
     log: Arc<Mutex<ProcessLog>>,
+    guardian: &Path,
 ) -> RecorderResult<ActiveCapture> {
-    let mut command = ffmpeg_sidecar_command(app)?;
+    spawn_ffmpeg_capture_clock(command, output_dir, args, log, guardian, None)
+}
+
+fn spawn_ffmpeg_capture_clock(
+    mut command: Command,
+    output_dir: &Path,
+    args: &[String],
+    log: Arc<Mutex<ProcessLog>>,
+    guardian: &Path,
+    clock: Option<&mut video_clock::Clock>,
+) -> RecorderResult<ActiveCapture> {
     let ffmpeg_path = command.get_program().to_os_string();
     log_recording_diagnostics(output_dir, &ffmpeg_path);
     log_ffmpeg_command(&ffmpeg_path, args);
-    command
-        .args(args)
-        .current_dir(output_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(|error| {
-        RecorderError::new(
-            "ffmpeg_spawn_failed",
-            format!("Could not start bundled FFmpeg recorder: {error}"),
-            true,
-        )
-    })?;
-
-    if let Some(stdout) = child.stdout.take() {
-        spawn_output_reader(stdout, Arc::clone(&log), ProcessStream::Stdout);
-    }
-
-    if let Some(stderr) = child.stderr.take() {
+    command.args(args).current_dir(output_dir);
+    let startup_error = |error: std::io::Error| RecorderError::new(
+        "ffmpeg_spawn_failed",
+        format!("Could not start FFmpeg recorder: {error}; {}", read_log_text(&log)),
+        true,
+    );
+    let mut launch = crate::capture_guard::Launch::spawn(&command, guardian).map_err(&startup_error)?;
+    if let Some(stderr) = launch.child_mut().map_err(&startup_error)?.stderr.take() {
         spawn_output_reader(stderr, Arc::clone(&log), ProcessStream::Stderr);
     }
-
-    Ok(ActiveCapture::Ffmpeg { child })
-}
-
-fn start_windows_capture(
-    plan: &WindowCapturePlan,
-    output_path: &Path,
-) -> RecorderResult<ActiveCapture> {
-    println!("[FocusFlow recorder] Selected HWND: 0x{:X}", plan.hwnd);
-    println!("[FocusFlow recorder] Window title: {}", plan.title);
-
-    let window = WindowsCaptureWindow::from_raw_hwnd(plan.hwnd as *mut c_void);
-    if !window.is_valid() {
-        return Err(RecorderError::new(
-            "window_capture_unavailable",
-            "Selected window is not available to Windows Graphics Capture",
-            true,
-        ));
+    launch.wait_ready().map_err(&startup_error)?;
+    if let Some(stdout) = launch.stdout.take() {
+        #[cfg(target_os = "linux")]
+        if let Some(clock) = clock.filter(|c| c.enabled()) { clock.read(stdout); }
+        else { spawn_output_reader(stdout, Arc::clone(&log), ProcessStream::Stdout); }
+        #[cfg(not(target_os = "linux"))]
+        { let _ = clock; spawn_output_reader(stdout, Arc::clone(&log), ProcessStream::Stdout); }
     }
 
-    let settings = Settings::new(
-        window,
-        CursorCaptureSettings::Default,
-        DrawBorderSettings::Default,
-        SecondaryWindowSettings::Default,
-        MinimumUpdateIntervalSettings::Default,
-        DirtyRegionSettings::Default,
-        ColorFormat::Rgba8,
-        WindowsCaptureFlags {
-            output_path: output_path.to_path_buf(),
-            hwnd: plan.hwnd,
-            title: plan.title.clone(),
-            width: plan.width,
-            height: plan.height,
-        },
-    );
-
-    let capture = WindowsWindowCapture::start_free_threaded(settings).map_err(|error| {
-        RecorderError::new(
-            "window_capture_start_failed",
-            format!("Could not start window recording: {error}"),
-            true,
-        )
-    })?;
-
-    Ok(ActiveCapture::WindowsCapture { capture })
+    thread::sleep(Duration::from_millis(250));
+    match launch.child_mut().map_err(&startup_error)?.try_wait() {
+        Ok(Some(exit)) => return Err(RecorderError::new("capture_start_failed", format!("FFmpeg ended during startup ({exit}): {}", read_log_text(&log)), true)),
+        Ok(None) => {},
+        Err(error) => return Err(RecorderError::new("capture_status_failed", error.to_string(), true)),
+    }
+    let encoder_pid = launch.encoder_pid;
+    let child = launch.publish().map_err(startup_error)?;
+    Ok(ActiveCapture::Ffmpeg { child, encoder_pid })
 }
+
+struct FinalizingGuard<'a>(&'a RecorderState);
+impl Drop for FinalizingGuard<'_> {fn drop(&mut self) {let _ = self.0.clear_finalizing();}}
 
 async fn stop_active_recording(state: &RecorderState) -> RecorderResult<RecordingStatus> {
     let active = {
-        let mut runtime = state.lock_runtime()?;
+        let mut runtime = state.cleanup_runtime();
 
-        if runtime.finalizing {
+        if runtime.finalizing || runtime.starting {
             return Err(RecorderError::new(
                 "recorder_finalizing",
                 "A recording is already finalizing",
@@ -1053,24 +1028,35 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
         active
     };
 
+    let _finalizing = FinalizingGuard(state);
     let ActiveRecording {
+        #[cfg(target_os = "linux")]
+        mut native_capture,
+        notice,
         capture,
+        mut video_clock,
         audio_recorder,
         mic_device_name,
         click_tracker,
         output_path,
-        started_at,
+        started_at: _,
         monitor,
         capture_bounds,
         source,
+        ffmpeg_path,
         log,
         ..
     } = active;
 
+    #[cfg(windows)]
+    let mut notice = notice;
     click_tracker.request_stop();
 
     let backend = capture.backend();
     let capture_stop = stop_capture_backend(capture, &log).await;
+    video_clock.request_stop();
+    #[cfg(target_os = "linux")]
+    if let Some(session) = native_capture.as_mut() {session.request_stop();session.join();}
     let interactions = click_tracker.finish();
 
     // ── Stop microphone recording ─────────────────────────────────────────
@@ -1081,22 +1067,68 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
     let has_mic_audio = stop_audio_recorder(audio_recorder, &output_path);
     // ── End microphone stop ───────────────────────────────────────────────
 
-    if let Err(error) = capture_stop {
-        state.clear_finalizing()?;
-        return Err(error);
+    if let Err(error)=&capture_stop {
+        if matches!(error.code.as_str(),"ffmpeg_stop_timeout"|"ffmpeg_status_failed"|"ffmpeg_wait_failed") {
+            return Err(RecorderError::new(&error.code,format!("{}; recording files were retained for recovery",error.message),true));
+        }
     }
+
+    #[cfg(windows)]
+    let windows_completion = if backend == CaptureBackend::WindowsCapture {
+        match &capture_stop {Err(error)=>return Err(windows_capture::recovery(error)),_=>{}}
+        match capture_stop.as_ref().ok() {Some(CaptureCompletion::Windows(_))=>true,_=>return Err(windows_capture::recovery("Windows terminal summary missing"))}
+    } else {false};
+    #[cfg(not(windows))]
+    let windows_completion = false;
+    let probe_path = output_path.clone();
+    let encoder_ok = capture_stop.is_ok();
+    #[cfg(windows)]
+    let grid = if let Ok(CaptureCompletion::Windows(completion)) = &capture_stop {
+        let count=completion.count();let executable=ffmpeg_path.clone();let path=probe_path.clone();
+        notice=completion.notice.clone().or(notice);
+        Some(tauri::async_runtime::spawn_blocking(move || focusflow_core::ffmpeg::probe_cfr_grid(&executable,&path,count,&AtomicBool::new(false),Instant::now()+Duration::from_secs(600)))
+            .await.map_err(windows_capture::recovery)?.map_err(windows_capture::recovery)?)
+    } else {None};
+    let probe = if windows_completion {
+        #[cfg(windows)]
+        { Ok(Ok(grid.as_ref().ok_or_else(||windows_capture::recovery("Saved grid missing"))?.video)) }
+        #[cfg(not(windows))]
+        {unreachable!()}
+    } else {
+        tauri::async_runtime::spawn_blocking(move || focusflow_core::ffmpeg::probe_video_evidence(&ffmpeg_path, &probe_path)).await
+    };
+    let saved = probe.as_ref().ok().and_then(|result|result.as_ref().ok()).copied();
+    let mut evidence = if windows_completion {None} else {tauri::async_runtime::spawn_blocking(move || video_clock.finish(encoder_ok, saved)).await.ok()};
+    #[cfg(target_os = "linux")]
+    let separate = native_capture.is_some();
+    #[cfg(not(target_os = "linux"))]
+    let separate = false;
+    if let Some(evidence) = evidence.as_mut() {evidence.set_separate_intent(separate);}
+
+    let duration_us = match probe {
+        Ok(Ok(saved)) => saved.video.duration_us,
+        other => {
+            if let Some(evidence) = evidence.as_mut() {
+                evidence.reject("Saved video could not be validated");
+                if let Ok(bytes) = evidence.bytes() { let _ = write_json_atomically(&output_path.with_file_name("video-clock.json"), &bytes); }
+            }
+            return Err(RecorderError::new("recording_output_invalid", format!("Recording could not be validated; files were retained for recovery. Capture: {capture_stop:?}. Probe: {other:?}"), true));
+        }
+    };
+    let duration_ms = duration_us / 1000;
+    if let Err(error) = &capture_stop { eprintln!("[FocusFlow recorder] Valid video retained after source end: {error}"); }
 
     let interactions = match interactions {
         Ok(interactions) => interactions,
         Err(error) => {
-            state.clear_finalizing()?;
-            return Err(error);
+            eprintln!("[FocusFlow recorder] Saving video without interactions: {error}");
+            InteractionEvents { clicks: Vec::new(), drags: Vec::new() }
         }
     };
     // For Window recordings, coordinates are already window-relative and bounds-checked
     // at click time, so the after-the-fact normalization must be skipped to avoid
     // double-subtracting the window origin.
-    let interactions = match &source {
+    let mut interactions = match &source {
         RecordingSource::Window { .. } => interactions,
         _ => normalize_interactions_to_capture(interactions, capture_bounds),
     };
@@ -1104,7 +1136,6 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
     let metadata = match fs::metadata(&output_path) {
         Ok(metadata) => metadata,
         Err(error) => {
-            state.clear_finalizing()?;
             return Err(RecorderError::new(
                 "recording_output_missing",
                 format!("Recording finished, but screen.mp4 was not readable: {error}"),
@@ -1114,7 +1145,6 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
     };
 
     if metadata.len() == 0 {
-        state.clear_finalizing()?;
         return Err(RecorderError::new(
             "recording_output_empty",
             "Recording finished, but screen.mp4 is empty",
@@ -1122,29 +1152,33 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
         ));
     }
 
+    if !windows_completion {persist_clock_interactions(&output_path, evidence.as_mut(), separate, &mut interactions);}
+
     if let Err(error) = write_clicks_json(&output_path, &interactions.clicks) {
-        state.clear_finalizing()?;
-        return Err(error);
+        eprintln!("[FocusFlow recorder] Video saved; optional interaction write failed: {error}");
     }
 
     if let Err(error) = write_drags_json(&output_path, &interactions.drags) {
-        state.clear_finalizing()?;
-        return Err(error);
+        eprintln!("[FocusFlow recorder] Video saved; optional interaction write failed: {error}");
     }
 
-    if let Err(error) = write_timeline_json(&output_path) {
-        state.clear_finalizing()?;
-        return Err(error);
+    let timeline_write = if separate {
+        let timeline = build_timeline_segments(interactions.clicks.clone(), interactions.drags.clone());
+        serde_json::to_vec_pretty(&timeline).map_err(|error|RecorderError::new("timeline_write_failed",error.to_string(),true))
+            .and_then(|bytes|write_json_atomically(&output_path.with_file_name(TIMELINE_FILE_NAME),&bytes)
+                .map_err(|error|RecorderError::new("timeline_write_failed",error.to_string(),true)))
+    } else {write_timeline_json(&output_path)};
+    if let Err(error) = timeline_write {
+        eprintln!("[FocusFlow recorder] Video saved; optional interaction write failed: {error}");
     }
 
     if let Err(error) = write_session_json(
         &output_path,
         &source,
-        elapsed_seconds_from_millis(elapsed_ms(started_at)),
+        elapsed_seconds_from_millis(duration_ms),
         false,
     ) {
-        state.clear_finalizing()?;
-        return Err(error);
+        eprintln!("[FocusFlow recorder] Video saved; metadata update failed: {error}");
     }
 
     if let Err(error) = write_session_metadata(
@@ -1155,21 +1189,28 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
         has_mic_audio,
         mic_device_name.clone(),
     ) {
-        state.clear_finalizing()?;
-        return Err(error);
+        eprintln!("[FocusFlow recorder] Video saved; metadata update failed: {error}");
     }
 
+    #[cfg(target_os = "linux")]
+    if let Some(session) = native_capture {
+        let saved = saved.as_ref().ok_or_else(||native_capture::recovery("Saved video evidence is missing"))?;
+        session.publish(session_output_dir(&output_path)?, saved, evidence.as_ref().and_then(|e|e.accepted.as_ref()), &interactions, has_mic_audio)?;
+    }
+    #[cfg(windows)]
+    if let Ok(CaptureCompletion::Windows(completion)) = capture_stop {
+        completion.publish(session_output_dir(&output_path)?,grid.as_ref().ok_or_else(||windows_capture::recovery("Saved grid missing"))?,has_mic_audio)?;
+    }
     let completed = CompletedRecording {
+        notice: notice.clone(),
         output_path: output_path.clone(),
         monitor: monitor.clone(),
-        duration_ms: elapsed_ms(started_at),
+        duration_ms,
         file_size_bytes: metadata.len(),
     };
 
     {
         let mut runtime = state.lock_runtime()?;
-        runtime.finalizing = false;
-        runtime.finalizing_output_path = None;
         runtime.last_completed = Some(completed.clone());
     }
 
@@ -1180,7 +1221,28 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
         monitor: Some(completed.monitor),
         elapsed_ms: completed.duration_ms,
         file_size_bytes: Some(completed.file_size_bytes),
+        notice,
     })
+}
+
+fn persist_clock_interactions(output_path:&Path, evidence:Option<&mut video_clock::Evidence>, separate:bool, interactions:&mut InteractionEvents) {
+    if let Some(evidence) = evidence {
+        evidence.set_separate_intent(separate);
+        let mut corrected = interactions.clone();
+        evidence.apply(&mut corrected);
+        let persisted = evidence.bytes().and_then(|bytes| {
+            let path = output_path.with_file_name("video-clock.json");
+            write_json_atomically(&path, &bytes).map_err(|e| e.to_string())
+        });
+        match persisted {
+            Ok(()) => *interactions = corrected,
+            Err(error) => {
+                if separate {*interactions = corrected;}
+                eprintln!("[FocusFlow clock] Optional video-clock.json write failed (separate={separate}): {error}");
+            },
+        }
+    }
+
 }
 
 fn stop_audio_recorder(audio_recorder: Option<AudioRecorder>, output_path: &Path) -> bool {
@@ -1243,13 +1305,22 @@ fn is_usable_mic_wav(path: &Path) -> bool {
     reader.duration() > 0
 }
 
+#[derive(Debug)]
+enum CaptureCompletion {
+    Legacy,
+    #[cfg(windows)]
+    Windows(windows_capture::Completion),
+}
+
 async fn stop_capture_backend(
     capture: ActiveCapture,
     log: &Arc<Mutex<ProcessLog>>,
-) -> RecorderResult<()> {
+) -> RecorderResult<CaptureCompletion> {
     match capture {
-        ActiveCapture::Ffmpeg { child } => stop_ffmpeg_capture(child, log).await,
-        ActiveCapture::WindowsCapture { capture } => stop_windows_capture(capture).await,
+        ActiveCapture::Ffmpeg { child, .. } => stop_ffmpeg_capture(child, log).await.map(|_|CaptureCompletion::Legacy),
+        #[cfg(windows)]
+        ActiveCapture::WindowsCapture { capture } => tauri::async_runtime::spawn_blocking(move || capture.finish()).await
+            .map_err(windows_capture::recovery)?.map(CaptureCompletion::Windows),
     }
 }
 
@@ -1278,61 +1349,13 @@ async fn stop_ffmpeg_capture(mut child: Child, log: &Arc<Mutex<ProcessLog>>) -> 
     }
 }
 
-async fn stop_windows_capture(
-    capture: CaptureControl<WindowsWindowCapture, RecorderError>,
-) -> RecorderResult<()> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let callback = capture.callback();
-        let stop_result = capture.stop().map_err(windows_capture_stop_error);
-        let finish_result = callback.lock().finish_encoder();
-
-        match (stop_result, finish_result) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-            (Err(stop_error), Err(finish_error)) => Err(RecorderError::new(
-                stop_error.code,
-                format!(
-                    "{}; additionally failed to finalize window recording: {}",
-                    stop_error.message, finish_error.message
-                ),
-                true,
-            )),
-        }
-    })
-    .await
-    .map_err(|error| {
-        RecorderError::new(
-            "window_capture_wait_failed",
-            format!("Could not join window recording stop task: {error}"),
-            true,
-        )
-    })?
-}
-
-fn windows_capture_stop_error(error: CaptureControlError<RecorderError>) -> RecorderError {
-    match error {
-        CaptureControlError::StoppedHandlerError(error)
-        | CaptureControlError::GraphicsCaptureApiError(
-            GraphicsCaptureApiError::FrameHandlerError(error),
-        )
-        | CaptureControlError::GraphicsCaptureApiError(GraphicsCaptureApiError::NewHandlerError(
-            error,
-        )) => error,
-        other => RecorderError::new(
-            "window_capture_stop_failed",
-            format!("Could not stop window recording: {other}"),
-            true,
-        ),
-    }
-}
-
 fn current_recording_status(
     _app: &AppHandle,
     state: &RecorderState,
 ) -> RecorderResult<RecordingStatus> {
     let runtime = state.lock_runtime()?;
 
-    if runtime.finalizing {
+    if runtime.finalizing || runtime.starting {
         return Ok(RecordingStatus {
             phase: RecordingPhase::Finalizing,
             output_path: runtime
@@ -1345,6 +1368,7 @@ fn current_recording_status(
             monitor: None,
             elapsed_ms: 0,
             file_size_bytes: None,
+            notice: None,
         });
     }
 
@@ -1358,6 +1382,7 @@ fn current_recording_status(
             file_size_bytes: fs::metadata(&active.output_path)
                 .ok()
                 .map(|metadata| metadata.len()),
+            notice: active.notice.clone(),
         });
     }
 
@@ -1369,6 +1394,7 @@ fn current_recording_status(
             monitor: Some(completed.monitor.clone()),
             elapsed_ms: completed.duration_ms,
             file_size_bytes: Some(completed.file_size_bytes),
+            notice: completed.notice.clone(),
         });
     }
 
@@ -1379,10 +1405,12 @@ fn current_recording_status(
         monitor: None,
         elapsed_ms: 0,
         file_size_bytes: None,
+        notice: None,
     })
 }
 
 async fn wait_for_ffmpeg_exit(mut child: Child) -> RecorderResult<ProcessExit> {
+    child.stdin.take();
     tauri::async_runtime::spawn_blocking(move || {
         let started_waiting = Instant::now();
 
@@ -1396,30 +1424,17 @@ async fn wait_for_ffmpeg_exit(mut child: Child) -> RecorderResult<ProcessExit> {
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    return Ok(ProcessExit {
-                        code: None,
-                        event_error: Some(format!("Could not query FFmpeg status: {error}")),
-                    });
+                    crate::capture_guard::reap_in_background(child);
+                    return Err(RecorderError::new("ffmpeg_status_failed",format!("Could not query capture guardian status; encoder cleanup is unconfirmed: {error}"),true));
                 }
             }
 
             if started_waiting.elapsed() >= STOP_TIMEOUT {
-                let kill_error = child.kill().err().map(|error| error.to_string());
-                let wait_error = child.wait().err().map(|error| error.to_string());
-                let mut message = format!(
-                    "FFmpeg did not finish within {} seconds after stop",
+                crate::capture_guard::reap_in_background(child);
+                let message = format!(
+                    "Capture guardian did not finish within {} seconds after stop; encoder cleanup is unconfirmed",
                     STOP_TIMEOUT.as_secs()
                 );
-
-                if let Some(error) = kill_error {
-                    message.push_str("; additionally failed to kill FFmpeg: ");
-                    message.push_str(&error);
-                }
-
-                if let Some(error) = wait_error {
-                    message.push_str("; additionally failed to wait after kill: ");
-                    message.push_str(&error);
-                }
 
                 return Err(RecorderError::new("ffmpeg_stop_timeout", message, true));
             }
@@ -1577,12 +1592,12 @@ fn push_click(
     })
 }
 
-fn update_pending_drag(drag: &mut Option<PendingDrag>, started_at: Instant) {
+fn update_pending_drag(drag: &mut Option<PendingDrag>, started_at: Instant, filter: &ClickFilter) {
     let Some(drag) = drag.as_mut() else {
         return;
     };
 
-    if let Some(point) = current_drag_point(started_at) {
+    if let Some(point) = current_drag_point(started_at, filter) {
         drag.update(point);
     }
 }
@@ -1591,12 +1606,13 @@ fn finish_pending_drag(
     drag: &mut Option<PendingDrag>,
     drags: &Arc<Mutex<Vec<DragInteraction>>>,
     started_at: Instant,
+    filter: &ClickFilter,
 ) {
     let Some(drag) = drag.take() else {
         return;
     };
 
-    let Some(release_point) = current_drag_point(started_at) else {
+    let Some(release_point) = current_drag_point(started_at, filter) else {
         return;
     };
 
@@ -1609,8 +1625,9 @@ fn finish_pending_drag(
     }
 }
 
-fn current_drag_point(started_at: Instant) -> Option<DragPoint> {
+fn current_drag_point(started_at: Instant, filter: &ClickFilter) -> Option<DragPoint> {
     let (x, y) = cursor_position()?;
+    let (x, y) = apply_click_filter(filter, x, y)?;
 
     Some(DragPoint {
         timestamp: elapsed_seconds(started_at),
@@ -1637,7 +1654,7 @@ fn left_mouse_button_down() -> bool {
     unsafe { GetAsyncKeyState(i32::from(VK_LBUTTON.0)) < 0 }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn left_mouse_button_down() -> bool {
     false
 }
@@ -1647,7 +1664,7 @@ fn right_mouse_button_down() -> bool {
     unsafe { GetAsyncKeyState(i32::from(VK_RBUTTON.0)) < 0 }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn right_mouse_button_down() -> bool {
     false
 }
@@ -1663,6 +1680,9 @@ fn cursor_position() -> Option<(i32, i32)> {
 
 #[cfg(not(target_os = "windows"))]
 fn cursor_position() -> Option<(i32, i32)> {
+    #[cfg(target_os = "linux")]
+    return x11::pointer().map(|p| (p.root_x.into(), p.root_y.into()));
+    #[cfg(not(target_os = "linux"))]
     None
 }
 
@@ -1689,6 +1709,9 @@ fn hwnd_under_cursor() -> Option<usize> {
 
 #[cfg(not(target_os = "windows"))]
 fn hwnd_under_cursor() -> Option<usize> {
+    #[cfg(target_os = "linux")]
+    return x11::under_pointer();
+    #[cfg(not(target_os = "linux"))]
     None
 }
 
@@ -1705,6 +1728,9 @@ fn window_rect_for_hwnd(hwnd: usize) -> Option<(i32, i32)> {
 
 #[cfg(not(target_os = "windows"))]
 fn window_rect_for_hwnd(_hwnd: usize) -> Option<(i32, i32)> {
+    #[cfg(target_os = "linux")]
+    return x11::window_origin(_hwnd);
+    #[cfg(not(target_os = "linux"))]
     None
 }
 
@@ -1750,9 +1776,6 @@ fn apply_click_filter(filter: &ClickFilter, screen_x: i32, screen_y: i32) -> Opt
                 );
                 return None;
             }
-            println!(
-                "[FocusFlow click] Accepted click x={screen_x} y={screen_y} hwnd=0x{root_hwnd:X} -> rel=({rel_x},{rel_y})"
-            );
             Some((rel_x, rel_y))
         }
     }
@@ -1834,6 +1857,12 @@ fn normalize_point_to_capture(x: i32, y: i32, bounds: CaptureBounds) -> Option<(
     Some((relative_x as i32, relative_y as i32))
 }
 
+fn write_json_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, bytes)?;
+    fs::rename(temporary, path)
+}
+
 fn write_clicks_json(output_path: &Path, clicks: &[ClickEvent]) -> RecorderResult<()> {
     let clicks_path = clicks_output_path(output_path)?;
     let json = serde_json::to_vec_pretty(clicks).map_err(|error| {
@@ -1844,7 +1873,7 @@ fn write_clicks_json(output_path: &Path, clicks: &[ClickEvent]) -> RecorderResul
         )
     })?;
 
-    fs::write(&clicks_path, json).map_err(|error| {
+    write_json_atomically(&clicks_path, &json).map_err(|error| {
         RecorderError::new(
             "write_clicks_failed",
             format!("Could not write clicks.json: {error}"),
@@ -1863,7 +1892,7 @@ fn write_drags_json(output_path: &Path, drags: &[DragInteraction]) -> RecorderRe
         )
     })?;
 
-    fs::write(&drags_path, json).map_err(|error| {
+    write_json_atomically(&drags_path, &json).map_err(|error| {
         RecorderError::new(
             "write_drags_failed",
             format!("Could not write drags.json: {error}"),
@@ -1912,7 +1941,7 @@ fn write_timeline_json(output_path: &Path) -> RecorderResult<()> {
         )
     })?;
 
-    fs::write(timeline_output_path(output_path)?, timeline_json).map_err(|error| {
+    write_json_atomically(&timeline_output_path(output_path)?, &timeline_json).map_err(|error| {
         RecorderError::new(
             "write_timeline_failed",
             format!("Could not write timeline.json: {error}"),
@@ -2234,20 +2263,13 @@ fn session_output_dir(output_path: &Path) -> RecorderResult<&Path> {
 /// Window recordings use [`ClickFilter::Window`] so that only clicks inside the
 /// target window are accepted and coordinates are converted at click time.
 fn click_filter_for_source(plan: &CapturePlan) -> ClickFilter {
-    if let RecordingSource::Window { ref hwnd, .. } = plan.source {
-        if let Ok(h) = parse_window_handle(hwnd) {
-            if let Some(ref wcp) = plan.window_capture {
-                return ClickFilter::Window {
-                    hwnd: h.0 as usize,
-                    encoder_width: wcp.width,
-                    encoder_height: wcp.height,
-                };
-            }
-        }
+    if let Some(w) = &plan.window_capture {
+        return ClickFilter::Window { hwnd: w.hwnd, encoder_width: w.width, encoder_height: w.height };
     }
     ClickFilter::All
 }
 
+#[cfg(windows)]
 fn capture_plan_for_source(
     app: &AppHandle,
     source: RecordingSource,
@@ -2368,6 +2390,7 @@ fn validated_capture_bounds(
     })
 }
 
+#[cfg(windows)]
 fn monitor_info_for_capture_bounds(
     app: &AppHandle,
     bounds: CaptureBounds,
@@ -2406,6 +2429,7 @@ fn monitor_info_for_capture_bounds(
     }
 }
 
+#[cfg(windows)]
 fn capture_bounds_intersection_area(left: CaptureBounds, right: CaptureBounds) -> u64 {
     let left_right = i64::from(left.x) + i64::from(left.width);
     let left_bottom = i64::from(left.y) + i64::from(left.height);
@@ -2425,6 +2449,7 @@ fn capture_bounds_intersection_area(left: CaptureBounds, right: CaptureBounds) -
     (intersection_width as u64) * (intersection_height as u64)
 }
 
+#[cfg(windows)]
 fn ffmpeg_desktop_region_args(
     bounds: CaptureBounds,
     output_path: &Path,
@@ -2564,7 +2589,7 @@ fn write_session_metadata(
         )
     })?;
 
-    fs::write(metadata_output_path(output_path)?, json).map_err(|error| {
+    write_json_atomically(&metadata_output_path(output_path)?, &json).map_err(|error| {
         RecorderError::new(
             "write_metadata_failed",
             format!("Could not write metadata.json: {error}"),
@@ -2596,26 +2621,13 @@ fn write_session_json(
         )
     })?;
 
-    fs::write(session_json_output_path(output_path)?, json).map_err(|error| {
+    write_json_atomically(&session_json_output_path(output_path)?, &json).map_err(|error| {
         RecorderError::new(
             "write_session_failed",
             format!("Could not write session.json: {error}"),
             true,
         )
     })
-}
-
-pub(crate) fn mark_session_exported(session_dir: &Path) -> RecorderResult<()> {
-    let mut summary = match read_session_summary(session_dir) {
-        Ok(Some(summary)) => summary,
-        Ok(None) => fallback_session_summary(session_dir),
-        Err(error) => {
-            eprintln!("Could not read existing session metadata before export update: {error}");
-            fallback_session_summary(session_dir)
-        }
-    };
-    summary.exported = true;
-    write_session_summary(session_dir, &summary)
 }
 
 fn read_session_summary(session_dir: &Path) -> RecorderResult<Option<SessionSummary>> {
@@ -2641,30 +2653,14 @@ fn read_session_summary(session_dir: &Path) -> RecorderResult<Option<SessionSumm
     })
 }
 
-fn write_session_summary(session_dir: &Path, summary: &SessionSummary) -> RecorderResult<()> {
-    let json = serde_json::to_vec_pretty(summary).map_err(|error| {
-        RecorderError::new(
-            "serialize_session_failed",
-            format!("Could not serialize session.json: {error}"),
-            true,
-        )
-    })?;
-
-    fs::write(session_dir.join(SESSION_FILE_NAME), json).map_err(|error| {
-        RecorderError::new(
-            "write_session_failed",
-            format!("Could not write session.json: {error}"),
-            true,
-        )
-    })
-}
-
-fn recent_session_from_dir(session_dir: &Path) -> RecorderResult<Option<RecentSession>> {
+fn recent_session_from_dir(session_dir: &Path, projects: &crate::export::DesktopProjects) -> RecorderResult<Option<RecentSession>> {
     if !session_dir.join(OUTPUT_FILE_NAME).exists() {
         return Ok(None);
     }
 
     let session_id = session_id_from_dir(session_dir)?;
+    let canonical = session_dir_from_id(&projects.root, &session_id)?;
+    let session_dir = canonical.as_path();
     let fallback = SessionSummary {
         session_id: session_id.clone(),
         created_at: created_at_from_session_id(&session_id),
@@ -2680,74 +2676,66 @@ fn recent_session_from_dir(session_dir: &Path) -> RecorderResult<Option<RecentSe
             fallback
         }
     };
-    let edited_video_path = session_dir.join(EDITED_FILE_NAME);
-    let exported = summary.exported || edited_video_path.exists();
-
+    let versioned = newest_completed_export(session_dir, &session_id, projects);
+    let legacy = focusflow_core::paths::asset_path(session_dir, EDITED_FILE_NAME).ok();
+    let (edited_job_id, edited_video_path) = match versioned {
+        Some((job, path)) => (Some(job), Some(path_to_string(&path)?)),
+        None => (None, legacy.as_deref().map(path_to_string).transpose()?),
+    };
     Ok(Some(RecentSession {
-        session_id: summary.session_id,
+        session_id,
         created_at: summary.created_at,
         duration_seconds: summary.duration_seconds,
         recording_source: summary.recording_source,
-        exported,
+        exported: edited_video_path.is_some(),
         session_path: path_to_string(session_dir)?,
-        edited_video_path: if edited_video_path.exists() {
-            Some(path_to_string(&edited_video_path)?)
-        } else {
-            None
-        },
+        edited_video_path, edited_job_id,
     }))
 }
 
-fn fallback_session_summary(session_dir: &Path) -> SessionSummary {
-    let session_id = session_id_from_dir(session_dir).unwrap_or_else(|_| "unknown".to_string());
-
-    SessionSummary {
-        created_at: created_at_from_session_id(&session_id),
-        session_id,
-        duration_seconds: 0.0,
-        recording_source: "unknown".to_string(),
-        exported: session_dir.join(EDITED_FILE_NAME).exists(),
+fn newest_completed_export(project: &Path, id: &str, projects: &crate::export::DesktopProjects) -> Option<(String, PathBuf)> {
+    let exports = match focusflow_core::paths::exports_dir(project) {
+        Ok(path) => path,
+        Err(error) => {
+            if error.code != focusflow_core::ErrorCode::NotFound { eprintln!("Could not inspect exports for {id}: {error}"); }
+            return None;
+        }
+    };
+    let entries = match fs::read_dir(exports) {
+        Ok(entries) => entries,
+        Err(error) => { eprintln!("Could not list exports for {id}: {error}"); return None; }
+    };
+    let mut completed = Vec::new();
+    for entry in entries {
+        let candidate = (|| -> Result<_, String> {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let job_id = entry.file_name().into_string().map_err(|_| "Non-UTF8 job ID")?;
+            focusflow_core::paths::job_dir(project, &job_id).map_err(|error| error.to_string())?;
+            let job = projects.jobs.status(id, &job_id).map_err(|error| error.to_string())?;
+            if job.state != focusflow_core::jobs::JobState::Completed
+                || job.kind != focusflow_core::jobs::JobKind::Export { return Ok(None); }
+            let output = projects.jobs.output(id, &job_id).map_err(|error| error.to_string())?.path;
+            Ok(Some((modified_time(&output), job_id, output)))
+        })();
+        match candidate {
+            Ok(Some(output)) => completed.push(output),
+            Ok(None) => {},
+            Err(error) => eprintln!("Ignoring unavailable export for {id}: {error}"),
+        }
     }
+    completed.into_iter().max_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1))).map(|(_, id, path)| (id, path))
 }
 
 fn session_dir_from_id(recordings_dir: &Path, session_id: &str) -> RecorderResult<PathBuf> {
-    if session_id.trim().is_empty()
-        || session_id.contains('\\')
-        || session_id.contains('/')
-        || session_id.contains("..")
-    {
-        return Err(RecorderError::new(
-            "invalid_session_id",
-            "Session id is invalid",
-            true,
-        ));
-    }
-
-    let recordings_dir = recordings_dir.canonicalize().map_err(|error| {
-        RecorderError::new(
-            "resolve_recordings_dir_failed",
-            format!("Could not resolve recordings directory: {error}"),
-            true,
-        )
-    })?;
-    let session_dir = recordings_dir.join(session_id);
-    let canonical_session_dir = session_dir.canonicalize().map_err(|error| {
-        RecorderError::new(
-            "resolve_session_dir_failed",
-            format!("Could not resolve session directory: {error}"),
-            true,
-        )
-    })?;
-
-    if !canonical_session_dir.starts_with(&recordings_dir) || !canonical_session_dir.is_dir() {
-        return Err(RecorderError::new(
-            "invalid_session_id",
-            "Session id is outside the recordings directory",
-            true,
-        ));
-    }
-
-    Ok(canonical_session_dir)
+    focusflow_core::paths::project_dir(recordings_dir, session_id).map_err(|error| {
+        let code = match error.code {
+            focusflow_core::ErrorCode::InvalidId | focusflow_core::ErrorCode::InvalidPath => {
+                "invalid_session_id"
+            }
+            _ => "resolve_session_dir_failed",
+        };
+        RecorderError::new(code, error.to_string(), true)
+    })
 }
 
 fn session_id_from_dir(session_dir: &Path) -> RecorderResult<String> {
@@ -2861,7 +2849,7 @@ fn enumerate_recordable_windows() -> RecorderResult<Vec<RecordableWindow>> {
     Ok(windows)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn enumerate_recordable_windows() -> RecorderResult<Vec<RecordableWindow>> {
     Ok(Vec::new())
 }
@@ -2961,7 +2949,7 @@ fn window_capture_bounds(hwnd: HWND) -> Option<CaptureBounds> {
     let width = rect.right.checked_sub(rect.left)?;
     let height = rect.bottom.checked_sub(rect.top)?;
 
-    if width < 16 || height < 16 {
+    if width < 2 || height < 2 {
         return None;
     }
 
@@ -3061,7 +3049,7 @@ fn window_capture_plan_from_hwnd(
         )
     })?;
 
-    if width < 16 || height < 16 {
+    if width < 2 || height < 2 {
         return Err(RecorderError::new(
             "window_capture_invalid_size",
             format!("Selected window is too small to record: {width}x{height}"),
@@ -3069,9 +3057,14 @@ fn window_capture_plan_from_hwnd(
         ));
     }
 
+    let mut process_id=0;
+    // Borrow the live selected HWND only to snapshot its owner before worker admission.
+    unsafe {GetWindowThreadProcessId(hwnd,Some(&mut process_id));}
+    if process_id==0 {return Err(windows_capture::recovery("Selected window process is unavailable"));}
     Ok((
         WindowCapturePlan {
             hwnd: hwnd.0 as usize,
+            process_id,
             title,
             width,
             height,
@@ -3116,15 +3109,7 @@ fn window_id(hwnd: HWND) -> String {
 }
 
 fn ffmpeg_sidecar_command(app: &AppHandle) -> RecorderResult<Command> {
-    let command = app.shell().sidecar(FFMPEG_SIDECAR_NAME).map_err(|error| {
-        RecorderError::new(
-            "ffmpeg_sidecar_unavailable",
-            format!("Could not resolve bundled FFmpeg sidecar: {error}"),
-            true,
-        )
-    })?;
-
-    Ok(command.into())
+    crate::ffmpeg::command(app).map_err(|message| RecorderError::new("ffmpeg_unavailable", message, true))
 }
 
 fn log_recording_diagnostics(session_dir: &Path, ffmpeg_path: &OsStr) {
@@ -3148,6 +3133,7 @@ fn log_recording_diagnostics(session_dir: &Path, ffmpeg_path: &OsStr) {
     );
 }
 
+#[cfg(windows)]
 fn log_window_capture_bounds(label: &str, bounds: CaptureBounds) {
     println!("[FocusFlow recorder] {label}:");
     println!("[FocusFlow recorder] x={}", bounds.x);
@@ -3242,16 +3228,13 @@ fn civil_from_days(days: i64) -> (i32, u32, u32) {
     (year as i32, month as u32, day as u32)
 }
 
-fn ensure_windows() -> RecorderResult<()> {
-    if cfg!(target_os = "windows") {
-        Ok(())
-    } else {
-        Err(RecorderError::new(
-            "unsupported_platform",
-            "This recorder implementation is Windows-only",
-            false,
-        ))
-    }
+fn ensure_capture_platform() -> RecorderResult<()> {
+    #[cfg(windows)]
+    return Ok(());
+    #[cfg(target_os = "linux")]
+    return x11::connect().map(|_| ());
+    #[cfg(not(any(windows, target_os = "linux")))]
+    Err(RecorderError::new("unsupported_platform", "Native capture is not implemented on this platform", false))
 }
 
 fn append_stdout(log: &Arc<Mutex<ProcessLog>>, bytes: Vec<u8>) {
@@ -3356,3 +3339,119 @@ fn stop_timeout_error(
 
     RecorderError::new(wait_error.code, message, true)
 }
+
+fn modified_time(path: &Path) -> SystemTime {
+    fs::metadata(path).and_then(|metadata| metadata.modified()).unwrap_or(UNIX_EPOCH)
+}
+
+#[cfg(target_os = "linux")]
+fn capture_plan_for_source(app: &AppHandle, source: RecordingSource, output: &Path) -> RecorderResult<CapturePlan> { x11::plan(app, source, output) }
+#[cfg(target_os = "linux")]
+fn enumerate_recordable_windows() -> RecorderResult<Vec<RecordableWindow>> { x11::windows() }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureCapabilities {
+    platform: &'static str, screen: bool, region: bool, window: bool,
+    global_hotkeys: bool, embedded_cursor: bool, reason: Option<String>,
+}
+#[tauri::command]
+pub fn get_capture_capabilities() -> CaptureCapabilities {
+    let error = ensure_capture_platform().err();
+    CaptureCapabilities { platform: std::env::consts::OS, screen:error.is_none(), region:error.is_none(), window:error.is_none(), global_hotkeys:crate::GLOBAL_HOTKEYS_READY.load(Ordering::Relaxed), embedded_cursor:true, reason:error.map(|e|e.message) }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    #[test]
+    fn shutdown_waits_for_startup_cleanup_and_rejects_late_starts() {
+        use std::{future::Future, task::{Context, Poll, Waker}};
+        let state = RecorderState::new();
+        let reservation = StartReservation::acquire(&state).unwrap();
+        let mut closing = Box::pin(shutdown(&state));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(closing.as_mut().poll(&mut context), Poll::Pending));
+        assert_eq!(StartReservation::acquire(&state).err().unwrap().code, "recorder_shutting_down");
+        // Simulated startup failure/cleanup: release its actual completion guard.
+        drop(reservation);
+        assert!(matches!(closing.as_mut().poll(&mut context), Poll::Ready(())));
+        assert!(state.lock_runtime().unwrap().lifecycle_waiters.is_empty());
+        assert!(StartReservation::acquire(&state).is_err());
+    }
+
+    #[test]
+    fn shutdown_waits_for_finalization_completion_without_locking_it_out() {
+        use std::{future::Future, task::{Context, Poll, Waker}};
+        let state = RecorderState::new();
+        state.lock_runtime().unwrap().finalizing = true;
+        let mut closing = Box::pin(shutdown(&state));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(closing.as_mut().poll(&mut context), Poll::Pending));
+        assert!(StartReservation::acquire(&state).is_err());
+        // The real finalization error path uses this signal after owned work has completed.
+        state.clear_finalizing().unwrap();
+        assert!(matches!(closing.as_mut().poll(&mut context), Poll::Ready(())));
+        assert!(state.lock_runtime().unwrap().lifecycle_waiters.is_empty());
+    }
+
+    #[test]
+    fn failed_optional_json_write_preserves_previous_document() {
+        let dir = std::env::temp_dir().join(format!("focusflow-atomic-json-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("metadata.json");
+        fs::write(&path, b"original").unwrap();
+        fs::create_dir(path.with_extension("json.tmp")).unwrap();
+        assert!(write_json_atomically(&path, b"replacement").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn starting_reservation_rejects_competitors_and_releases_on_error() {
+        let state = RecorderState::new();
+        let dir = std::env::temp_dir().join(format!("focusflow-reservation-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut first = StartReservation::acquire(&state).unwrap();
+        first.directory = Some(dir.clone());
+        assert!(StartReservation::acquire(&state).is_err());
+        drop(first);
+        assert!(!dir.exists());
+        assert!(StartReservation::acquire(&state).is_ok());
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn capture_plan_for_source(_app: &AppHandle, _source: RecordingSource, _output: &Path) -> RecorderResult<CapturePlan> {
+    Err(RecorderError::new("unsupported_platform", "Native capture is not implemented on this platform", false))
+}
+
+pub async fn shutdown(state: &RecorderState) {
+    loop {
+        let waiter = {
+            let mut runtime = state.cleanup_runtime();
+            runtime.shutting_down = true;
+            if runtime.starting || runtime.finalizing {
+                // Subscribe under the same lock as the state check, so completion cannot be missed.
+                let (sender, receiver) = tauri::async_runtime::channel(1);
+                runtime.lifecycle_waiters.push(sender);
+                Some(receiver)
+            } else if runtime.active.is_some() {
+                None
+            } else {
+                return;
+            }
+        };
+        if let Some(mut waiter) = waiter {
+            // Startup/stop retains ownership of its work; never hold the runtime mutex while waiting.
+            let _ = waiter.recv().await;
+        } else if let Err(error) = stop_active_recording(state).await {
+            // A concurrent Stop may have taken ownership; recheck and await that finalization.
+            eprintln!("Recording shutdown: {error}");
+        }
+    }
+}
+
+#[cfg(all(windows,test))]
+mod windows_qualification;
+#[cfg(all(windows,test))]
+pub(crate) use windows_qualification::run as run_windows_qualification;

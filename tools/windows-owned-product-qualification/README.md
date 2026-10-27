@@ -1,0 +1,36 @@
+# Actual Windows owned product qualification
+
+Generated native qualification infrastructure only. Root reviews this diff before publishing the dedicated `codex-windows-owned-product-qualification` branch. The workflow has no release/tag/install step and reads only its explicit native build inputs. No native results are claimed by authoring or cross-target metadata compilation.
+
+All three qualification executable targets are opt-in (`test = false`); ordinary `cargo test` does not run fixture mains without their generated arguments. Explicit `--test <name>` still selects them.
+
+The `windows_owned_qualification` harness=false target points directly to the application's **original `src/lib.rs`**. Its cfg(test) main uses the original dispatchers, modules, dependency lock and vendor patch. This supersedes the proposed individual-module source-includes, which do not resolve nested modules or the actual crate-root globals correctly. The ordinary product executable is built separately and runs the same original worker without test observation. There are no source shims, copied selectors, fabricated Ready/terminal/authority messages, or release observer switches.
+
+Run the checked-in workflow on the dedicated branch after root approval. For a reviewed local Windows checkout, install the pinned tools, supply the verified FFmpeg sidecar required by the real app config, and run:
+
+```powershell
+python -m unittest discover -s tools/windows-owned-product-qualification -v
+python tools/windows-owned-product-qualification/run.py --evidence qualification-evidence --ffmpeg C:/pinned/ffmpeg.exe --ffprobe C:/pinned/ffprobe.exe
+python tools/windows-owned-product-qualification/package_evidence.py qualification-evidence qualification-setup qualification-upload
+```
+
+`qualification-evidence` must not already exist. The native harness requires the independent observer in `run.py`: before gate 4, it opens exact noninheritable worker and encoder process handles and acknowledges `owned.json`. Do not invoke worker/fault modes against user windows or files. Everything painted or resized/destroyed is an owned generated HWND; no pointer movement or user input is injected. The lifecycle fixtures use an inert empty ClickTracker value so no human input is sampled.
+
+Required native gates:
+
+* Original WARP Map/copy/Unmap tests, via the preserved Fix 1 manifest and lock (four tests). Missing D3D debug layer is a **failed qualification gate**, even though an additional capability query can describe a no-debug WARP adapter.
+* Original core Windows publisher/file sync tests (ten) and Windows-enabled authority import tests (fifteen; two additional import tests are Unix/Linux-only). Passing counts require zero ignored tests. Windows directory sync remains a documented no-op; passing file sync/rename does not prove power-loss durability.
+* Public `probe_cfr_grid` with self-contained Windows executable fixtures: literal output, idle, concurrent stderr flood, overlong stdout, both pipes closed while alive, cancellation, exit 7, held stdout/stderr descendants, and 5000 rows with concurrent diagnostics. Exact original child cleanup is asserted; descendants are explicitly test-owned and cleaned separately with a five-second escape.
+* Original Session -> Completion -> public core grid -> authority publish -> import for 320x240, 641x359, 803x451, 960x540 and 161x479. Every saved frame's source paint/nonce/corners and every packet's grid/endpoint are independently checked. Three sequential sessions share one RecorderState. Static, natural source-close before Stop, resize, admission close/resize, marker failure, lost worker, blocked/partial/nonzero encoder, transfer-after-shutdown and concurrent Stop/close/shutdown cases are generated.
+* Blocked-encoder timing waits for the first actual writer-start receipt, then calls normal Stop before the two-entry output queue fills. It requires an actual Supervisor termination receipt and failed write. Output-overflow cleanup or an outer watchdog cannot satisfy this case.
+* Exit-7 qualification requires the fixture's EOF receipt after consuming every completed frame, the actual encoder wait result of 7, complete successful writes, and no other worker/Supervisor failure. A generic recording failure, missing EOF, or outer watchdog cannot satisfy this case.
+* Isolated parent death: the worker is parked after ownership gate 4, **before** starting supervisor or parent EOF reader, while its harmless encoder parks for 30 seconds. The observer holds process handles only, kills the exact Session-owning parent and requires both children signaled within two seconds, before any fallback. This proves Job ownership at that gate; it does not exercise post-Ready capture during parent death.
+* Separately hashed uninstrumented actual `FocusFlow.exe` worker smoke. The test driver still owns Session and asserts import/media preservation. Video identity and packet grid are checked, but there is no causal callback trace in that release worker.
+
+Instrumentation has at most 6144 source/decision/geometry scalar events and 2048 write records per worker, less than 2 MiB collector state and at most 4 MiB serialized output. Overflow or flush failure cannot emit successful terminal completion. Paint identity is read from already owned pixels outside the existing publication mutex; no extra pixel snapshot or Arc is retained. Inside that mutex, only preallocated scalar append/order updates occur. No file/pipe I/O or extra observation mutex runs there. Output receipts serialize only after capture stops, outside the lock. The bounded parent cleanup also bounds an unavailable trace destination; no terminal means incomplete authority.
+
+The marker contains paint identity, not callback sequence. Identical visual callbacks cannot independently distinguish sequences; the same-lock event frontier proves sequence choice and decoded media proves visual choice. Native raw timestamps are never rewritten. `analysis.json` records whether equal native timestamps and the old-texture/new-ContentSize transition actually occurred; absence remains an **open coverage gate**, regardless of portable contract checks. Instrumentation changes scheduling, and this finite geometry/runner matrix does not qualify every dimension or device.
+
+The full app Tauri/WebView2 Record -> Stop -> Edit -> Play flow, native AppHandle startup/exit callbacks, physical cursor/geometry, audio synchronization, screen/region capture modernization, installers/signing and release acceptance remain separate. Source-close/resize/Job/pipe and native linking may fail on the hosted desktop; those failures must be retained and reviewed, never silently skipped or worked around in the product body.
+
+Evidence retains explicit commands/exits/log hashes, source/commit/lock/tool/executable hashes, dependency resolution, CPU/GPU/SDK/MSVC/runner image, WARP/debug/QPC/session/nested-Job facts, actual generated authority/marker/project/media, per-frame decode, packet and exact-handle receipts. Media is capped at 64 MiB per session, trace at 4 MiB, aggregate at 256 MiB. Upload packaging accepts only named generated cases/files, never arbitrary recordings/evidence trees. Oversized files fail and are omitted from the bounded diagnostic upload with an explicit cap receipt; original local failure files remain.
