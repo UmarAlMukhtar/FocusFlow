@@ -1,5 +1,6 @@
-import os
+import copy
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -7,204 +8,194 @@ import unittest
 from analyze import analyze, decode, summarize
 
 
+def fixture():
+    events = [dict(event='startup', frequency=3_000_000, cursorRequest='WithoutCursor'),
+              dict(event='admission', qpc=3_000_000), dict(event='captureStarted'),
+              dict(event='encoderOwned', pid=42, inJob=True)]
+    ledger = []
+    for seq, t in enumerate((10_000_000, 10_200_000, 10_400_000)):
+        q = 3_000_000 + seq*60_000
+        events.append(dict(event='snapshot', seq=seq, native100ns=t, width=640, height=360,
+                           id=seq, cornersValid=True, callbackQpc=q+1, copyStartQpc=q+2,
+                           copyEndQpc=q+3, copyCompleteQpc=q+4, preRoll=False))
+        decision = 3_100_000+seq*100_000
+        ledger.append(dict(event='selected', ordinal=seq, sourceSeq=seq, sourceNative100ns=t,
+                           sourceId=seq, decisionQpc=decision, targetNumerator=300_000_000+seq*10_000_000,
+                           targetDenominator=300_000_000,deliveredThroughSeq=min(2,seq+1)))
+        ledger.append(dict(event='written', ordinal=seq, writeBeginQpc=decision+1,
+                           writeEndQpc=decision+10, bytesWritten=640*360*4))
+    events += [dict(event='stopInstalled', qpc=3_300_000, requestQpc=3_299_999, reason='stop'),
+               dict(event='terminal', epoch100ns=10_000_000, stopQpc=3_300_000, expectedCells=3,
+                    completeWrites=3, ffmpegExit=0, reaped=True, writerDone=True,
+                    sourceQueueHigh=1, futureQueueHigh=2, outputQueueHigh=1, ownedHigh=4,
+                    failure=None)]
+    probe = dict(streams=[dict(index=0, codec_type='video', width=640, height=360,time_base='1/30000')],
+                 frames=[dict(media_type='video',stream_index=0,pts=n*1000,duration=1000) for n in range(3)],
+                 packets=[dict(stream_index=0,pts=n*1000,duration=1000) for n in (2,0,1)])
+    pixels=[dict(id=n,sourceTag=n,cornersValid=True) for n in range(3)]
+    return events,probe,pixels,ledger
+
+
+def image(ident,tag):
+    rgb=bytearray([96]*(640*360*3))
+    for x,y,color in [(0,0,(255,0,0)),(608,0,(0,255,0)),(0,328,(0,0,255)),(608,328,(255,255,0))]:
+        for row in range(y,y+32):
+            for col in range(x,x+32): rgb[(row*640+col)*3:(row*640+col)*3+3]=bytes(color)
+    for y,h,value in [(128,64,ident),(224,32,tag)]:
+        for b in range(16):
+            c=240 if value & (1<<b) else 12
+            for row in range(y,y+h):
+                for col in range(32+b*32,56+b*32):rgb[(row*640+col)*3:(row*640+col)*3+3]=bytes([c]*3)
+    return rgb
+
+
 class AnalysisTests(unittest.TestCase):
-    def test_decodes_literal_marker_and_all_four_color_corners(self):
-        # A literal ID 165 and asymmetric color corners catch bit-order/channel/origin mistakes.
-        rgb = bytearray([96] * (640 * 360 * 3))
-        for x, y, color in [(0, 0, (255, 0, 0)), (608, 0, (0, 255, 0)),
-                            (0, 328, (0, 0, 255)), (608, 328, (255, 255, 0))]:
-            for row in range(y, y + 32):
-                for col in range(x, x + 32):
-                    rgb[(row * 640 + col) * 3:(row * 640 + col) * 3 + 3] = bytes(color)
-        for bit in range(16):
-            color = 240 if bit in (0, 2, 5, 7) else 12
-            for row in range(128, 192):
-                for col in range(32 + bit * 32, 56 + bit * 32):
-                    rgb[(row * 640 + col) * 3:(row * 640 + col) * 3 + 3] = bytes([color] * 3)
-        self.assertEqual(decode(rgb)['id'], 165)
-        self.assertTrue(decode(rgb)['cornersValid'])
-        rgb[0:32*640*3] = bytes([96]) * (32*640*3)
-        self.assertFalse(decode(rgb)['cornersValid'])
-        self.assertRaises(ValueError, decode, rgb[:100])
+    def check(self, data=None, scenario='animated'):
+        e,p,x,l=data or fixture()
+        return summarize(e,p,x,scenario,l)
 
-    def fixture(self):
-        events = [{'event': 'startup', 'frequency': 10_000_000, 'qpc': 900_000,
-                   'cursorRequest': 'WithoutCursor'}, {'event': 'captureStarted'}]
-        for seq, native in enumerate([1_000_000, 1_333_333, 1_666_666]):
-            events.append(dict(event='enqueued', seq=seq, native100ns=native,
-                               first100ns=1_000_000, delta100ns=native-1_000_000,
-                               width=640, height=360, id=seq,
-                               qpcBefore=native+10, qpcSubmitBefore=native+20,
-                               qpcAfter=native+30, qpcBefore100ns=native+10,
-                               qpcAfter100ns=native+30))
-        events.append({'event': 'finishComplete', 'enqueued': 3})
-        probe = dict(streams=[dict(index=0, codec_type='video', width=640, height=360,
-                                  time_base='1/10000000')],
-                     frames=[dict(media_type='video', stream_index=0, pts=x, duration=333333) for x in [0, 333333, 666666]],
-                     packets=[dict(stream_index=0, pts=x, duration=333333) for x in [666666, 0, 333333]])
-        pixels = [dict(id=i, cornersValid=True) for i in range(3)]
-        return events, probe, pixels
+    def test_exact_all_saved_mapping_non_10mhz_qpc(self):
+        r=self.check();self.assertEqual(r['status'],'owned-feed-verified')
+        self.assertEqual(r['savedEndpointSeconds'],'1/10');self.assertFalse(r['authorityAccepted'])
 
-    def test_empty_audio_metadata_is_proved_from_unfiltered_packets_and_frames(self):
-        events, probe, pixels = self.fixture()
-        # Nonzero video index and metadata order catch positional/first-stream selection.
-        probe['streams'][0]['index'] = 4
-        probe['streams'].insert(0, dict(index=1, codec_type='audio', codec_name='aac'))
-        for row in probe['frames'] + probe['packets']: row['stream_index'] = 4
-        result = summarize(events, probe, pixels, 'animated')
-        self.assertEqual(result['status'], 'observed-preservation')
-        self.assertEqual(result['videoStreamIndex'], 4)
-        self.assertEqual(result['emptyAudioStreams'], [1])
-        self.assertEqual(result['streamLayout'], probe['streams'])
-        self.assertEqual(result['savedCount'], 3)
-        self.assertFalse(result['authorityAccepted'])
+    def test_tag_and_original_id_are_independent(self):
+        p=decode(image(165,37));self.assertEqual((p['id'],p['sourceTag']),(165,37));self.assertTrue(p['cornersValid'])
+        self.assertRaises(ValueError,decode,b'bad')
 
-    def test_audio_packets_or_decoded_samples_are_not_empty_metadata(self):
-        for payload in ('packet', 'frame'):
-            events, probe, pixels = self.fixture()
-            probe['streams'].append(dict(index=1, codec_type='audio', codec_name='aac'))
-            if payload == 'packet':
-                probe['packets'].append(dict(stream_index=1, pts=0, duration=1024, size='12'))
-            else:
-                probe['frames'].append(dict(stream_index=1, media_type='audio', nb_samples=1024))
-            with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, 'audio payload'):
-                summarize(events, probe, pixels, 'animated')
+    def test_each_corruption_rejects(self):
+        for defect in ('tag','id','corner','omitted','blacktail','pts','duration','endpoint','future',
+                       'notmaximal','incomplete','exit','preroll','duplicate','geometry','unknownstream',
+                       'audio','packet','earlydecision','copybracket','queue','origin','cutoff','ordinal'):
+            e,p,x,l=fixture()
+            if defect=='tag':x[1]['sourceTag']=0
+            if defect=='id':x[1]['id']=77
+            if defect=='corner':x[1]['cornersValid']=False
+            if defect=='omitted':l.pop(2)
+            if defect=='blacktail':x.append(dict(id=0,sourceTag=0,cornersValid=False))
+            if defect=='pts':p['frames'][0]['pts']=1
+            if defect=='duration':del p['frames'][1]['duration']
+            if defect=='endpoint':p['frames'][-1]['duration']=999;p['packets'][0]['duration']=999
+            if defect=='future':l[0].update(sourceSeq=1,sourceNative100ns=10_200_000,sourceId=1);x[0].update(id=1,sourceTag=1)
+            if defect=='notmaximal':l[2].update(sourceSeq=0,sourceNative100ns=10_000_000,sourceId=0);x[1].update(id=0,sourceTag=0)
+            if defect=='incomplete':l[3]['bytesWritten']=123
+            if defect=='exit':e[-1]['ffmpegExit']=1
+            if defect=='preroll':e[4]['preRoll']=True
+            if defect=='duplicate':e[5]['native100ns']=e[4]['native100ns']
+            if defect=='geometry':e[5]['width']=1
+            if defect=='unknownstream':p['packets'][0]['stream_index']=7
+            if defect=='audio':p['streams'].append(dict(index=1,codec_type='audio'))
+            if defect=='packet':p['packets'][0]['pts']=5
+            if defect=='earlydecision':l[0]['decisionQpc']=3_099_999
+            if defect=='copybracket':e[5]['copyEndQpc']=1
+            if defect=='queue':e[-1]['ownedHigh']=23
+            if defect=='origin':e[-1]['epoch100ns']+=1
+            if defect=='cutoff':e[-1]['stopQpc']-=1
+            if defect=='ordinal':l[2]['ordinal']=2
+            with self.subTest(defect=defect),self.assertRaises(ValueError):self.check((e,p,x,l))
 
-    def test_unknown_duplicate_or_missing_stream_association_fails_closed(self):
-        for defect in ('two-video', 'unexpected-kind', 'duplicate-index', 'unknown-packet',
-                       'wrong-frame-kind', 'missing-frame-index', 'missing-packet-index'):
-            events, probe, pixels = self.fixture()
-            if defect == 'two-video': probe['streams'].append(dict(probe['streams'][0], index=1))
-            if defect == 'unexpected-kind': probe['streams'].append(dict(index=1, codec_type='data'))
-            if defect == 'duplicate-index': probe['streams'].append(dict(index=0, codec_type='audio'))
-            if defect == 'unknown-packet': probe['packets'][0]['stream_index'] = 99
-            if defect == 'wrong-frame-kind': probe['frames'][0]['media_type'] = 'audio'
-            if defect == 'missing-frame-index': del probe['frames'][0]['stream_index']
-            if defect == 'missing-packet-index': del probe['packets'][0]['stream_index']
-            with self.subTest(defect=defect), self.assertRaises(ValueError):
-                summarize(events, probe, pixels, 'animated')
+    def test_idle_holds_and_late_arrival_are_truthful_not_latency_failures(self):
+        e,p,x,l=fixture()
+        # Source 1 is delivered after decision 1, despite its old native time.
+        e[5].update(callbackQpc=3_210_000,copyStartQpc=3_210_001,copyEndQpc=3_210_002,copyCompleteQpc=3_210_003)
+        # Keep timestamps/delivery ordered, as native callback delivery is serial.
+        e[6].update(callbackQpc=3_220_000,copyStartQpc=3_220_001,copyEndQpc=3_220_002,copyCompleteQpc=3_220_003)
+        l[0]['deliveredThroughSeq']=0
+        l[2].update(sourceSeq=0,sourceNative100ns=10_000_000,sourceId=0,deliveredThroughSeq=0);x[1].update(id=0,sourceTag=0)
+        r=self.check((e,p,x,l));self.assertEqual(r['status'],'owned-feed-verified');self.assertGreater(r['lateObservations'],0)
+        e,p,x,l=fixture();e[4:7]=[e[4]]
+        for row in l:
+            if row['event']=='selected':row.update(sourceSeq=0,sourceNative100ns=10_000_000,sourceId=0,deliveredThroughSeq=0)
+        for row in x:row.update(id=0,sourceTag=0)
+        self.assertEqual(self.check((e,p,x,l),'static')['status'],'owned-feed-verified')
 
-    def test_full_saved_pts_and_ids_match_and_packet_decode_order_is_independent(self):
-        result = summarize(*self.fixture(), 'animated')
-        self.assertEqual(result['status'], 'observed-preservation')
-        self.assertEqual(result['savedEndpointSeconds'], '999999/10000000')
-        self.assertFalse(result['authorityAccepted'])
+    def test_equal_qpc_ticks_use_recorded_delivery_frontier(self):
+        e,p,x,l=fixture()
+        e[5].update(callbackQpc=3_199_997,copyStartQpc=3_199_998,copyEndQpc=3_199_999,copyCompleteQpc=3_200_000)
+        e[6].update(callbackQpc=3_220_000,copyStartQpc=3_220_001,copyEndQpc=3_220_002,copyCompleteQpc=3_220_003)
+        l[0]['deliveredThroughSeq']=0
+        l[2].update(sourceSeq=0,sourceNative100ns=10_000_000,sourceId=0,deliveredThroughSeq=0)
+        x[1].update(id=0,sourceTag=0)
+        self.assertGreater(self.check((e,p,x,l))['lateObservations'],0)
 
-    def test_interior_resampling_is_visible_even_when_count_first_last_match(self):
-        events, probe, pixels = self.fixture()
-        probe['frames'][1]['pts'] = 400000
-        probe['packets'][2]['pts'] = 400000
-        result = summarize(events, probe, pixels, 'animated')
-        self.assertEqual(result['status'], 'resampled-or-unresolved')
-        self.assertEqual(result['ordinalResidual100ns'], ['0', '66667', '0'])
-
-    def test_dropped_frame_and_marker_mismatch_do_not_pass_mapping(self):
-        events, probe, pixels = self.fixture()
-        pixels[1]['id'] = 77
-        self.assertEqual(summarize(events, probe, pixels, 'animated')['status'],
-                         'resampled-or-unresolved')
-        events, probe, pixels = self.fixture()
-        probe['frames'].pop(1); probe['packets'].pop(2); pixels.pop(1)
-        self.assertEqual(summarize(events, probe, pixels, 'animated')['status'],
-                         'resampled-or-unresolved')
-
-    def test_missing_finish_duration_and_corrupt_markers_fail_closed(self):
-        for defect in ('finish', 'duration', 'marker', 'regression', 'qpc'):
-            events, probe, pixels = self.fixture()
-            if defect == 'finish': events.pop()
-            if defect == 'duration': del probe['frames'][-1]['duration']
-            if defect == 'marker': pixels[1]['cornersValid'] = False
-            if defect == 'regression': events[3]['native100ns'] = 999999
-            if defect == 'qpc': events[3]['qpcBefore'] = events[3]['qpcAfter'] + 1
-            with self.subTest(defect=defect), self.assertRaises(ValueError):
-                summarize(events, probe, pixels, 'animated')
-
-    def test_close_and_stall_require_the_real_scenario_event(self):
-        for scenario in ('close', 'stall'):
-            with self.subTest(scenario=scenario), self.assertRaises(ValueError):
-                summarize(*self.fixture(), scenario)
-
-    def test_static_ids_are_reported_as_ambiguous_even_when_pts_match(self):
-        events, probe, pixels = self.fixture()
-        for row in events:
-            if row['event'] == 'enqueued': row['id'] = 0
-        for row in pixels: row['id'] = 0
-        result = summarize(events, probe, pixels, 'static')
-        self.assertEqual(result['ambiguousIdFrames'], 3)
-        self.assertFalse(result['authorityAccepted'])
+    def test_close_and_stall_require_observation(self):
+        for case in ('close','stall'):
+            with self.subTest(case=case),self.assertRaises(ValueError):self.check(scenario=case)
 
 
 class RealMediaTests(unittest.TestCase):
-    @unittest.skipUnless(os.environ.get('PROBE_FFMPEG') and os.environ.get('PROBE_FFPROBE'),
-                         'set exact FFmpeg/FFprobe paths for generated-media integration')
-    def test_saved_h264_decoding_and_exact_endpoint_without_native_claim(self):
-        # This is synthetic media, not a compositor/Windows result.
-        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as temporary:
-            root = Path(temporary)
-            raw = bytearray()
-            for ident in (0, 1, 2):
-                rgb = bytearray([96] * (640 * 360 * 3))
-                for x, y, color in [(0, 0, (255, 0, 0)), (608, 0, (0, 255, 0)),
-                                    (0, 328, (0, 0, 255)), (608, 328, (255, 255, 0))]:
-                    for row in range(y, y + 32):
-                        for col in range(x, x + 32):
-                            rgb[(row*640+col)*3:(row*640+col)*3+3] = bytes(color)
-                for bit in range(16):
-                    c = 240 if ident & (1 << bit) else 12
-                    for row in range(128, 192):
-                        for col in range(32 + bit*32, 56 + bit*32):
-                            rgb[(row*640+col)*3:(row*640+col)*3+3] = bytes([c]*3)
-                raw.extend(rgb)
-            subprocess.run([os.environ['PROBE_FFMPEG'], '-nostdin', '-v', 'error',
-                            '-f', 'rawvideo', '-pixel_format', 'rgb24', '-video_size', '640x360',
-                            '-framerate', '30', '-i', '-', '-an', '-c:v', 'libx264',
-                            '-pix_fmt', 'yuv420p', str(root/'screen.mp4')],
-                           input=raw, check=True, timeout=30)
-            events, _, _ = AnalysisTests().fixture()
-            import json
-            (root/'native.jsonl').write_text(''.join(json.dumps(e)+'\n' for e in events))
-            result = analyze(root, 'animated', os.environ['PROBE_FFPROBE'], os.environ['PROBE_FFMPEG'])
-            self.assertEqual(result['status'], 'observed-preservation')
-            self.assertEqual(result['savedCount'], 3)
-            self.assertEqual(result['savedIds'], [0, 1, 2])
-            self.assertEqual(result['savedEndpointSeconds'], '1/10')
+    @unittest.skipUnless(os.environ.get('PROBE_FFMPEG') and os.environ.get('PROBE_FFPROBE'),'exact media tool paths required')
+    def test_same_rawvideo_command_all_saved_frames_and_failure_receipts(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as t:
+            root=Path(t);raw=bytearray()
+            for n in range(3):
+                rgb=image(n,n)
+                for i in range(0,len(rgb),3):raw.extend((rgb[i+2],rgb[i+1],rgb[i],255))
+            command=[os.environ['PROBE_FFMPEG'],'-hide_banner','-loglevel','warning','-nostdin','-n',
+                     '-f','rawvideo','-pixel_format','bgra','-video_size','640x360','-framerate','30','-i','pipe:0',
+                     '-map','0:v:0','-an','-c:v','libx264','-preset','ultrafast','-crf','0','-pix_fmt','yuv444p',
+                     '-bf','0','-fps_mode','passthrough','-video_track_timescale','30000',str(root/'screen.mp4')]
+            subprocess.run(command,input=raw,check=True,timeout=30)
+            e,_,_,l=fixture()
+            def save():
+                (root/'native.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in e))
+                (root/'selection.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in l))
+            save();r=analyze(root,'animated',os.environ['PROBE_FFPROBE'],os.environ['PROBE_FFMPEG'])
+            self.assertEqual(r['status'],'owned-feed-verified',r);self.assertEqual(r['savedEndpointSeconds'],'1/10')
+            self.assertEqual(r['savedTags'],[0,1,2]);self.assertFalse(r['authorityAccepted'])
+            e[5]['id']=None;save();r=analyze(root,'animated',os.environ['PROBE_FFPROBE'],os.environ['PROBE_FFMPEG'])
+            self.assertEqual(r['status'],'analysis-failed');self.assertEqual(r['savedTags'],[0,1,2]);self.assertIn('native marker',r['error'])
+            self.assertEqual(json.loads((root/'analysis.json').read_text()),r)
             self.assertFalse((root/'decode-temporary.rgb').exists())
-            self.assertFalse(result['authorityAccepted'])
-            # A later validation failure must keep the measurements already collected.
-            events[3]['id'] = None
-            (root/'native.jsonl').write_text(''.join(json.dumps(e)+'\n' for e in events))
-            result = analyze(root, 'animated', os.environ['PROBE_FFPROBE'], os.environ['PROBE_FFMPEG'])
-            self.assertEqual(result['status'], 'analysis-failed')
-            self.assertIn('native marker undecodable', result['error'])
-            self.assertEqual(result['enqueuedCount'], 3)
-            self.assertEqual(result['savedCount'], 3)
-            self.assertEqual(len(result['savedPts']), 3)
-            self.assertEqual(len(result['savedDurations']), 3)
-            self.assertEqual(result['nativeUndecodableSequences'], [1])
-            self.assertEqual(len(json.loads((root/'decoded-markers.json').read_text())), 3)
-            self.assertEqual(json.loads((root/'analysis.json').read_text()), result)
-
-    @unittest.skipUnless(os.environ.get('PROBE_FFMPEG') and os.environ.get('PROBE_FFPROBE'),
-                         'set exact FFmpeg/FFprobe paths for failed-media receipt regression')
-    def test_ffprobe_failure_still_finalizes_command_and_error_receipts(self):
-        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as temporary:
-            root = Path(temporary)
-            (root/'screen.mp4').write_bytes(b'generated invalid mp4')
-            events, _, _ = AnalysisTests().fixture()
-            (root/'native.jsonl').write_text(''.join(json.dumps(e)+'\n' for e in events))
-            try:
-                analyze(root, 'first', os.environ['PROBE_FFPROBE'], os.environ['PROBE_FFMPEG'])
-            except subprocess.CalledProcessError:
-                pass
-            self.assertTrue((root/'analysis-commands.json').is_file())
-            commands = json.loads((root/'analysis-commands.json').read_text())
-            self.assertEqual(len(commands), 1)
-            self.assertEqual(commands[0][0], os.environ['PROBE_FFPROBE'])
-            result = json.loads((root/'analysis.json').read_text())
-            self.assertEqual(result['status'], 'analysis-failed')
-            self.assertEqual(result['enqueuedCount'], 3)
-            self.assertFalse(result['authorityAccepted'])
+            (root/'screen.mp4').write_bytes(b'invalid generated media')
+            r=analyze(root,'first',os.environ['PROBE_FFPROBE'],os.environ['PROBE_FFMPEG'])
+            self.assertEqual(r['status'],'analysis-failed');self.assertTrue((root/'analysis-commands.json').exists())
 
 
-if __name__ == '__main__':
-    unittest.main()
+class FaultReceiptTests(unittest.TestCase):
+    def test_expected_fault_requires_named_failure_partial_write_and_observed_cleanup(self):
+        from run_probe import qualify_fault
+        events=[dict(event='terminal',failure='writer failed: broken pipe',reaped=True,writerDone=True,completeWrites=0)]
+        ledger=[dict(event='written',bytesWritten=4096)]
+        self.assertTrue(qualify_fault('exit-midframe',events,ledger,True,False))
+        for cleanup, rows in [(False,ledger),(True,[]),(True,[dict(event='written',bytesWritten=921600)])]:
+            self.assertFalse(qualify_fault('exit-midframe',events,rows,cleanup,False))
+        events[0]['failure']='unrelated failure'
+        self.assertFalse(qualify_fault('exit-midframe',events,ledger,True,False))
+        self.assertFalse(qualify_fault('parent-death',[],[],True,False))
+        self.assertFalse(qualify_fault('parent-death',[],[],True,True))
+
+    def test_fallback_cleanup_cannot_masquerade_as_supervisor_proof(self):
+        from run_probe import qualify_fault
+        events=[dict(event='terminal',failure='writer stalled over 1 second',reaped=True,writerDone=True,
+                     completeWrites=0,supervisorFallback=True),
+                dict(event='supervisorTermination',requestSucceeded=True)]
+        ledger=[dict(event='written',bytesWritten=65536)]
+        self.assertFalse(qualify_fault('blocked',events,ledger,True,False))
+        events[0]['supervisorFallback']=False
+        self.assertTrue(qualify_fault('blocked',events,ledger,True,False))
+
+class JobProofTests(unittest.TestCase):
+    def test_job_proof_requires_armed_identity_and_exit_before_park_escape(self):
+        from run_probe import qualify_fault
+        events=[dict(event='startup',frequency=1000,pid=40),
+                dict(event='encoderOwned',pid=42,inJob=True,transportFault=False),
+                dict(event='jobProofParked',qpc=1000,parkSeconds=10,workerPid=40,encoderPid=42,
+                     completeWrites=1,writerIdle=True)]
+        proof=dict(killQpc=1100,observedQpc=1300,fallbackUsed=False,childrenAliveBeforeKill=True)
+        self.assertTrue(qualify_fault('parent-death',events,[],True,True,proof))
+        for defect in ('missing-arm','identity','no-write','not-idle','late-kill','late-observation','fallback','already-dead','not-killed','not-exited'):
+            changed=copy.deepcopy(events);timing=dict(proof);cleanup=True;killed=True
+            if defect=='missing-arm':changed.pop()
+            if defect=='identity':changed[-1]['encoderPid']=99
+            if defect=='no-write':changed[-1]['completeWrites']=0
+            if defect=='not-idle':changed[-1]['writerIdle']=False
+            if defect=='late-kill':timing['killQpc']=2500
+            if defect=='late-observation':timing['observedQpc']=11000
+            if defect=='fallback':timing['fallbackUsed']=True
+            if defect=='already-dead':timing['childrenAliveBeforeKill']=False
+            if defect=='not-killed':killed=False
+            if defect=='not-exited':cleanup=False
+            with self.subTest(defect=defect):
+                self.assertFalse(qualify_fault('parent-death',changed,[],cleanup,killed,timing))
+
+if __name__=='__main__':unittest.main()

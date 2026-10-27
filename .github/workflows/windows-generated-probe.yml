@@ -38,7 +38,7 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo +1.89.0 build --locked
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-      - name: Verify official encoder archive and extract only analysis executables
+      - name: Verify official encoder archive and extract pinned media executables
         run: |
           $ErrorActionPreference = 'Stop'
           @'
@@ -82,7 +82,7 @@ jobs:
             & $ffprobe -version | Out-File -Append evidence/tool-versions.txt
             Get-FileHash $ffmpeg, $ffprobe -Algorithm SHA256 | Format-List | Out-File evidence/analysis-tool-hashes.txt
           }
-          if ($probeExit) { throw 'Native evidence unavailable, failed, or resampled/unresolved; inspect generated artifacts.' }
+          if ($probeExit) { throw 'Owned feed or bounded fault cleanup unqualified; inspect generated artifacts.' }
       - name: Upload generated evidence allowlist, including failure receipts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -99,6 +99,8 @@ jobs:
             tools/windows-generated-probe/evidence/*-parent.jsonl
             tools/windows-generated-probe/evidence/*-parent.stderr
             tools/windows-generated-probe/evidence/*/native.jsonl
+            tools/windows-generated-probe/evidence/*/selection.jsonl
+            tools/windows-generated-probe/evidence/*/encoder.stderr
             tools/windows-generated-probe/evidence/*/worker.stderr
             tools/windows-generated-probe/evidence/*/paint.jsonl
             tools/windows-generated-probe/evidence/*/screen.mp4

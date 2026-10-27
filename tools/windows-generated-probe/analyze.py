@@ -26,16 +26,17 @@ def decode(rgb):
     expected = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
     valid = all(abs(a-b) <= 60 for color, target in zip(corners, expected)
                 for a, b in zip(color, target))
-    ident = 0
-    for bit in range(16):
-        color = patch(40 + bit * 32, 160)
-        if all(c > 210 for c in color):
-            ident |= 1 << bit
-        elif not all(c < 40 for c in color):
-            ident = None
-            break
-    return dict(id=ident, cornersValid=valid, cornersRgb=corners,
-                rgbSha256=hashlib.sha256(rgb).hexdigest())
+    def marker(y):
+        ident = 0
+        for bit in range(16):
+            color = patch(40 + bit * 32, y)
+            if all(c > 210 for c in color):
+                ident |= 1 << bit
+            elif not all(c < 40 for c in color):
+                return None
+        return ident
+    return dict(id=marker(160), sourceTag=marker(240), cornersValid=valid,
+                cornersRgb=corners, rgbSha256=hashlib.sha256(rgb).hexdigest())
 
 
 def select_video(probe):
@@ -67,75 +68,122 @@ def select_video(probe):
     return video, frames, packets, [s['index'] for s in streams if s['codec_type'] == 'audio']
 
 
-def summarize(events, probe, pixels, scenario):
-    rows = [e for e in events if e['event'] == 'enqueued']
-    starts = [e for e in events if e['event'] == 'startup']
-    finishes = [e for e in events if e['event'] == 'finishComplete']
-    require(len(starts) == len(finishes) == 1 and 0 < len(rows) <= CAP,
-            'missing/duplicate startup, encoder finish, or bounded native frames')
-    require(starts[0]['cursorRequest'] == 'WithoutCursor', 'cursor disable not requested')
-    require(finishes[0]['enqueued'] == len(rows), 'incomplete enqueue receipts')
-    require(any(e['event'] == 'captureStarted' for e in events), 'startup never completed')
-    if scenario == 'close':
-        require(any(e['event'] == 'sourceClosed' for e in events), 'source close not observed')
-    if scenario == 'stall':
-        stalls = [e for e in events if e['event'] in ('stallBegin', 'stallEnd')]
-        require(len(stalls) == 2 and stalls[1]['qpc'] > stalls[0]['qpc'],
-                'callback stall not observed')
-    frequency = starts[0]['frequency']
-    require(type(frequency) is int and frequency > 0, 'invalid QPC frequency')
-    first = rows[0]['native100ns']
+def summarize(events, probe, pixels, scenario, ledger):
+    def one(name):
+        found = [e for e in events if e['event'] == name]
+        require(len(found) == 1, 'missing/duplicate '+name)
+        return found[0]
+    start, admission, terminal = one('startup'), one('admission'), one('terminal')
+    one('captureStarted')
+    require(one('encoderOwned')['inJob'] is True, 'encoder ownership unproved')
+    require(start['cursorRequest'] == 'WithoutCursor', 'cursor disable not requested')
+    f = start['frequency']
+    require(type(f) is int and f > 0, 'invalid QPC frequency')
+    a = Fraction(admission['qpc'], f)
+    rows = [e for e in events if e['event'] == 'snapshot']
+    require(0 < len(rows) <= CAP, 'missing or excessive source rows')
+    admitted = []
     for i, row in enumerate(rows):
-        require(row['seq'] == i and (row['width'], row['height']) == (WIDTH, HEIGHT),
-                'sequence gap or changed surface geometry')
-        require(row['first100ns'] == first and row['delta100ns'] == row['native100ns']-first,
-                'inconsistent native timestamp origin')
-        require(row['native100ns'] >= 0 and (i == 0 or row['native100ns'] > rows[i-1]['native100ns']),
+        require(row['seq'] == i and (row['width'],row['height']) == (WIDTH,HEIGHT),
+                'sequence gap or changed geometry')
+        t = row['native100ns']
+        require(type(t) is int and t >= 0 and (i == 0 or t > rows[i-1]['native100ns']),
                 'native timestamp regression or duplicate')
-        require(row['qpcBefore'] <= row['qpcSubmitBefore'] <= row['qpcAfter'], 'QPC bracket reversed')
-        require(row['qpcBefore100ns'] == row['qpcBefore']*10_000_000//frequency and
-                row['qpcAfter100ns'] == row['qpcAfter']*10_000_000//frequency,
-                'QPC frequency conversion mismatch')
-        require(type(row['id']) is int, 'native marker undecodable')
-    if scenario in ('animated', 'stall', 'close'):
-        require(len({r['id'] for r in rows}) >= 3, 'animated source did not visibly progress')
-    video, frames, packets, empty_audio = select_video(probe)
+        require(type(row['id']) is int and 0 <= row['id'] < 600 and row['cornersValid'] is True,
+                'native marker/corners invalid')
+        require(0 <= row['callbackQpc'] <= row['copyStartQpc'] <= row['copyEndQpc'] <= row['copyCompleteQpc'],
+                'copy QPC bracket reversed')
+        require(i == 0 or rows[i-1]['copyCompleteQpc'] <= row['callbackQpc'], 'callback order reversed')
+        pre = Fraction(t,10_000_000) < a
+        require(row['preRoll'] is pre, 'pre-roll classification mismatch')
+        if not pre: admitted.append(row)
+    require(admitted, 'no post-admission source')
+    epoch = admitted[0]['native100ns']
+    require(terminal['epoch100ns'] == epoch, 'first admitted epoch mismatch')
+    stops = [e for e in events if e['event'] in ('stopInstalled','sourceClosed')]
+    require(stops, 'missing observed cutoff')
+    for r in stops:
+        if r['event'] == 'stopInstalled':
+            require(r['reason'] in ('stop','close') and r['requestQpc'] <= r['qpc'], 'invalid explicit stop request')
+    cutoff = min(r['qpc'] for r in stops)
+    require(terminal['stopQpc'] == cutoff, 'cutoff differs from earliest observation')
+    end = Fraction(cutoff,f)-Fraction(epoch,10_000_000)
+    n = max(0, (30*end).__floor__())
+    require(0 < n <= CAP and terminal['expectedCells'] == terminal['completeWrites'] == n,
+            'complete-cell/write count mismatch')
+    require(terminal['ffmpegExit'] == 0 and terminal['reaped'] is True and terminal['writerDone'] is True
+            and terminal['failure'] is None, 'encoder/writer finalization failed')
+    for key,limit in [('sourceQueueHigh',8),('futureQueueHigh',8),('outputQueueHigh',2),('ownedHigh',22)]:
+        require(type(terminal[key]) is int and 0 <= terminal[key] <= limit, 'bounded queue/ownership limit')
+    if scenario == 'close':
+        close = one('sourceClosed')
+        stop = one('stopInstalled')
+        require(stop['reason'] == 'close' and stop['qpc'] <= close['qpc'], 'close without prior installed Stop')
+    if scenario == 'stall':
+        require(one('stallEnd')['qpc']-one('stallBegin')['qpc'] >= f*350//1000, '350ms callback stall not observed')
+    if scenario in ('animated','stall','close'):
+        require(len({r['id'] for r in admitted}) >= 3, 'animated source did not progress')
+    selected = [r for r in ledger if r['event'] == 'selected']
+    written = [r for r in ledger if r['event'] == 'written']
+    require(len(ledger) == 2*n and len(selected) == len(written) == n, 'missing or extra selection/write rows')
+    hold, delay, write_delay = [], [], []
+    late = 0
+    for i,(r,w) in enumerate(zip(selected,written)):
+        require(r['ordinal'] == w['ordinal'] == i, 'output ordinal gap/duplicate')
+        target = Fraction(epoch,10_000_000)+Fraction(i,30)
+        require(r['targetNumerator'] == epoch*30+i*10_000_000 and r['targetDenominator'] == 300_000_000,
+                'exact target grid mismatch')
+        decision = Fraction(r['decisionQpc'],f)
+        require(decision >= target+Fraction(1,30), 'decision before complete cell end')
+        require(i == 0 or r['decisionQpc'] >= selected[i-1]['decisionQpc'], 'decisions reordered')
+        frontier = r['deliveredThroughSeq']
+        require(type(frontier) is int and 0 <= frontier < len(rows), 'invalid delivered frontier')
+        require(all(x['copyCompleteQpc'] <= r['decisionQpc'] for x in rows if x['seq'] <= frontier)
+                and all(x['seq'] <= frontier for x in rows if x['copyCompleteQpc'] < r['decisionQpc']),
+                'delivery frontier disagrees with synchronized publication')
+        require(i == 0 or frontier >= selected[i-1]['deliveredThroughSeq'], 'delivery frontier regressed')
+        available = [x for x in admitted if x['seq'] <= frontier and Fraction(x['native100ns'],10_000_000) <= target
+                     and x['copyCompleteQpc'] <= r['decisionQpc']]
+        require(available, 'no causal snapshot')
+        expected = max(available,key=lambda x:x['native100ns'])
+        require((r['sourceSeq'],r['sourceNative100ns'],r['sourceId']) ==
+                (expected['seq'],expected['native100ns'],expected['id']), 'selection is not greatest causal snapshot')
+        require(w['bytesWritten'] == WIDTH*HEIGHT*4 and r['decisionQpc'] <= w['writeBeginQpc'] <= w['writeEndQpc'],
+                'incomplete write or reversed write bracket')
+        require(i == 0 or written[i-1]['writeEndQpc'] <= w['writeBeginQpc'], 'overlapping writer frames')
+        hold.append(target-Fraction(expected['native100ns'],10_000_000))
+        delay.append(decision-target-Fraction(1,30))
+        write_delay.append(Fraction(w['writeEndQpc']-w['writeBeginQpc'],f))
+        late += sum(x['native100ns'] > expected['native100ns'] and Fraction(x['native100ns'],10_000_000) <= target
+                    and (x['copyCompleteQpc'] > r['decisionQpc'] or x['seq'] > frontier) for x in admitted)
+    video, frames, packets, audio = select_video(probe)
+    require(not audio, 'audio stream is forbidden in owned feed')
     timebase = Fraction(video['time_base'])
-    require(timebase > 0, 'invalid saved time base')
-    require(0 < len(frames) == len(pixels) == len(packets) <= CAP,
-            'decoded/frame/packet count mismatch or cap exceeded')
-    require(all(p['cornersValid'] and type(p['id']) is int for p in pixels),
-            'decoded origin/color/ID marker validation failed')
-    pts = [int(f['pts']) for f in frames]
-    # Do not invent final-frame duration from nominal FPS or from enqueue count.
-    durations = [int(f.get('duration', f.get('pkt_duration', 0))) for f in frames]
-    require(all(d > 0 for d in durations), 'saved frame duration unavailable')
-    require(all(b > a for a, b in zip(pts, pts[1:])), 'saved presentation PTS not strictly increasing')
-    packet_pairs = sorted((int(p['pts']), int(p.get('duration', 0))) for p in packets)
-    require(packet_pairs == list(zip(pts, durations)), 'packet/frame presentation timing disagrees')
-    residual = [(p*timebase*10_000_000 - r['delta100ns']) for p, r in zip(pts, rows)]
-    tolerance = timebase*10_000_000 + 1  # One saved tick + one native 100ns quantization unit.
-    same_ids = [p['id'] == r['id'] for p, r in zip(pixels, rows)]
-    observed = (len(rows) == len(frames) and pts[0] == 0 and all(same_ids)
-                and all(abs(r) <= tolerance for r in residual))
-    candidates = [[r['seq'] for r in rows if r['id'] == p['id']] for p in pixels]
-    return dict(status='observed-preservation' if observed else 'resampled-or-unresolved',
-                authorityAccepted=False, scenario=scenario, streamLayout=probe['streams'],
-                videoStreamIndex=video['index'], emptyAudioStreams=empty_audio,
-                enqueuedCount=len(rows), savedCount=len(frames), timeBase=str(timebase),
-                savedPts=pts, savedDurations=durations,
-                savedFirstSeconds=str(pts[0]*timebase),
-                savedEndpointSeconds=str((pts[-1]+durations[-1])*timebase),
-                nativeFirst100ns=first, nativeDeltas100ns=[r['delta100ns'] for r in rows],
-                compositorPreStartup100ns=first-starts[0]['qpc']*10_000_000//frequency,
-                ordinalResidual100ns=[str(r) for r in residual],
-                comparisonTolerance100ns=str(tolerance), ordinalIdsEqual=same_ids,
-                savedIds=[p['id'] for p in pixels], matchingNativeSequences=candidates,
-                ambiguousIdFrames=sum(len(c) != 1 for c in candidates),
-                savedPtsSteps=[b-a for a, b in zip(pts, pts[1:])],
-                savedPresentationGaps=[b-a-d for a, b, d in zip(pts, pts[1:], durations)],
-                warning='Observations only. Duplicate IDs cannot establish unique source identity; '
-                        'no capture authority, GDI clock, physical input or audio timing is accepted.')
+    require(timebase > 0 and len(frames) == len(packets) == len(pixels) == n, 'saved/frame/packet/write count mismatch')
+    pts = [int(r['pts']) for r in frames]
+    durations = [int(r.get('duration',r.get('pkt_duration',0))) for r in frames]
+    for i,(p,d,pixel,r) in enumerate(zip(pts,durations,pixels,selected)):
+        require(p*timebase == Fraction(i,30) and d*timebase == Fraction(1,30), 'saved PTS/duration not exact grid')
+        require(pixel['cornersValid'] is True and pixel['sourceTag'] == r['sourceSeq'] and pixel['id'] == r['sourceId'],
+                'saved tag/original ID/corner mismatch')
+    require(sorted((int(r['pts']),int(r.get('duration',0))) for r in packets) == list(zip(pts,durations)),
+            'packet/frame presentation timing disagrees')
+    endpoint = (pts[-1]+durations[-1])*timebase
+    require(endpoint == Fraction(n,30), 'file-derived endpoint mismatch')
+    return dict(status='owned-feed-verified', authorityAccepted=False, scenario=scenario,
+                mappingStatus='verified-all-saved-frames', lifecycleStatus='finalized',
+                latencyStatus='measured-no-accuracy-bound-claimed', savedCount=n,
+                nativeCount=len(rows), admittedCount=len(admitted), preRollCount=len(rows)-len(admitted),
+                savedPts=pts,savedDurations=durations,timeBase=str(timebase),
+                savedFirstSeconds=str(pts[0]*timebase),savedEndpointSeconds=str(endpoint),
+                savedIds=[p['id'] for p in pixels],savedTags=[p['sourceTag'] for p in pixels],
+                lateObservations=late, fractionalCellDiscardSeconds=str(end-Fraction(n,30)),
+                maxHoldSeconds=str(max(hold)),maxSchedulerDelaySeconds=str(max(delay)),
+                maxWriteSeconds=str(max(write_delay)),
+                maxCallbackDelaySeconds=str(max(Fraction(r['callbackQpc'],f)-Fraction(r['native100ns'],10_000_000) for r in rows)),
+                maxCopySeconds=str(max(Fraction(r['copyEndQpc']-r['copyStartQpc'],f) for r in rows)),
+                maxCopyCompleteDelaySeconds=str(max(Fraction(r['copyCompleteQpc'],f)-Fraction(r['native100ns'],10_000_000) for r in rows)),
+                warning='Delivered snapshots only; native timestamps are quantized to 100ns. No unseen compositor, physical display/input, cursor or audio timing claim.')
 
 
 def analyze(directory, scenario, ffprobe, ffmpeg):
@@ -143,7 +191,7 @@ def analyze(directory, scenario, ffprobe, ffmpeg):
     video = directory/'screen.mp4'
     raw = directory/'decode-temporary.rgb'
     commands = []
-    result = dict(status='analysis-failed', authorityAccepted=False, scenario=scenario)
+    result = dict(status='analysis-failed', authorityAccepted=False, scenario=scenario, mappingStatus='unqualified', lifecycleStatus='unqualified', latencyStatus='unqualified')
 
     def run(args, output, timeout=30):
         commands.append(args)
@@ -154,7 +202,7 @@ def analyze(directory, scenario, ffprobe, ffmpeg):
         require(0 < video.stat().st_size <= 64*1024*1024, 'video missing/empty or over 64 MiB budget')
         require((directory/'native.jsonl').stat().st_size < 2*1024*1024, 'native receipt exceeds budget')
         events = [json.loads(line) for line in (directory/'native.jsonl').read_text().splitlines()]
-        rows = [e for e in events if e['event'] == 'enqueued']
+        rows = [e for e in events if e['event'] == 'snapshot']
         result.update(videoSha256=hashlib.sha256(video.read_bytes()).hexdigest(),
                       videoBytes=video.stat().st_size, enqueuedCount=len(rows), nativeFrames=rows,
                       nativeUndecodableSequences=[r['seq'] for r in rows if type(r.get('id')) is not int])
@@ -189,7 +237,7 @@ def analyze(directory, scenario, ffprobe, ffmpeg):
             while frame := stream.read(size):
                 pixels.append(decode(frame))
         (directory/'decoded-markers.json').write_text(json.dumps(pixels, indent=2)+'\n')
-        result.update(decodedCount=len(pixels), savedIds=[p['id'] for p in pixels],
+        result.update(decodedCount=len(pixels), savedIds=[p['id'] for p in pixels], savedTags=[p['sourceTag'] for p in pixels],
                       decodedInvalidCornerFrames=[i for i, p in enumerate(pixels) if not p['cornersValid']],
                       decodedUndecodableFrames=[i for i, p in enumerate(pixels) if type(p['id']) is not int])
         # Retain a measured endpoint even if a subsequent color/native-ID check rejects the mapping.
@@ -200,7 +248,9 @@ def analyze(directory, scenario, ffprobe, ffmpeg):
                 result['savedEndpointSeconds'] = str((int(frames[-1]['pts'])+duration)*timebase)
         except (ValueError, TypeError, KeyError, ZeroDivisionError):
             pass  # summarize still rejects invalid/missing timing; no guessed endpoint is emitted.
-        result.update(summarize(events, probe, pixels, scenario))
+        require((directory/'selection.jsonl').stat().st_size < 2*1024*1024, 'selection receipt exceeds budget')
+        ledger = [json.loads(line) for line in (directory/'selection.jsonl').read_text().splitlines()]
+        result.update(summarize(events, probe, pixels, scenario, ledger))
     except (OSError, ValueError, KeyError, TypeError, ZeroDivisionError, subprocess.SubprocessError) as error:
         result['error'] = str(error)
     finally:
@@ -220,5 +270,5 @@ if __name__ == '__main__':
     args = parser.parse_args()
     report = analyze(args.directory, args.scenario, args.ffprobe, args.ffmpeg)
     print(json.dumps(report))
-    raise SystemExit(0 if report['status'] == 'observed-preservation'
+    raise SystemExit(0 if report['status'] == 'owned-feed-verified'
                      else 2 if report['status'] == 'analysis-failed' else 3)

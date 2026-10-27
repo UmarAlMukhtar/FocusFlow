@@ -1,42 +1,57 @@
-# Generated Windows capture probe
+# Generated Windows owned-frame experiment
 
-This standalone crate measures the pinned `windows-capture = 2.0.0` window encoder. It is not integrated into FocusFlow and never publishes an accepted capture clock. Only its own generated 640×360 popup is captured. There is no desktop/window enumeration, external source picker, cursor sampler, input injection or audio capture.
+This isolated probe captures only its own generated 640×360 HWND. It does not enumerate user windows, capture the desktop, change FocusFlow, accept a product capture clock, or record cursor/audio. `authorityAccepted` is always `false`. Native Windows execution is required for qualification; Linux Rust tests, metadata checks and synthetic FFmpeg tests establish narrower properties only.
 
-The parent owns the HWND because this pinned dependency rejects capture of a same-process window. A separate child validates the HWND's owner PID/title and receives a one-byte ownership gate only after assignment to a non-inheritable kill-on-close Job. Do not invoke the internal `worker` mode manually. The gate and title are implementation controls for this generated test, not a security boundary against a user who deliberately invokes internal modes.
+The parent draws the original ID and asymmetric red/green/blue/yellow corners into one owned offscreen bitmap and performs a checked BitBlt in WM_PAINT. The bitmap/DC are reused and released through RAII. Static cases repaint once after capture readiness to request a post-admission observation. That readiness/paint is never the video epoch. Copied markers still have to validate; a blit is not claimed compositor-atomic.
 
-## Local Windows run
+## Owned pixels and causal clock
 
-Use an interactive Windows desktop supporting WGC and cursor-disable control. A hosted Windows runner may lack this capability; failure is evidence of an unavailable/failed attempt, not a passed runtime gate.
+The WGC callback requests BGRA8 and copies every row into tightly packed owned CPU memory before returning. It validates dimensions, pitch, accessible length, original ID and corners, then stamps immutable snapshot sequence bits at y=224..256 (sample y=240). Original ID stays at y=128..192 (sample y=160). No borrowed slice or GPU frame leaves the callback. Immutable `Arc` references keep repeated/queued pixels alive.
+
+Native timestamps are retained as 100ns units; queried QPC frequency can differ from 10MHz. Checked i128 rational arithmetic compares clocks. Admission A is sampled immediately before capture startup. Pre-roll timestamps are logged/discarded, never reassigned to zero. Negative, duplicate/regressing timestamps or invalid copied pixels fail the case. First valid post-admission native timestamp establishes E. Missing E after two seconds fails.
+
+For output ordinal n, target is E+n/30, PTS n/30. A decision may run only once the complete cell end E+(n+1)/30 has elapsed. It selects the greatest native timestamp <= target among snapshots delivered by that decision. Static/missing updates hold the immutable last eligible snapshot. There is no frame invention, grid restart, skipped output ordinal or retroactive change when an old timestamp arrives late.
+
+`copyEndQpc` brackets actual copy/tag completion. `copyCompleteQpc` is specifically the **published/available completion boundary**, sampled under the shared publication mutex immediately before nonblocking enqueue. The controller holds that same mutex while draining the source queue, sampling `decisionQpc`, and selecting. Therefore copied-but-unpublished memory cannot be mistaken for delivered memory. `deliveredThroughSeq` records the drained frontier to disambiguate publications after a decision within the same QPC tick. The analyzer checks the frontier against strict timestamp ordering and recomputes every causal choice independently. Receipt, ACK and ledger I/O happens after releasing publication state. Final state inspection uses a nonblocking snapshot after capture shutdown, so a timed-out callback cannot make finalization wait on that mutex.
+
+The controller observes an explicit Stop request and samples/installs S when handling it. The parent's request time is diagnostic. For close, the parent waits for the installed-cutoff ACK and then destroys its HWND; WGC remains running until `on_closed` is observed, with a two-second deadline. A naturally earlier source-close observation installs the earlier cutoff. Any already selected endpoint exceeding that cutoff rejects the case. Parent death/control EOF is failure, never normal Stop.
+
+Only N=floor(30*(S-E)) complete cells may be written; the final fractional cell is discarded and reported. The saved endpoint must independently equal N/30. No post-cutoff cells or black filler are emitted. Native/receipt counts and configured FPS are not saved-output evidence.
+
+## Bounds and failures
+
+- Source channel capacity 8; future queue capacity 8; one retained snapshot; output descriptor channel capacity 2. Queue overflow rejects explicitly.
+- At most 22 owned pixel allocations including callback, both queues, retained/writer/controller references (20,275,200 bytes). The allocation counter enforces the cap and records high water; repeated `Arc` references share bytes.
+- At most 600 native rows and 600 output ordinals; native/selection receipts capped at 2MiB; generated media capped at 64MiB. Separate supervisor monitors media size during feed/finalization. Stderr retains at most 64KiB and continues draining excess.
+- One writer owns stdin and completes each frame in at most 64KiB write requests with a partial-write loop: Interrupted retries remaining bytes; zero/error fails; partial frames are never restarted.
+- Independent supervisor alone requests termination when a frame write stays in progress over one second. Its result channel establishes whether the native action completed before supervisor shutdown; the controller persists that observed result. A two-second writer fallback is reported separately and cannot qualify independent-supervisor proof. Encoder finalization/reap, supervisor result observation and capture-stop observation each have a two-second bound. No unbounded joins.
+- Parent loop 18 seconds, independent parent watchdog 23 seconds, Python process deadline 28 seconds plus at most 3 seconds shared cleanup observation.
+- Parent assigns the gated worker to a non-inherited KILL_ON_JOB_CLOSE Job. Worker opens only a query handle to that named Job, verifies its encoder belongs to that exact Job before feed, then closes the query handle. The parent-death case separately tests whether parent-only termination kills worker and encoder during an armed phase without cooperative cleanup. Python retains the original child synchronization/termination handles; a kill request or missing PID is not exit proof.
+
+Callback/copy/publication/scheduler/write delays and hold ages are reported. Late observations do not rewrite output. There is no invented 100/25/250ms timing-accuracy gate. The 350ms callback-stall case must retain truthful mapping and expose its delay. The one-second write deadline is a bounded failure-handling mechanism, not a display/input accuracy claim. Unseen compositor updates, physical display/input latency, cursor, audio, and product/packaging acceptance remain unqualified.
+
+## Encoder and independent saved-media checks
+
+The runner resolves and hash-verifies FFmpeg from the existing pinned official archive, then passes its absolute path through parent and worker. No PATH discovery or encoder substitution occurs in native runs. The exact encoder command is:
+
+```text
+ffmpeg -hide_banner -loglevel warning -nostdin -n
+  -f rawvideo -pixel_format bgra -video_size 640x360 -framerate 30 -i pipe:0
+  -map 0:v:0 -an -c:v libx264 -preset ultrafast -crf 0 -pix_fmt yuv444p
+  -bf 0 -fps_mode passthrough -video_track_timescale 30000 screen.mp4
+```
+
+`native.jsonl` stores all snapshot/copy brackets, Stop/source-close observations, ownership and terminal failure/finalization status. `selection.jsonl` separates each selection from its complete/partial write receipt. The independent Python analyzer decodes every saved frame and checks its snapshot tag, original ID and four corners against the recomputed causal selection. It requires contiguous ordinals, exactly N complete writes, exactly one video/no audio streams, packet/frame agreement, PTS n/30, duration 1/30, first PTS zero and file-derived endpoint N/30. It retains actual decoded/probed evidence when later validation rejects. Successful generated cases report mapping verified, lifecycle finalized, and latency measured with no accuracy bound claimed.
+
+The dedicated branch workflow keeps its existing pinned checkout/Python/Rust/tool versions and upload allowlist. No other workflow or product files participate. CI's synthetic roundtrip verifies this exact FFmpeg command/options before native runs.
 
 ```powershell
 cargo +1.89.0 test --locked --all-targets
 cargo +1.89.0 build --locked
-$env:PROBE_FFMPEG = 'C:\verified-tools\ffmpeg.exe'
-$env:PROBE_FFPROBE = 'C:\verified-tools\ffprobe.exe'
+$env:PROBE_FFMPEG = (Resolve-Path analysis-tools/ffmpeg.exe).Path
+$env:PROBE_FFPROBE = (Resolve-Path analysis-tools/ffprobe.exe).Path
 python -m unittest discover -s . -p test_analyze.py -v
-python run_probe.py --exe target/debug/focusflow-generated-windows-probe.exe --ffmpeg $env:PROBE_FFMPEG --ffprobe $env:PROBE_FFPROBE --evidence NEW_EVIDENCE_DIRECTORY
+python run_probe.py --exe PATH_TO_PROBE --evidence NEW_DIRECTORY --ffmpeg $env:PROBE_FFMPEG --ffprobe $env:PROBE_FFPROBE
 ```
 
-The workflow places the crate under `tools/windows-generated-probe`, uses a separate target directory and obtains the official 8.0.1 analysis binaries from a verified archive. It runs on pushes affecting this probe or its workflow on the dedicated `codex-windows-generated-probe` branch. Manual dispatch becomes available if the workflow is later included on the default branch. The Windows encoder under test is Media Foundation through `windows-capture`, not the FFmpeg analysis executable. The workflow does not package or distribute the vendor encoder.
-
-## Evidence and interpretation
-
-Five bounded scenarios run: first (350ms after WGC startup), static (3s), animated (3s), callback stall (350ms after submission 15), and source close (parent destroys only its window after 3s). Animation uses changing binary IDs and four distinct corner colors. The stall measures delayed capture/submission; it does not force an internal encoder/transcoder stall. No long-run or overload result is implied.
-
-`native.jsonl` contains QPC frequency and startup time; client/window/DWM geometry and DPI; every successfully enqueued sequence, native 100ns compositor timestamp, explicit first timestamp, relative delta, dimensions, decoded source ID and callback/submission QPC brackets; and encoder finish events. `paint.jsonl` brackets synchronous painting; painting is not the compositor presentation timestamp. Source-close and callback-stall events are separately required by the analyzer.
-
-FFprobe extracts every saved presentation timestamp and duration from both frames and packets. FFmpeg decodes RGB with timestamp passthrough and no rate or geometry filter. The independent Python decoder validates all four corner colors and binary IDs. `analysis.json` includes all PTS/durations, saved count, exact rational endpoint, native deltas, ordinal residuals and all matching source-ID sequence candidates. It never computes duration from configured FPS or enqueue count. A missing duration, failed finish, corrupt marker, changed geometry or unexplained packet/frame discrepancy fails closed.
-
-`observed-preservation` means this finite sample's counts, ordinal IDs and timestamps agree within one saved time-base tick plus one 100ns native quantization unit. Duplicate IDs remain ambiguous and are reported; static pixels cannot prove unique frame identity. `resampled-or-unresolved` explicitly exposes changed cadence/count/identity or nonzero first PTS and exits nonzero. Neither status is an accepted product clock. Every analysis includes `authorityAccepted: false`.
-
-## Bounds and ownership
-
-- The main parent loop times out at 18s; a separate 23s watchdog exits the parent even if a parent native call blocks. OS handle closure then kills the assigned child. No dependency join runs in the parent.
-- Child cleanup requests termination and polls at most 2s. It does not call an unbounded wait. If termination cannot be observed, the diagnostic says so; closing the Job is the fallback.
-- An outer Python owner has a 28s parent deadline and a 3s termination-observation bound. A blocked or panicking WGC startup, stop or encoder finish stays in the owned child. Abrupt termination may leave an incomplete MP4; there is no salvage promise.
-- The child admits at most 600 frames; each frame must be 640×360. Analyzer input is at most 64MiB video/2MiB receipt, decode at most 601 frames, each subprocess has a 30s deadline. Temporary RGB is deleted and never uploaded.
-- Brushes are created/deleted per synchronous FillRect; BeginPaint/EndPaint owns the temporary paint DC; the parent alone destroys its HWND. Borrowed handles are not deleted. QPC/geometry calls use valid stack output pointers. The Job is non-inheritable, assigned before the gate, and closed on every parent exit. Before assignment, parent death closes stdin and the child exits before WGC startup.
-
-The Actions workflow uses Windows2022, Rust1.89.0, Python3.12.10, commit-pinned checkout/setup/upload actions, an archive SHA-256 and a verified FFmpeg executable SHA-256. The hosted image/OS/GPU and installed rustup bootstrap remain GitHub-managed moving inputs; this is not a bit-reproducible VM or an installed release. Only generated receipt/media allowlist paths are uploaded, for seven days. No broad filesystem, screenshots, credentials, environment dumps, app package or analysis executable upload is requested. Native failure/unavailability/resampling makes the job fail after retaining available evidence.
-
-Not measured: GDI/wall clock, Windows cursor image extraction, coordinate changes/mixed DPI, screen/region paths, physical input/audio, private/elevated desktop, parent-crash recovery, internal encoder overload, long-run timing, installer or product parity. These remain native acceptance gates; Linux tests and MSVC metadata checking do not satisfy them.
+Finite native cases: first (350ms), static (3s), animated (3s), stall (3s with one 350ms callback pause), close (3s with ACK-before-destroy), blocked reader, reader exit mid-frame, and parent-only termination. Transport faults substitute a generated reader child for FFmpeg using the identical writer/supervisor/Job path: one never reads stdin, one reads 65536 bytes then exits. They stop capture after submitting a single frame so source/output queue overflow cannot mask the intended pipe failure. They qualify failure handling only, never capture mapping or FFmpeg behavior. Parent-death uses actual pinned FFmpeg. After exact-Job verification and at least one complete write, an idle writer and controller enter a generated-only ten-second parked phase. During that phase the controller cannot process EOF/source-close or run encoder cleanup, and its supervisor is parked. A QPC arm receipt must be at most one second old when Python observes both retained child handles still running and kills only the parent. Both exit observations must precede the QPC park deadline and fall within the shared three-second cleanup bound. The runner reserves the final second for exact-handle fallback termination if proof fails; fallback never qualifies Job enforcement. A stale arm, already-dead child, expired park or missing exit rejects proof. Ordinary parent-death handling outside this fixture stays unchanged. Failed scenarios retain their receipts and exit nonzero unless the exact expected fault and descendant cleanup are observed.
