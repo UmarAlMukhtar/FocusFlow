@@ -122,12 +122,13 @@ fn probe_profile(ffmpeg:&Path,job:&str)->Result<()> {
 #[derive(Clone,Default)]
 struct Shared {cutoff:Option<i64>,closed:bool,geometry_changed:bool,failure:Option<String>,#[cfg(test)] trace:qualification::Trace}
 #[derive(Clone)]
-struct Flags {tx:SyncSender<Source>,shared:Arc<Mutex<Shared>>,live:Arc<OwnedCount>,geometry:Geometry}
-struct Capture {flags:Flags,seq:u64}
+struct Flags {tx:SyncSender<Source>,shared:Arc<Mutex<Shared>>,live:Arc<OwnedCount>,geometry:Geometry,#[cfg(test)] window:u64,#[cfg(test)] pid:u32}
+struct Capture {flags:Flags,seq:u64,#[cfg(test)] rejected_seen:bool}
 impl GraphicsCaptureApiHandler for Capture {
  type Flags=Flags;type Error=Box<dyn std::error::Error+Send+Sync>;
- fn new(ctx:Context<Flags>)->std::result::Result<Self,Self::Error>{Ok(Self{flags:ctx.flags,seq:0})}
+ fn new(ctx:Context<Flags>)->std::result::Result<Self,Self::Error>{Ok(Self{flags:ctx.flags,seq:0,#[cfg(test)] rejected_seen:false})}
  fn on_frame_arrived(&mut self,frame:&mut Frame,control:InternalCaptureControl)->std::result::Result<(),Self::Error>{
+  #[cfg(test)] let callback_qpc=qpc().ok();
   let result=(||->Result<()>{
    let native=frame.timestamp().map_err(err)?.Duration;
    #[cfg(test)] let content=frame.content_size().map_err(err)?;
@@ -138,7 +139,16 @@ impl GraphicsCaptureApiHandler for Capture {
    }
    let mut buffer=frame.buffer().map_err(err)?;if buffer.color_format()!=ColorFormat::Bgra8{return Err("WGC frame is not BGRA".into());}
    let pitch=buffer.row_pitch() as usize;let owned=OwnedPixels::copy(buffer.as_raw_buffer(),pitch,self.flags.geometry,self.flags.live.clone())?;
-   #[cfg(test)] let (paint,nonce,corners)=qualification::identity(&owned,self.flags.geometry)?;
+   #[cfg(test)] let identity_before=qpc().ok();
+   #[cfg(test)] let (paint,nonce,corners)=match qualification::identity(&owned,self.flags.geometry){
+    Ok(value)=>value,Err(error)=>{
+     if !self.rejected_seen{self.rejected_seen=true;
+      let observed=qualification::rejected(&owned,self.flags.geometry,self.seq,native,callback_qpc,identity_before,content,(frame.width(),frame.height()),self.flags.window,self.flags.pid,&error);
+      if let Ok(mut state)=self.flags.shared.lock(){if state.trace.rejected.is_none(){state.trace.rejected=Some(observed);}}
+     }
+     return Err(error);
+    }
+   };
    #[allow(unused_mut)] let mut state=self.flags.shared.lock().map_err(err)?;if state.cutoff.is_some(){return Ok(());}
    let published=qpc()?;self.flags.tx.try_send(Source{seq:self.seq,native,published,pixels:Arc::new(owned)}).map_err(|_|"Source snapshot queue overflow/disconnected")?;
    #[cfg(test)] state.trace.push(qualification::Event{kind:"source",seq:self.seq,native,qpc:published,paint,nonce,corners,content_width:content.0,content_height:content.1,texture_width:frame.width(),texture_height:frame.height(),..Default::default()})?;
@@ -193,7 +203,7 @@ fn worker(window:u64,pid:u32,path:&Path,ffmpeg:&Path,job:&str)->Result<()> {
  thread::Builder::new().name("wgc-raw-writer".into()).spawn(move||{let _=done_tx.send(write_outputs(pipe,writer_rx,writer_progress));}).map_err(err)?;
  let(control_tx,control_rx)=mpsc::sync_channel(1);thread::Builder::new().name("wgc-parent-control".into()).spawn(move||{let _=control_tx.send(control(3));}).map_err(err)?;
  let shared=Arc::new(Mutex::new(Shared{#[cfg(test)] trace:qualification::Trace::allocated(),..Default::default()}));let(tx,rx)=mpsc::sync_channel(8);let admission=qpc()?;
- let settings=Settings::new(item,CursorCaptureSettings::WithCursor,DrawBorderSettings::Default,SecondaryWindowSettings::Default,MinimumUpdateIntervalSettings::Default,DirtyRegionSettings::Default,ColorFormat::Bgra8,Flags{tx,shared:shared.clone(),live:Arc::new(OwnedCount::default()),geometry:g});
+ let settings=Settings::new(item,CursorCaptureSettings::WithCursor,DrawBorderSettings::Default,SecondaryWindowSettings::Default,MinimumUpdateIntervalSettings::Default,DirtyRegionSettings::Default,ColorFormat::Bgra8,Flags{tx,shared:shared.clone(),live:Arc::new(OwnedCount::default()),geometry:g,#[cfg(test)] window,#[cfg(test)] pid});
  let capture=Capture::start_free_threaded(settings).map_err(err)?;emit(Message::Ready{})?;
  let mut selector=Selector::new(admission,freq)?;let mut selected=0;let started=Instant::now();let mut handled=false;let mut state_at_end=Shared::default();
  let feed=(||->Result<()>{loop{

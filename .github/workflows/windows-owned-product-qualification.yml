@@ -1,7 +1,7 @@
 name: Windows owned product qualification
 on:
   push:
-    branches: [codex-windows-owned-product-qualification]
+    branches: [codex-windows-owned-product-qualification, codex-windows-owned-close-diagnostic]
 permissions:
   contents: read
 concurrency:
@@ -9,10 +9,11 @@ concurrency:
   cancel-in-progress: false
 jobs:
   generated-native:
-    if: github.ref == 'refs/heads/codex-windows-owned-product-qualification'
+    if: github.ref == 'refs/heads/codex-windows-owned-product-qualification' || github.ref == 'refs/heads/codex-windows-owned-close-diagnostic'
     runs-on: windows-2022
     timeout-minutes: 45
     env:
+      FOCUSFLOW_QUAL_SCOPE: ${{ github.ref == 'refs/heads/codex-windows-owned-close-diagnostic' && 'close-diagnostic' || 'full' }}
       PYTHONDONTWRITEBYTECODE: 1
       CARGO_TERM_COLOR: never
       CARGO_BUILD_JOBS: 2
@@ -83,15 +84,22 @@ jobs:
           }
           $provenance | ConvertTo-Json -Depth 5 | Out-File qualification-setup/runner.json
       - name: Analyzer negative controls
+        if: github.ref == 'refs/heads/codex-windows-owned-product-qualification'
         shell: pwsh
         run: |
           python -m unittest discover -s tools/windows-owned-product-qualification -v 2>&1 | Tee-Object qualification-setup/analyzer.log
           if ($LASTEXITCODE -ne 0) { throw 'Analyzer checks failed' }
+      - name: Close diagnostic routing and upload controls
+        if: github.ref == 'refs/heads/codex-windows-owned-close-diagnostic'
+        shell: pwsh
+        run: |
+          python -m unittest discover -s tools/windows-owned-product-qualification -p test_diagnostic.py -v 2>&1 | Tee-Object qualification-setup/analyzer.log
+          if ($LASTEXITCODE -ne 0) { throw 'Diagnostic controls failed' }
       - name: Actual native modules and generated fixtures
         if: ${{ !cancelled() && steps.pinned_tools.outcome == 'success' }}
         shell: pwsh
         run: |
-          python tools/windows-owned-product-qualification/run.py --evidence qualification-evidence --ffmpeg $env:FOCUSFLOW_QUAL_FFMPEG --ffprobe $env:FOCUSFLOW_QUAL_FFPROBE 2>&1 | Tee-Object qualification-setup/driver.log
+          python tools/windows-owned-product-qualification/run.py --scope $env:FOCUSFLOW_QUAL_SCOPE --evidence qualification-evidence --ffmpeg $env:FOCUSFLOW_QUAL_FFMPEG --ffprobe $env:FOCUSFLOW_QUAL_FFPROBE 2>&1 | Tee-Object qualification-setup/driver.log
           if ($LASTEXITCODE -ne 0) { throw 'Native qualification is incomplete; inspect bounded evidence' }
       - name: Prepare bounded explicit upload allowlist
         if: always()
@@ -110,3 +118,4 @@ jobs:
             qualification-upload/cases/**/*.json
             qualification-upload/cases/**/capture.windows-v2
             qualification-upload/cases/**/screen.mp4
+            qualification-upload/cases/**/source.log

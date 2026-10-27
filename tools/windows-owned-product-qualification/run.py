@@ -54,6 +54,7 @@ def bound(root):
             n=p.stat().st_size;size+=n
             if p.name=='screen.mp4':assert n<=64*1024*1024,'64MiB media cap reached'
             elif p.name=='trace.json':assert n<=4*1024*1024,'4MiB trace cap reached'
+            elif p.name=='source-actions.json':assert n<=4096,'4KiB source action cap reached'
             else:assert n<=16*1024*1024,f'16MiB evidence file cap reached: {p.name}'
     assert size<=256*1024*1024,'256MiB aggregate artifact cap reached'
 
@@ -244,10 +245,16 @@ def uninstrumented(case,ffmpeg,ffprobe):
 
 def run(a):
     assert sys.platform=='win32','native lane must run on Windows'
+    scope=getattr(a,'scope','full');assert scope in {'full','close-diagnostic'},'unknown qualification scope'
+    diagnostic=scope=='close-diagnostic'
+    expected_branch='codex-windows-owned-close-diagnostic' if diagnostic else 'codex-windows-owned-product-qualification'
+    observed_ref=os.getenv('GITHUB_REF')
+    assert observed_ref is None or observed_ref=='refs/heads/'+expected_branch,'qualification scope/ref mismatch'
+    if diagnostic:print('DIAGNOSTIC SUBSET: close only; cannot establish full qualification PASS')
     repo=Path(__file__).resolve().parents[2];os.chdir(repo)
     evidence=a.evidence.resolve();evidence.mkdir();assert sha(a.ffmpeg)==FFMPEG_SHA and sha(a.ffprobe)==FFPROBE_SHA
     before=source_manifest(repo);write(evidence/'source-manifest.json',before)
-    write(evidence/'provenance.json',dict(commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True,encoding='ascii').strip(),runnerImage=os.getenv('ImageVersion'),runnerOS=os.getenv('RUNNER_OS'),ffmpegSha256=sha(a.ffmpeg),ffprobeSha256=sha(a.ffprobe),archiveSha256=ARCHIVE_SHA,python=sys.version,platform=sys.platform,toolchain='1.89.0',profile='debug; H264 libx264 veryfast CRF23 yuv420p B0 30fps 30000-timescale',environment={k:os.getenv(k) for k in ['CARGO_TARGET_DIR','VCToolsVersion','WindowsSDKVersion','PROCESSOR_IDENTIFIER']}))
+    write(evidence/'provenance.json',dict(scope=scope,diagnosticOnly=diagnostic,expectedBranch=expected_branch,observedRef=observed_ref,commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True,encoding='ascii').strip(),runnerImage=os.getenv('ImageVersion'),runnerOS=os.getenv('RUNNER_OS'),ffmpegSha256=sha(a.ffmpeg),ffprobeSha256=sha(a.ffprobe),archiveSha256=ARCHIVE_SHA,python=sys.version,platform=sys.platform,toolchain='1.89.0',profile='debug; H264 libx264 veryfast CRF23 yuv420p B0 30fps 30000-timescale',environment={k:os.getenv(k) for k in ['CARGO_TARGET_DIR','VCToolsVersion','WindowsSDKVersion','PROCESSOR_IDENTIFIER']}))
     metadata=json.loads(subprocess.check_output(['cargo','+1.89.0','metadata','--locked','--manifest-path','FocusFlow/src-tauri/Cargo.toml','--format-version','1'],text=True,encoding='utf-8'))
     vendor=[x for x in metadata['packages'] if x['name']=='windows-capture'];assert len(vendor)==1 and vendor[0]['source'] is None
     assert Path(vendor[0]['manifest_path']).resolve()==repo/'FocusFlow/vendor/windows-capture/Cargo.toml'
@@ -261,21 +268,23 @@ def run(a):
     def require_tests(argv,name,count):
         log=execute(argv,evidence,name)
         require_test_count(log.read_text(encoding='utf-8',errors='replace'),count)
-    attempt('core-publication',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',core,'--lib','capture::windows::tests::','--','--test-threads=1','--nocapture'],'core-publication',10))
-    attempt('core-import',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',core,'--test','windows_capture','--','--test-threads=1','--nocapture','--skip','common::child_writer'],'core-import',WINDOWS_IMPORT_TEST_COUNT))
-    attempt('mapping-debug',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',mapping,'--lib','frame::mapping_tests::','--','--test-threads=1','--nocapture'],'mapping-debug',4))
+    if not diagnostic:
+        attempt('core-publication',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',core,'--lib','capture::windows::tests::','--','--test-threads=1','--nocapture'],'core-publication',10))
+        attempt('core-import',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',core,'--test','windows_capture','--','--test-threads=1','--nocapture','--skip','common::child_writer'],'core-import',WINDOWS_IMPORT_TEST_COUNT))
+        attempt('mapping-debug',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',mapping,'--lib','frame::mapping_tests::','--','--test-threads=1','--nocapture'],'mapping-debug',4))
     def pipes():
         exe=build_exe(repo,evidence,core,'cfr_grid_windows',True);env=os.environ.copy();env['CORE_QUAL_EVIDENCE']=str(evidence/'core-pipes')
         execute([exe],evidence,'core-pipes',90,env)
-    attempt('core-pipes',pipes)
+    if not diagnostic:attempt('core-pipes',pipes)
     def product():
         built={}
-        for name,test in [('FocusFlow',False),('windows_owned_qualification',True),('windows_encoder_fixture',True)]:
+        targets=[('windows_owned_qualification',True)] if diagnostic else [('FocusFlow',False),('windows_owned_qualification',True),('windows_encoder_fixture',True)]
+        for name,test in targets:
             attempt('build-'+name,lambda name=name,test=test:built.update({name:build_exe(repo,evidence,app,name,test)}))
         actual=built.get('FocusFlow');harness=built.get('windows_owned_qualification');fixture=built.get('windows_encoder_fixture')
         write(evidence/'executables.json',{str(p):sha(p) for p in built.values()})
         assert harness is not None,'instrumented harness unavailable; dependent native cases not run'
-        attempt('native-platform',lambda:execute([harness,'--platform',evidence/'native-platform.json'],evidence,'native-platform',20))
+        if not diagnostic:attempt('native-platform',lambda:execute([harness,'--platform',evidence/'native-platform.json'],evidence,'native-platform',20))
         def one(label,mode,w,h,nonce,worker,encoder):
             root=evidence/label
             execute([harness,root,mode,w,h,nonce,encoder,worker],evidence,label,45,observe=root,parent_death=mode=='parent-death')
@@ -289,6 +298,8 @@ def run(a):
             for case in root.glob('session-*'):
                 if worker==actual:uninstrumented(case,a.ffmpeg,a.ffprobe)
                 else:analyze.analyze(case,a.ffmpeg,a.ffprobe)
+        if diagnostic:
+            attempt('close',lambda:one('close','close',641,359,202,harness,a.ffmpeg));return
         for i,(w,h) in enumerate([(320,240),(641,359),(803,451),(960,540),(161,479)]):attempt(f'geometry-{w}x{h}',lambda w=w,h=h,i=i:one(f'geometry-{w}x{h}','normal',w,h,100+i,harness,a.ffmpeg))
         for i,mode in enumerate(['static','repeat','close','resize','admission-close','admission-resize','marker-failure','lost-worker','transfer-shutdown','stop-shutdown','close-stop']):attempt(mode,lambda mode=mode,i=i:one(mode,mode,641,359,200+i,harness,a.ffmpeg))
         if actual is not None:attempt('actual-executable',lambda:one('actual-executable','normal',803,451,300,actual,a.ffmpeg))
@@ -305,8 +316,8 @@ def run(a):
     assert source_manifest(repo)==before,'build changed qualified source inputs'
     bound(evidence)
     write(evidence/'artifact-hashes.json',{p.relative_to(evidence).as_posix():sha(p) for p in evidence.rglob('*') if p.is_file()})
-    write(evidence/'result.json',dict(passed=not failures,failures=failures,nativeEquality='inspect each analysis; missing equality is an open coverage gate',geometryTransition='inspect resize analysis; old-pool/new-content may remain unobserved',limitations=['No actual Tauri/WebView2 Record Stop Edit Play','No microphone/pointer/device/packaging claim','WARP debug-layer failure is unqualified, never skipped']))
+    write(evidence/'result.json',dict(scope=scope,diagnosticOnly=diagnostic,passed=not failures and not diagnostic,diagnosticPassed=(not failures if diagnostic else None),failures=failures,nativeEquality='inspect each analysis; missing equality is an open coverage gate',geometryTransition='inspect resize analysis; old-pool/new-content may remain unobserved',limitations=['No actual Tauri/WebView2 Record Stop Edit Play','No microphone/pointer/device/packaging claim','WARP debug-layer failure is unqualified, never skipped']))
     if failures:raise RuntimeError(f'{len(failures)} required gates failed')
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--evidence',type=Path,required=True);p.add_argument('--ffmpeg',type=Path,required=True);p.add_argument('--ffprobe',type=Path,required=True);a=p.parse_args();a.ffmpeg=a.ffmpeg.resolve();a.ffprobe=a.ffprobe.resolve();run(a)
+    p=argparse.ArgumentParser();p.add_argument('--scope',choices=['full','close-diagnostic'],default='full');p.add_argument('--evidence',type=Path,required=True);p.add_argument('--ffmpeg',type=Path,required=True);p.add_argument('--ffprobe',type=Path,required=True);a=p.parse_args();a.ffmpeg=a.ffmpeg.resolve();a.ffprobe=a.ffprobe.resolve();run(a)

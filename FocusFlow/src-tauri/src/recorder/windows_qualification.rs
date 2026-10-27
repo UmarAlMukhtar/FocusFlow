@@ -68,12 +68,21 @@ impl GeneratedWindow{
  }
 }
 impl Drop for GeneratedWindow{fn drop(&mut self){let _=self.close();}}
+fn observation_qpc()->Option<i64> {
+ let mut value=0;unsafe{::windows::Win32::System::Performance::QueryPerformanceCounter(&mut value).ok()?;}if value<0{None}else{Some(value)}
+}
+fn source_actions(dir:&Path,frequency:Option<i64>,records:&[serde_json::Value],overflow:bool)->TestResult<()> {
+ let value=serde_json::json!({"qpcFrequency":frequency,"records":records,"overflow":overflow});
+ if records.len()>2||serde_json::to_vec(&value)?.len()>4096{return Err("Source action observation exceeds fixed budget".into());}
+ fixture_json(&dir.join("source-actions.json"),&value)
+}
 fn source(dir:&Path,w:u32,h:u32,nonce:u16,animated:bool)->TestResult<()> {
  if !(160..=1920).contains(&w)||!(120..=1080).contains(&h){return Err("Generated geometry outside fixture bounds".into());}
  // Only this process owns this HWND, its canvas and message loop; no input is sent to user windows.
  let hwnd=unsafe{let instance=GetModuleHandleW(None)?;let class=WNDCLASSW{lpfnWndProc:Some(wndproc),hInstance:instance.into(),lpszClassName:w!("FocusFlowOwnedQualification"),..Default::default()};let _=RegisterClassW(&class);
   CreateWindowExW(WINDOW_EX_STYLE::default(),w!("FocusFlowOwnedQualification"),w!("FocusFlow generated owned content"),WS_POPUP|WS_VISIBLE,40,40,w as i32,h as i32,None,None,Some(instance.into()),None)?};
- let mut paints=Vec::with_capacity(256);let mut close_ack=None;
+ let mut paints=Vec::with_capacity(256);let mut close_ack=None;let mut actions=Vec::with_capacity(2);
+ let frequency={let mut value=0;let ok=unsafe{::windows::Win32::System::Performance::QueryPerformanceFrequency(&mut value)};if ok.is_ok()&&value>0{Some(value)}else{None}};
  let result=(||->TestResult<()>{
   let dc=unsafe{GetDC(Some(hwnd))};let canvas=Canvas::new(dc,w as i32,h as i32,nonce);unsafe{ReleaseDC(Some(hwnd),dc);}let canvas=canvas?;CANVAS.with(|slot|*slot.borrow_mut()=Some(canvas));
   unsafe{let _=InvalidateRect(Some(hwnd),None,false);let _=UpdateWindow(hwnd);}
@@ -83,10 +92,14 @@ fn source(dir:&Path,w:u32,h:u32,nonce:u16,animated:bool)->TestResult<()> {
    let command=dir.join(format!("source-command-{sequence}.json"));
    if command.is_file(){
     if sequence>2{return Err("Too many generated source commands".into());}
-    let value=fixture_read(&command)?;if value["sequence"]!=sequence{return Err("Generated source command sequence mismatch".into());}
+    let read_before=observation_qpc();let read=fixture_read(&command);let read_after=observation_qpc();let value=read?;if value["sequence"]!=sequence{return Err("Generated source command sequence mismatch".into());}
     match value["action"].as_str(){
-     Some("close")=>{close_ack=Some((sequence,value));break;},
-     Some("resize")=>unsafe{SetWindowPos(hwnd,None,0,0,w as i32+2,h as i32+2,SWP_NOMOVE|SWP_NOZORDER)?;},
+     Some("close")=>{close_ack=Some((sequence,value,read_before,read_after));break;},
+     Some("resize")=>{
+      let before=observation_qpc();let resized=unsafe{SetWindowPos(hwnd,None,0,0,w as i32+2,h as i32+2,SWP_NOMOVE|SWP_NOZORDER)};let after=observation_qpc();
+      actions.push(serde_json::json!({"sequence":sequence,"action":"resize","commandReadBeforeQpc":read_before,"commandReadAfterQpc":read_after,"operationBeforeQpc":before,"operationAfterQpc":after,"win32Succeeded":resized.is_ok(),"errorHresult":resized.as_ref().err().map(|e|e.code().0)}));
+      source_actions(dir,frequency,&actions,false)?;resized?;
+     },
      _=>return Err("Unknown generated source command".into())
     }
     fixture_json(&dir.join(format!("source-ack-{sequence}.json")),&value)?;sequence+=1;
@@ -102,8 +115,12 @@ fn source(dir:&Path,w:u32,h:u32,nonce:u16,animated:bool)->TestResult<()> {
    let mut message=MSG::default();unsafe{while PeekMessageW(&mut message,None,0,0,PM_REMOVE).as_bool(){let _=TranslateMessage(&message);DispatchMessageW(&message);}}thread::sleep(Duration::from_millis(2));
   }Ok(())
  })();
- unsafe{let _=DestroyWindow(hwnd);}CANVAS.with(|s|s.borrow_mut().take());fs::write(dir.join("paint-history.json"),serde_json::to_vec(&paints)?)?;
- result?;if let Some((sequence,value))=close_ack{fixture_json(&dir.join(format!("source-ack-{sequence}.json")),&value)?;}Ok(())
+ let before=observation_qpc();let destroyed=unsafe{DestroyWindow(hwnd)};let after=observation_qpc();
+ let overflow=actions.len()>=2;
+ if !overflow{actions.push(serde_json::json!({"sequence":close_ack.as_ref().map(|v|v.0),"action":if close_ack.is_some(){"close"}else{"cleanupDestroy"},"commandReadBeforeQpc":close_ack.as_ref().and_then(|v|v.2),"commandReadAfterQpc":close_ack.as_ref().and_then(|v|v.3),"operationBeforeQpc":before,"operationAfterQpc":after,"win32Succeeded":destroyed.is_ok(),"errorHresult":destroyed.as_ref().err().map(|e|e.code().0)}));}
+ let observed=source_actions(dir,frequency,&actions,overflow);
+ CANVAS.with(|s|s.borrow_mut().take());fs::write(dir.join("paint-history.json"),serde_json::to_vec(&paints)?)?;
+ result?;observed?;if let Some((sequence,value,_,_))=close_ack{fixture_json(&dir.join(format!("source-ack-{sequence}.json")),&value)?;}Ok(())
 }
 fn incomplete(dir:&Path)->TestResult<()>{let m=decode_windows(&fs::read(dir.join("capture.json"))?,dir.file_name().unwrap().to_str().unwrap())?;assert!(matches!(m.state,WindowsCaptureStateV2::Incomplete{..}));assert!(!dir.join("project.json").exists());Ok(())}
 fn case(root:&Path,id:&str,mode:&str,w:u32,h:u32,nonce:u16,ffmpeg:&Path,worker:&Path,state:&RecorderState)->TestResult<()>{

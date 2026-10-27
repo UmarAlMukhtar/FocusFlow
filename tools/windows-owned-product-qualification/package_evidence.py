@@ -6,7 +6,7 @@ import shutil
 import sys
 
 ROOT_NAMES={'source-manifest.json','provenance.json','executables.json','failures.json','artifact-hashes.json','result.json','encoder-hashes.json','runner.json','toolchain.txt','dependency-resolution.json','native-platform.json'}
-CASE_NAMES={'source-request.json','source-ready.json','source-observed.json','source-selection.json','source-exit.json','source-cleanup.json','source.log','source-command-1.json','source-command-2.json','source-ack-1.json','source-ack-2.json','first-write-started.json','media-preservation.json','capture.json','capture.windows-v2','project.json','screen.mp4','trace.json','cleanup.json','owned.json','result.json','analysis.json','paint-history.json','encoder-fixture.json','consumer-prefix.json','metadata.json','session.json','clicks.json','drags.json','timeline.json'}
+CASE_NAMES={'source-actions.json','source-request.json','source-ready.json','source-observed.json','source-selection.json','source-exit.json','source-cleanup.json','source.log','source-command-1.json','source-command-2.json','source-ack-1.json','source-ack-2.json','first-write-started.json','media-preservation.json','capture.json','capture.windows-v2','project.json','screen.mp4','trace.json','cleanup.json','owned.json','result.json','analysis.json','paint-history.json','encoder-fixture.json','consumer-prefix.json','metadata.json','session.json','clicks.json','drags.json','timeline.json'}
 MODES={'static','repeat','close','resize','admission-close','admission-resize','marker-failure','lost-worker','transfer-shutdown','stop-shutdown','close-stop','actual-executable','blocked','partial','exit7','parent-death','geometry-320x240','geometry-641x359','geometry-803x451','geometry-960x540','geometry-161x479'}
 PIPE_NAMES={'valid','idle','stderr','stdout','closed','cancel-idle','cancel-stderr','exit7','hold-stdout','hold-stderr','rows5000'}
 COMMANDS={'driver','analyzer','native-platform','core-publication','core-import','mapping-debug','core-pipes','build-cfr_grid_windows','build-FocusFlow','build-windows_owned_qualification','build-windows_encoder_fixture'}|MODES
@@ -32,7 +32,7 @@ def package(evidence,setup,out):
             if p.stem.removeprefix('profile-relay-').isdigit():candidates.append((p,Path('cases/relay')/p.name))
     # Diagnostics first; a cap failure remains explicit and never deletes original local evidence.
     for p,relative in sorted(candidates,key=lambda pair:pair[0].name=='screen.mp4'):
-        limit=64*1024*1024 if p.name=='screen.mp4' else 4*1024*1024 if p.name=='trace.json' else 16*1024*1024
+        limit=64*1024*1024 if p.name=='screen.mp4' else 4*1024*1024 if p.name=='trace.json' else 4096 if p.name=='source-actions.json' else 16*1024*1024
         n=p.stat().st_size
         if p.is_symlink() or n>limit or total+n>255*1024*1024:omitted.append(relative.as_posix());continue
         target=out/relative;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(p,target);total+=n
