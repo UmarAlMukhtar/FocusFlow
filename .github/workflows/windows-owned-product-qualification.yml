@@ -19,6 +19,10 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/owned-qualification
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
         with:
           persist-credentials: false
           sparse-checkout-cone-mode: false

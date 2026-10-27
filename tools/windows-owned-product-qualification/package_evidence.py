@@ -37,7 +37,7 @@ def package(evidence,setup,out):
         if p.is_symlink() or n>limit or total+n>255*1024*1024:omitted.append(relative.as_posix());continue
         target=out/relative;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(p,target);total+=n
         with p.open('rb') as f:hashes[relative.as_posix()]=hashlib.file_digest(f,'sha256').hexdigest()
-    (out/'upload-manifest.json').write_text(json.dumps(dict(bytes=total,sha256=hashes,omitted=omitted,capFailure=bool(omitted)),indent=2)+'\n')
+    (out/'upload-manifest.json').write_text(json.dumps(dict(bytes=total,sha256=hashes,omitted=omitted,capFailure=bool(omitted)),indent=2)+'\n',encoding='utf-8')
     if omitted:raise RuntimeError('Upload cap hit; qualification remains failed; bounded diagnostic subset retained')
     return hashes
 if __name__=='__main__':package(*map(Path,sys.argv[1:]))

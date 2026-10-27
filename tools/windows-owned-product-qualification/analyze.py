@@ -84,8 +84,8 @@ def packets(rows,timebase,n):
 def analyze(case,ffmpeg,ffprobe):
     video=case/'screen.mp4'; assert video.stat().st_size<=MEDIA_LIMIT
     tracepath=case/'trace.json'; assert tracepath.stat().st_size<=TRACE_LIMIT
-    trace=json.loads(tracepath.read_text()); picks=expected(trace)
-    meta=json.loads(subprocess.check_output([str(ffprobe),'-v','error','-show_streams','-show_packets','-of','json',str(video)],timeout=20))
+    trace=json.loads(tracepath.read_text(encoding='utf-8')); picks=expected(trace)
+    meta=json.loads(subprocess.check_output([str(ffprobe),'-v','error','-show_streams','-show_packets','-of','json',str(video)],timeout=20,encoding='utf-8'))
     streams=meta['streams']; assert len(streams)==1
     stream=streams[0]; assert stream['codec_name']=='h264' and stream['pix_fmt']=='yuv420p'
     w,h=trace['width'],trace['height'];ew,eh=stream['width'],stream['height']
@@ -105,7 +105,7 @@ def analyze(case,ffmpeg,ffprobe):
         if process.poll() is None:process.kill();process.wait(timeout=5)
     equal=sum(b['native']==a['native'] for a,b in zip([x for x in trace['events'] if x['kind']=='source'],[x for x in trace['events'] if x['kind']=='source'][1:]))
     result=dict(frames=len(decoded),decoded=decoded,packets=meta['packets'],stream=stream,equalNativePairs=equal,nativeEqualityCovered=equal>0,oldTextureNewContentObserved=any(x["kind"]=="geometry" and (x["textureWidth"],x["textureHeight"])==(w,h) and (x["contentWidth"],x["contentHeight"])!=(w,h) for x in trace["events"]),videoSha256=hashlib.sha256(video.read_bytes()).hexdigest(),limitations=['Identical callback visuals cannot independently identify callback sequence.','Instrumentation changes scheduling.','Finite geometry/device matrix.'])
-    (case/'analysis.json').write_text(json.dumps(result,indent=2)+'\n')
+    (case/'analysis.json').write_text(json.dumps(result,indent=2)+'\n',encoding='utf-8')
     return result
 
 if __name__=='__main__':

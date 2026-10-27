@@ -38,8 +38,8 @@ def require_test_count(text,count):
     assert re.search(r'test result: ok\. '+str(count)+r' passed; 0 failed; 0 ignored;',text), 'required native tests did not execute without skips'
 
 def require_exit7(case):
-    trace=json.loads((case/'trace.json').read_text())
-    prefix=json.loads((case/'consumer-prefix.json').read_text())
+    trace=json.loads((case/'trace.json').read_text(encoding='utf-8'))
+    prefix=json.loads((case/'consumer-prefix.json').read_text(encoding='utf-8'))
     assert trace['encoderExitCode']==7 and trace['nonEncoderFailure'] is False and trace['failure']=='Encoder exited 7', 'exit7 was not the sole encoder exit failure'
     assert trace['supervisorTerminated'] is None and trace['overflow'] is False, 'exit7 had Supervisor or observation failure'
     assert trace['selected']==trace['written']>0 and len(trace['writes'])==trace['written'], 'exit7 did not drain every selected frame'
@@ -87,7 +87,7 @@ def execute(argv,root,name,timeout=600,env=None,observe=None,parent_death=False)
                 if observe:
                     for path in observe.glob('session-*/owned.json'):
                         if path in opened:continue
-                        try:data=json.loads(path.read_text())
+                        try:data=json.loads(path.read_text(encoding='utf-8'))
                         except (OSError,ValueError):continue
                         assert data['parent']==proc.pid
                         handles=[]
@@ -97,11 +97,11 @@ def execute(argv,root,name,timeout=600,env=None,observe=None,parent_death=False)
                             for handle in handles:handle.close()
                             raise
                         opened[path]=(data,handles)
-                        path.with_name('handles-open').write_text('independently held exact noninheritable process handles\n')
+                        path.with_name('handles-open').write_text('independently held exact noninheritable process handles\n',encoding='utf-8')
                     for gate in observe.glob('session-*/before-publish'):
                         if gate not in media:
                             media[gate]=sha(gate.with_name('screen.mp4'))
-                            gate.with_name('media-hashed').write_text('independent SHA256 retained before publication\n')
+                            gate.with_name('media-hashed').write_text('independent SHA256 retained before publication\n',encoding='utf-8')
                     if parent_death and opened and any(p.with_name('parked').is_file() for p in opened):
                         assert killed_at is None
                         assert all(not h.signaled() for _,handles in opened.values() for h in handles), 'child died before parent kill'
@@ -142,7 +142,7 @@ def build_exe(repo,evidence,manifest,name,test=False):
     if test:args.append('--no-run')
     log=execute(args,evidence,'build-'+name,1200)
     artifacts=[]
-    for line in log.read_text(errors='replace').splitlines():
+    for line in log.read_text(encoding='utf-8').splitlines():
         try:item=json.loads(line)
         except ValueError:continue
         if item.get('reason')=='compiler-artifact' and item.get('target',{}).get('name')==name and item.get('executable'):artifacts.append(Path(item['executable']))
@@ -150,10 +150,10 @@ def build_exe(repo,evidence,manifest,name,test=False):
     return artifacts[0].resolve()
 
 def uninstrumented(case,ffmpeg,ffprobe):
-    manifest=json.loads((case/'capture.json').read_text());n=manifest['state']['videoTiming']['clock']['completedFrames'];w=manifest['source']['rawSize']['width'];h=manifest['source']['rawSize']['height']
-    meta=json.loads(subprocess.check_output([str(ffprobe),'-v','error','-show_streams','-show_packets','-of','json',str(case/'screen.mp4')],timeout=20));assert len(meta['streams'])==1
+    manifest=json.loads((case/'capture.json').read_text(encoding='utf-8'));n=manifest['state']['videoTiming']['clock']['completedFrames'];w=manifest['source']['rawSize']['width'];h=manifest['source']['rawSize']['height']
+    meta=json.loads(subprocess.check_output([str(ffprobe),'-v','error','-show_streams','-show_packets','-of','json',str(case/'screen.mp4')],timeout=20,encoding='utf-8'));assert len(meta['streams'])==1
     stream=meta['streams'][0];assert stream['codec_name']=='h264' and stream['pix_fmt']=='yuv420p';analyze.packets(meta['packets'],stream['time_base'],n)
-    paints=set(tuple(x) for x in json.loads((case/'paint-history.json').read_text()));ew,eh=stream['width'],stream['height']
+    paints=set(tuple(x) for x in json.loads((case/'paint-history.json').read_text(encoding='utf-8')));ew,eh=stream['width'],stream['height']
     assert (ew,eh)==(w+w%2,h+h%2),'wrong uninstrumented geometry'
     proc=subprocess.Popen([str(ffmpeg),'-v','error','-i',str(case/'screen.mp4'),'-f','rawvideo','-pix_fmt','rgb24','pipe:1'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
     import threading
@@ -172,8 +172,8 @@ def run(a):
     repo=Path(__file__).resolve().parents[2];os.chdir(repo)
     evidence=a.evidence.resolve();evidence.mkdir();assert sha(a.ffmpeg)==FFMPEG_SHA and sha(a.ffprobe)==FFPROBE_SHA
     before=source_manifest(repo);write(evidence/'source-manifest.json',before)
-    write(evidence/'provenance.json',dict(commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),runnerImage=os.getenv('ImageVersion'),runnerOS=os.getenv('RUNNER_OS'),ffmpegSha256=sha(a.ffmpeg),ffprobeSha256=sha(a.ffprobe),archiveSha256=ARCHIVE_SHA,python=sys.version,platform=sys.platform,toolchain='1.89.0',profile='debug; H264 libx264 veryfast CRF23 yuv420p B0 30fps 30000-timescale',environment={k:os.getenv(k) for k in ['CARGO_TARGET_DIR','VCToolsVersion','WindowsSDKVersion','PROCESSOR_IDENTIFIER']}))
-    metadata=json.loads(subprocess.check_output(['cargo','+1.89.0','metadata','--locked','--manifest-path','FocusFlow/src-tauri/Cargo.toml','--format-version','1'],text=True))
+    write(evidence/'provenance.json',dict(commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True,encoding='ascii').strip(),runnerImage=os.getenv('ImageVersion'),runnerOS=os.getenv('RUNNER_OS'),ffmpegSha256=sha(a.ffmpeg),ffprobeSha256=sha(a.ffprobe),archiveSha256=ARCHIVE_SHA,python=sys.version,platform=sys.platform,toolchain='1.89.0',profile='debug; H264 libx264 veryfast CRF23 yuv420p B0 30fps 30000-timescale',environment={k:os.getenv(k) for k in ['CARGO_TARGET_DIR','VCToolsVersion','WindowsSDKVersion','PROCESSOR_IDENTIFIER']}))
+    metadata=json.loads(subprocess.check_output(['cargo','+1.89.0','metadata','--locked','--manifest-path','FocusFlow/src-tauri/Cargo.toml','--format-version','1'],text=True,encoding='utf-8'))
     vendor=[x for x in metadata['packages'] if x['name']=='windows-capture'];assert len(vendor)==1 and vendor[0]['source'] is None
     assert Path(vendor[0]['manifest_path']).resolve()==repo/'FocusFlow/vendor/windows-capture/Cargo.toml'
     write(evidence/'dependency-resolution.json',metadata)
@@ -185,7 +185,7 @@ def run(a):
     # Native file sync, actual mapping/debug layer, and Windows pipes are distinct required gates.
     def require_tests(argv,name,count):
         log=execute(argv,evidence,name)
-        require_test_count(log.read_text(errors='replace'),count)
+        require_test_count(log.read_text(encoding='utf-8',errors='replace'),count)
     attempt('core-publication',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',core,'--lib','capture::windows::tests::','--','--test-threads=1','--nocapture'],'core-publication',10))
     attempt('core-import',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',core,'--test','windows_capture','--','--test-threads=1','--nocapture'],'core-import',WINDOWS_IMPORT_TEST_COUNT))
     attempt('mapping-debug',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',mapping,'--lib','frame::mapping_tests::','--','--test-threads=1','--nocapture'],'mapping-debug',4))
@@ -206,9 +206,9 @@ def run(a):
             execute([harness,root,mode,w,h,nonce,encoder,worker],evidence,label,45,observe=root,parent_death=mode=='parent-death')
             if mode in ['blocked','partial','exit7','lost-worker','parent-death','transfer-shutdown','admission-close','admission-resize','marker-failure']:
                 if mode=='blocked':
-                    t=json.loads((root/'session-0/trace.json').read_text());assert t['supervisorTerminated'] is True and any(not x['ok'] for x in t['writes'])
+                    t=json.loads((root/'session-0/trace.json').read_text(encoding='utf-8'));assert t['supervisorTerminated'] is True and any(not x['ok'] for x in t['writes'])
                 if mode=='partial':
-                    prefix=json.loads((root/'session-0/consumer-prefix.json').read_text());assert prefix['consumerBytes']==65536
+                    prefix=json.loads((root/'session-0/consumer-prefix.json').read_text(encoding='utf-8'));assert prefix['consumerBytes']==65536
                 if mode=='exit7':require_exit7(root/'session-0')
                 return
             for case in root.glob('session-*'):
