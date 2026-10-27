@@ -45,6 +45,7 @@ jobs:
         with:
           python-version: '3.12.10'
       - name: Pin toolchain and verified FFmpeg payload
+        id: pinned_tools
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force qualification-setup | Out-Null
@@ -83,6 +84,7 @@ jobs:
           python -m unittest discover -s tools/windows-owned-product-qualification -v 2>&1 | Tee-Object qualification-setup/analyzer.log
           if ($LASTEXITCODE -ne 0) { throw 'Analyzer checks failed' }
       - name: Actual native modules and generated fixtures
+        if: ${{ !cancelled() && steps.pinned_tools.outcome == 'success' }}
         shell: pwsh
         run: |
           python tools/windows-owned-product-qualification/run.py --evidence qualification-evidence --ffmpeg $env:FOCUSFLOW_QUAL_FFMPEG --ffprobe $env:FOCUSFLOW_QUAL_FFPROBE 2>&1 | Tee-Object qualification-setup/driver.log
