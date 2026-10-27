@@ -64,7 +64,7 @@ class AnalysisTests(unittest.TestCase):
 
     def test_each_corruption_rejects(self):
         for defect in ('tag','id','corner','omitted','blacktail','pts','duration','endpoint','future',
-                       'notmaximal','incomplete','exit','preroll','duplicate','geometry','unknownstream',
+                       'notmaximal','incomplete','exit','preroll','regression','geometry','unknownstream',
                        'audio','packet','earlydecision','copybracket','queue','origin','cutoff','ordinal'):
             e,p,x,l=fixture()
             if defect=='tag':x[1]['sourceTag']=0
@@ -80,7 +80,7 @@ class AnalysisTests(unittest.TestCase):
             if defect=='incomplete':l[3]['bytesWritten']=123
             if defect=='exit':e[-1]['ffmpegExit']=1
             if defect=='preroll':e[4]['preRoll']=True
-            if defect=='duplicate':e[5]['native100ns']=e[4]['native100ns']
+            if defect=='regression':e[5]['native100ns']=e[4]['native100ns']-1
             if defect=='geometry':e[5]['width']=1
             if defect=='unknownstream':p['packets'][0]['stream_index']=7
             if defect=='audio':p['streams'].append(dict(index=1,codec_type='audio'))
@@ -116,6 +116,43 @@ class AnalysisTests(unittest.TestCase):
         l[2].update(sourceSeq=0,sourceNative100ns=10_000_000,sourceId=0,deliveredThroughSeq=0)
         x[1].update(id=0,sourceTag=0)
         self.assertGreater(self.check((e,p,x,l))['lateObservations'],0)
+
+    def test_equal_native_time_uses_latest_sequence_and_preserves_exact_grid(self):
+        e,p,x,l=fixture()
+        e[5]['native100ns']=10_000_000
+        e[4].update(callbackQpc=2_999_997,copyStartQpc=2_999_998,copyEndQpc=2_999_999,copyCompleteQpc=3_000_000)
+        l[0].update(sourceSeq=1,sourceNative100ns=10_000_000,sourceId=1);x[0].update(id=1,sourceTag=1)
+        l[2]['sourceNative100ns']=10_000_000
+        r=self.check((e,p,x,l))
+        self.assertEqual(r['savedTags'],[1,1,2]);self.assertEqual(r['savedIds'],[1,1,2])
+        self.assertEqual(r['savedPts'],[0,1000,2000]);self.assertEqual(r['savedDurations'],[1000,1000,1000])
+        self.assertEqual(r['savedEndpointSeconds'],'1/10');self.assertEqual(r['fractionalCellDiscardSeconds'],'0')
+        self.assertEqual(r['nativeTimestampDuplicateCount'],1)
+        self.assertEqual(r['nativePositiveStepGcd100ns'],400_000)
+        self.assertEqual(r['minCallbackDelaySeconds'],'-1/1000000')
+        self.assertEqual(r['maxCallbackDelaySeconds'],'60001/3000000')
+        for defect in ('older-tie-winner','unknown-sequence','regression','negative','sequence-gap'):
+            bad=copy.deepcopy((e,p,x,l));be,bp,bx,bl=bad
+            if defect=='older-tie-winner':bl[0].update(sourceSeq=0,sourceId=0);bx[0].update(id=0,sourceTag=0)
+            if defect=='unknown-sequence':bl[0]['sourceSeq']=99;bx[0]['sourceTag']=99
+            if defect=='regression':be[6]['native100ns']=9_999_999
+            if defect=='negative':be[4]['native100ns']=-1
+            if defect=='sequence-gap':be[5]['seq']=0
+            with self.subTest(defect=defect),self.assertRaises(ValueError):self.check(bad)
+
+    def test_equal_native_time_late_publication_never_replaces_past_decision(self):
+        for same_tick in (False,True):
+            e,p,x,l=fixture();e[5]['native100ns']=10_000_000
+            q=3_199_997 if same_tick else 3_210_000
+            e[5].update(callbackQpc=q,copyStartQpc=q+1,copyEndQpc=q+2,copyCompleteQpc=q+3)
+            e[6].update(callbackQpc=3_220_000,copyStartQpc=3_220_001,copyEndQpc=3_220_002,copyCompleteQpc=3_220_003)
+            l[0]['deliveredThroughSeq']=0
+            l[2].update(sourceSeq=0,sourceNative100ns=10_000_000,sourceId=0,deliveredThroughSeq=0);x[1].update(id=0,sourceTag=0)
+            with self.subTest(same_tick=same_tick):
+                r=self.check((e,p,x,l));self.assertEqual(r['savedTags'],[0,0,2])
+                self.assertEqual(r['lateObservations'],2)
+                l[2].update(sourceSeq=1,sourceId=1);x[1].update(id=1,sourceTag=1)
+                with self.assertRaisesRegex(ValueError,'greatest causal'):self.check((e,p,x,l))
 
     def test_close_and_stall_require_observation(self):
         for case in ('close','stall'):

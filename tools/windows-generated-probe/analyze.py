@@ -1,6 +1,7 @@
 """Independent saved-media evidence; never emits a FocusFlow accepted clock."""
 import argparse
 from fractions import Fraction
+from math import gcd
 import hashlib
 import json
 from pathlib import Path
@@ -87,8 +88,8 @@ def summarize(events, probe, pixels, scenario, ledger):
         require(row['seq'] == i and (row['width'],row['height']) == (WIDTH,HEIGHT),
                 'sequence gap or changed geometry')
         t = row['native100ns']
-        require(type(t) is int and t >= 0 and (i == 0 or t > rows[i-1]['native100ns']),
-                'native timestamp regression or duplicate')
+        require(type(t) is int and t >= 0 and (i == 0 or t >= rows[i-1]['native100ns']),
+                'negative native timestamp or regression')
         require(type(row['id']) is int and 0 <= row['id'] < 600 and row['cornersValid'] is True,
                 'native marker/corners invalid')
         require(0 <= row['callbackQpc'] <= row['copyStartQpc'] <= row['copyEndQpc'] <= row['copyCompleteQpc'],
@@ -145,7 +146,7 @@ def summarize(events, probe, pixels, scenario, ledger):
         available = [x for x in admitted if x['seq'] <= frontier and Fraction(x['native100ns'],10_000_000) <= target
                      and x['copyCompleteQpc'] <= r['decisionQpc']]
         require(available, 'no causal snapshot')
-        expected = max(available,key=lambda x:x['native100ns'])
+        expected = max(available,key=lambda x:(x['native100ns'],x['seq']))
         require((r['sourceSeq'],r['sourceNative100ns'],r['sourceId']) ==
                 (expected['seq'],expected['native100ns'],expected['id']), 'selection is not greatest causal snapshot')
         require(w['bytesWritten'] == WIDTH*HEIGHT*4 and r['decisionQpc'] <= w['writeBeginQpc'] <= w['writeEndQpc'],
@@ -154,7 +155,7 @@ def summarize(events, probe, pixels, scenario, ledger):
         hold.append(target-Fraction(expected['native100ns'],10_000_000))
         delay.append(decision-target-Fraction(1,30))
         write_delay.append(Fraction(w['writeEndQpc']-w['writeBeginQpc'],f))
-        late += sum(x['native100ns'] > expected['native100ns'] and Fraction(x['native100ns'],10_000_000) <= target
+        late += sum((x['native100ns'],x['seq']) > (expected['native100ns'],expected['seq']) and Fraction(x['native100ns'],10_000_000) <= target
                     and (x['copyCompleteQpc'] > r['decisionQpc'] or x['seq'] > frontier) for x in admitted)
     video, frames, packets, audio = select_video(probe)
     require(not audio, 'audio stream is forbidden in owned feed')
@@ -170,9 +171,13 @@ def summarize(events, probe, pixels, scenario, ledger):
             'packet/frame presentation timing disagrees')
     endpoint = (pts[-1]+durations[-1])*timebase
     require(endpoint == Fraction(n,30), 'file-derived endpoint mismatch')
+    steps = [b['native100ns']-a['native100ns'] for a,b in zip(rows,rows[1:])]
+    callback_offsets = [Fraction(r['callbackQpc'],f)-Fraction(r['native100ns'],10_000_000) for r in rows]
     return dict(status='owned-feed-verified', authorityAccepted=False, scenario=scenario,
                 mappingStatus='verified-all-saved-frames', lifecycleStatus='finalized',
                 latencyStatus='measured-no-accuracy-bound-claimed', savedCount=n,
+                nativeTimestampDuplicateCount=steps.count(0),
+                nativePositiveStepGcd100ns=gcd(*(step for step in steps if step > 0)),
                 nativeCount=len(rows), admittedCount=len(admitted), preRollCount=len(rows)-len(admitted),
                 savedPts=pts,savedDurations=durations,timeBase=str(timebase),
                 savedFirstSeconds=str(pts[0]*timebase),savedEndpointSeconds=str(endpoint),
@@ -180,10 +185,11 @@ def summarize(events, probe, pixels, scenario, ledger):
                 lateObservations=late, fractionalCellDiscardSeconds=str(end-Fraction(n,30)),
                 maxHoldSeconds=str(max(hold)),maxSchedulerDelaySeconds=str(max(delay)),
                 maxWriteSeconds=str(max(write_delay)),
-                maxCallbackDelaySeconds=str(max(Fraction(r['callbackQpc'],f)-Fraction(r['native100ns'],10_000_000) for r in rows)),
+                minCallbackDelaySeconds=str(min(callback_offsets)),
+                maxCallbackDelaySeconds=str(max(callback_offsets)),
                 maxCopySeconds=str(max(Fraction(r['copyEndQpc']-r['copyStartQpc'],f) for r in rows)),
                 maxCopyCompleteDelaySeconds=str(max(Fraction(r['copyCompleteQpc'],f)-Fraction(r['native100ns'],10_000_000) for r in rows)),
-                warning='Delivered snapshots only; native timestamps are quantized to 100ns. No unseen compositor, physical display/input, cursor or audio timing claim.')
+                warning='Delivered snapshots only; 100ns is the native TimeSpan unit, not measured resolution or accuracy. Positive-step GCD is observational only (zero means no positive step). No unseen compositor, physical display/input, cursor or audio timing claim.')
 
 
 def analyze(directory, scenario, ffprobe, ffmpeg):

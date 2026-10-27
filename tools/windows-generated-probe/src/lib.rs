@@ -73,7 +73,7 @@ impl Selector {
   admitted(0,admission,frequency)?;Ok(Self{epoch:None,admission,frequency,previous:None,future:VecDeque::new(),last:None,next:0,high:0})
  }
  pub fn push(&mut self,source:Source)->Result<bool,&'static str>{
-  if self.previous.is_some_and(|t|source.native<=t){return Err("native timestamp regression or duplicate");}
+  if self.previous.is_some_and(|t|source.native<t){return Err("native timestamp regression");}
   let accept=admitted(source.native,self.admission,self.frequency)?;self.previous=Some(source.native);
   if !accept{return Ok(false);}
   if self.future.len()>=8{return Err("future snapshot queue overflow");}
@@ -83,6 +83,7 @@ impl Selector {
   if n!=self.next||n>=MAX_FRAMES{return Err("output ordinal invalid or cap reached");}
   let epoch=self.epoch.ok_or("no admitted snapshot")?;
   if complete_cells(epoch,decision,self.frequency)?<=n{return Err("cell has not ended");}
+  // Native callbacks publish increasing seq; the last eligible tie is greatest (native,seq).
   while self.future.front().is_some_and(|s|s.copy_complete<=decision&&eligible(s.native,epoch,n)) {self.last=self.future.pop_front();}
   let selected=self.last.clone().ok_or("no causal snapshot")?;self.next+=1;Ok(selected)
  }
@@ -147,8 +148,36 @@ mod owned_tests {
   assert_eq!(s.select(3,4_000_000).unwrap().seq,3);
   assert_eq!(s.select(4,4_100_000).unwrap().seq,3);
  }
- #[test] fn duplicates_regressions_future_queue_and_output_cap_fail() {
-  let mut s=Selector::new(0,10_000_000).unwrap();s.push(source(0,0,0)).unwrap();
+ #[test] fn equal_native_time_selects_latest_delivered_distinct_copy() {
+  let mut s=Selector::new(3_000_000,3_000_000).unwrap();
+  let first=source(0,10_000_000,3_000_001);
+  let mut tied=source(1,10_000_000,3_000_002);
+  Arc::get_mut(&mut tied.pixels).unwrap().bytes.fill(37);
+  s.push(first.clone()).unwrap();s.push(tied).unwrap();
+  s.push(source(2,10_400_000,3_090_000)).unwrap();
+  let chosen=s.select(0,3_100_000).unwrap();
+  assert_eq!((chosen.seq,chosen.native,chosen.id),(1,10_000_000,1));
+  assert!(chosen.pixels.bytes.iter().all(|b|*b==37));
+  assert!(first.pixels.bytes.iter().all(|b|*b==0));
+  assert_eq!(s.epoch,Some(10_000_000));
+  assert_eq!(s.select(1,3_200_000).unwrap().seq,1);
+  assert_eq!(s.select(2,3_300_000).unwrap().seq,2);
+ }
+ #[test] fn equal_native_time_after_decision_changes_only_next_cell() {
+  let mut s=Selector::new(3_000_000,3_000_000).unwrap();
+  s.push(source(0,10_000_000,3_000_001)).unwrap();
+  let previous=s.select(0,3_100_000).unwrap();
+  let mut tied=source(1,10_000_000,3_100_001);
+  Arc::get_mut(&mut tied.pixels).unwrap().bytes.fill(53);
+  s.push(tied).unwrap();
+  let next=s.select(1,3_200_000).unwrap();
+  assert_eq!((previous.seq,previous.id),(0,0));
+  assert!(previous.pixels.bytes.iter().all(|b|*b==0));
+  assert_eq!((next.seq,next.id),(1,1));
+  assert!(next.pixels.bytes.iter().all(|b|*b==53));
+ }
+ #[test] fn regressions_future_queue_and_output_cap_fail() {
+  let mut s=Selector::new(0,10_000_000).unwrap();s.push(source(0,1,0)).unwrap();
   assert!(s.push(source(1,0,1)).is_err());
   assert!(s.push(source(1,-1,1)).is_err());
   for n in 1..8 {s.push(source(n,n as i64*1_000_000, n as i64*1_000_000)).unwrap();}
