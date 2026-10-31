@@ -202,6 +202,24 @@ mod close_timeout_tests {
   }
  }
 }
+fn close_end_observation(trace:&serde_json::Value,notice:Option<&str>)->TestResult<&'static str>{
+ let availability=trace.get("sourceAvailabilityEnd").ok_or("Missing automatic source-end observation")?;
+ if trace["sourceClosed"]==true&&availability.is_null()&&notice.is_none(){return Ok("wgcClosed");}
+ if trace["sourceClosed"]==false&&availability=="unavailable"&&notice.is_some_and(|s|s.starts_with("The selected window became unavailable.")){return Ok("sourceUnavailableStop");}
+ Err("Automatic source end lacks callback or confirmed-unavailable evidence".into())
+}
+#[cfg(test)]
+mod close_end_observation_tests {
+ use super::*;
+ #[test] fn automatic_close_accepts_only_callback_or_confirmed_administrative_notice(){
+  let callback=serde_json::json!({"sourceClosed":true,"sourceAvailabilityEnd":null});assert_eq!(close_end_observation(&callback,None).unwrap(),"wgcClosed");
+  let administrative=serde_json::json!({"sourceClosed":false,"sourceAvailabilityEnd":"unavailable"});assert_eq!(close_end_observation(&administrative,Some("The selected window became unavailable. Complete frames were saved; select the window again to continue.")).unwrap(),"sourceUnavailableStop");
+ }
+ #[test] fn automatic_close_rejects_unconfirmed_missing_or_contradictory_proof(){
+  for trace in [serde_json::json!({}),serde_json::json!({"sourceClosed":false,"sourceAvailabilityEnd":"unconfirmed"}),serde_json::json!({"sourceClosed":true,"sourceAvailabilityEnd":"unavailable"}),serde_json::json!({"sourceClosed":false,"sourceAvailabilityEnd":null}),serde_json::json!({"sourceClosed":true})]{assert!(close_end_observation(&trace,None).is_err());assert!(close_end_observation(&trace,Some("The selected window availability could not be confirmed.")).is_err());}
+  let administrative=serde_json::json!({"sourceClosed":false,"sourceAvailabilityEnd":"unavailable"});assert!(close_end_observation(&administrative,None).is_err());
+ }
+}
 fn case(root:&Path,id:&str,mode:&str,w:u32,h:u32,nonce:u16,ffmpeg:&Path,worker:&Path,state:&RecorderState)->TestResult<()>{
  let dir=root.join(id);fs::create_dir(&dir)?;let dir=dir.canonicalize()?;
  if mode=="parent-death"{fs::write(dir.join("parent-death"),b"generated isolation only")?;}
@@ -225,7 +243,7 @@ fn case(root:&Path,id:&str,mode:&str,w:u32,h:u32,nonce:u16,ffmpeg:&Path,worker:&
   // Stop after the first complete cell starts writing, before the two-entry output queue fills.
   let deadline=Instant::now()+Duration::from_secs(3);while !dir.join("first-write-started.json").is_file(){if Instant::now()>=deadline{return Err("No first writer observation".into());}thread::sleep(Duration::from_millis(1));}
  }else{thread::sleep(Duration::from_millis(1200));}
- if mode=="close"{window.close()?;}
+ if mode=="close"{assert!(!session.ended()?,"Worker must be alive before generated source close");window.close()?;}
  if mode=="resize"{window.resize()?;}
  if mode=="close"||mode=="resize"{let wait=Instant::now();let end=wait+Duration::from_secs(8);while !session.ended()?{if Instant::now()>=end{
   if mode=="close"{return close_timeout(wait.elapsed(),observation_qpc,||session.finish().map_err(|e|e.to_string()),||owned.verify(&dir).map_err(|e|e.to_string()),|bytes|fs::write(dir.join("result.json"),bytes));}
@@ -258,7 +276,12 @@ fn case(root:&Path,id:&str,mode:&str,w:u32,h:u32,nonce:u16,ffmpeg:&Path,worker:&
  }
  let start=Instant::now();let result=session.finish();let elapsed=start.elapsed();owned.verify(&dir).map_err(|e|format!("cleanup: {e}"))?;assert!(elapsed<=Duration::from_secs(12));
  if ["blocked","partial","exit7","lost-worker"].contains(&mode){let error=result.expect_err("fault must not finalize");incomplete(&dir)?;assert!(ProjectStore::new(root)?.open_or_import(id,ffmpeg,defaults).is_err());fs::write(dir.join("result.json"),serde_json::to_vec(&serde_json::json!({"expectedFailure":error.to_string(),"finishMs":elapsed.as_millis()}))?)?;return Ok(());}
- let completion=result?;if mode=="resize"{assert!(completion.notice.as_ref().is_some_and(|s|s.contains("changed size")));}
+ let completion=result?;
+ let close_end=if mode=="close"{
+  let trace:serde_json::Value=serde_json::from_slice(&fs::read(dir.join("trace.json"))?)?;
+  Some(close_end_observation(&trace,completion.notice.as_deref())?)
+ }else{None};
+ if mode=="resize"{assert!(completion.notice.as_ref().is_some_and(|s|s.contains("changed size")));}
  let n=completion.count();let grid=probe_cfr_grid(ffmpeg,&dir.join("screen.mp4"),n,&AtomicBool::new(false),Instant::now()+Duration::from_secs(10))?;
  assert_eq!((grid.video.video.width,grid.video.video.height),(w+w%2,h+h%2));
  fs::write(dir.join("before-publish"),b"complete media before real Completion publication")?;
@@ -266,10 +289,10 @@ fn case(root:&Path,id:&str,mode:&str,w:u32,h:u32,nonce:u16,ffmpeg:&Path,worker:&
  completion.publish(&dir,&grid,false)?;
  assert!(!dir.join("project.json").exists());let manifest=decode_windows(&fs::read(dir.join("capture.json"))?,id)?;
  assert_eq!((manifest.source.raw_size.width,manifest.source.raw_size.height),(w,h));assert_eq!((manifest.source.content_rect.x,manifest.source.content_rect.y,manifest.source.content_rect.width,manifest.source.content_rect.height),(0,0,w,h));
- if let WindowsCaptureStateV2::Finalized{video_timing,..}=&manifest.state{assert_eq!(video_timing.clock.cutoff_reason,if mode=="close"{WindowsCutoffReason::SourceClosed}else{WindowsCutoffReason::Stop});}else{panic!("missing finalized authority")}
+ if let WindowsCaptureStateV2::Finalized{video_timing,..}=&manifest.state{assert_eq!(video_timing.clock.cutoff_reason,if close_end==Some("wgcClosed"){WindowsCutoffReason::SourceClosed}else{WindowsCutoffReason::Stop});}else{panic!("missing finalized authority")}
  let snapshot=manifest.finalized_project().unwrap();let mut other=defaults;other.pan_transition_us=987654;
  let project=ProjectStore::new(root)?.open_or_import(id,ffmpeg,other)?;assert_eq!(&project,snapshot);assert_eq!(project.camera.pan_transition_us,defaults.pan_transition_us);assert!(project.clicks.is_empty()&&project.zooms.is_empty());assert_eq!(project.video.cursor,focusflow_core::project::CursorMode::Embedded);
- fs::write(dir.join("result.json"),serde_json::to_vec(&serde_json::json!({"frames":n,"finishMs":elapsed.as_millis(),"independentMediaHashGate":true,"rawWidth":w,"rawHeight":h,"nonce":nonce,"instrumented":worker==std::env::current_exe()?}))?)?;
+ fs::write(dir.join("result.json"),serde_json::to_vec(&serde_json::json!({"frames":n,"finishMs":elapsed.as_millis(),"automaticEndBeforeStop":mode=="close","closeEndObserved":close_end,"independentMediaHashGate":true,"rawWidth":w,"rawHeight":h,"nonce":nonce,"instrumented":worker==std::env::current_exe()?}))?)?;
  window.close()?;Ok(())
 }
 fn platform(path:&Path)->TestResult<()> {

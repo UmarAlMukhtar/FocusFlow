@@ -4,7 +4,7 @@ use super::super::{CapturePlan, StartReservation};
 use owned_feed::{Geometry, OwnedCount, OwnedPixels, Source, Selector, complete_cells, write_frame};
 use std::{ffi::{OsStr,OsString}, io::Write, os::windows::{io::AsRawHandle,process::CommandExt}, path::PathBuf,
  process::{Child,Command,Stdio}, sync::{Arc,Mutex,mpsc::{self,Receiver,SyncSender},atomic::{AtomicBool,Ordering}},thread,time::{Duration,Instant}};
-use ::windows::{core::{PCWSTR,BOOL}, Win32::{Foundation::{CloseHandle,DuplicateHandle,HANDLE,HWND,WAIT_OBJECT_0},System::{JobObjects::*,Performance::*,Threading::*,WinRT::{RoInitialize,RoUninitialize,RO_INIT_MULTITHREADED}},UI::WindowsAndMessaging::GetWindowThreadProcessId}};
+use ::windows::{core::{PCWSTR,BOOL}, Win32::{Foundation::{CloseHandle,DuplicateHandle,HANDLE,HWND,WAIT_OBJECT_0,WAIT_TIMEOUT,SetLastError,GetLastError,WIN32_ERROR,ERROR_INVALID_WINDOW_HANDLE},System::{JobObjects::*,Performance::*,Threading::*,WinRT::{RoInitialize,RoUninitialize,RO_INIT_MULTITHREADED}},UI::WindowsAndMessaging::GetWindowThreadProcessId}};
 use windows_capture::{capture::{Context,GraphicsCaptureApiHandler},frame::Frame,graphics_capture_api::InternalCaptureControl,settings::*,window::Window};
 #[cfg(test)]
 pub(in crate::recorder) mod qualification;
@@ -40,6 +40,29 @@ fn verify_identity(window:u64,pid:u32)->Result<Window>{
  let hwnd=HWND(usize::try_from(window).map_err(err)? as *mut _);let mut actual=0;unsafe{GetWindowThreadProcessId(hwnd,Some(&mut actual));}
  let w=Window::from_raw_hwnd(hwnd.0);
  if actual==0||actual!=pid||!w.is_valid(){return Err("Selected window closed or changed process; select it again".into());}Ok(w)
+}
+struct SourceOwner {process:Handle,window:u64,pid:u32,thread:u32}
+fn window_identity(window:u64)->std::result::Result<(u32,u32),SourceAvailabilityEnd>{
+ let hwnd=HWND(usize::try_from(window).map_err(|_|SourceAvailabilityEnd::Unconfirmed)? as *mut _);let mut pid=0;
+ // Only the fixed HWND and valid stack output are queried; resetting last error distinguishes invalidity from unknown failures.
+ unsafe{SetLastError(WIN32_ERROR(0));let thread=GetWindowThreadProcessId(hwnd,Some(&mut pid));
+  if thread==0{return Err(if GetLastError()==ERROR_INVALID_WINDOW_HANDLE{SourceAvailabilityEnd::Unavailable}else{SourceAvailabilityEnd::Unconfirmed});}
+  if pid==0{return Err(SourceAvailabilityEnd::Unconfirmed);}Ok((pid,thread))
+ }
+}
+impl SourceOwner {
+ fn prepare(window:u64,pid:u32)->Result<Self>{
+  let (actual,thread)=window_identity(window).map_err(|reason|match reason{SourceAvailabilityEnd::Unavailable=>"Selected window owner is unavailable; select the window again",SourceAvailabilityEnd::Unconfirmed=>"Selected window owner could not be confirmed; select the window again"})?;
+  if actual!=pid{return Err("Selected window changed owner; select the window again".into());}
+  // SYNCHRONIZE only observes this exact process object; inheritance is disabled and it is never assigned to or killed with our Job.
+  let process=Handle(unsafe{OpenProcess(PROCESS_SYNCHRONIZE,false,pid).map_err(|e|format!("Could not monitor selected window owner: {e}; select another window"))?}.0 as usize);
+  let owner=Self{process,window,pid,thread};owner.require_available()?;Ok(owner)
+ }
+ fn observe(&self)->Option<SourceAvailabilityEnd>{
+  // shortcut: matching live PID/TID/HWND cannot detect same-thread HWND generation reuse; use a native destruction hook if that guarantee becomes required.
+  observe_source((self.pid,self.thread),||match unsafe{WaitForSingleObject(self.process.raw(),0)}{WAIT_TIMEOUT=>Ok(true),WAIT_OBJECT_0=>Ok(false),_=>Err(())},||window_identity(self.window))
+ }
+ fn require_available(&self)->Result<()>{if self.observe().is_some(){return Err("Selected window availability could not be confirmed; select it again".into());}Ok(())}
 }
 // Keep only the Send window variant; the upstream enum also contains a thread-bound picker HWND.
 struct PreparedWindow {item: ::windows_capture::GraphicsCaptureItem,window:Window}
@@ -89,7 +112,7 @@ impl Session {
   let result=(||{
    let sent=if self.child.try_wait().map_err(recovery)?.is_none(){self.send(3).is_ok()}else{false};
    let mut ack=None;let summary=loop{match self.receive(normal_deadline)?{Message::Ack{cutoff} if ack.is_none()=>ack=Some(cutoff),Message::Terminal{summary}=>break summary,_=>return Err(recovery("Invalid terminal protocol order"))}};
-   if sent&&!summary.closed&&!summary.geometry_changed&&ack!=Some(summary.cutoff){return Err(recovery("Installed Stop acknowledgement missing or inconsistent"));}
+   summary.check_stop_ack(sent,ack).map_err(recovery)?;
    let status=wait_child(&mut self.child,normal_deadline).map_err(recovery)?;
    if !self.encoder.as_ref().is_some_and(|h|unsafe{WaitForSingleObject(h.raw(),0)}==WAIT_OBJECT_0){return Err(recovery("Encoder exact-handle completion not observed"));}
    Completion::new(self.manifest.clone().ok_or_else(||recovery("Prepared source missing"))?,summary,status)
@@ -120,7 +143,7 @@ fn probe_profile(ffmpeg:&Path,job:&str)->Result<()> {
  let _=std::fs::remove_dir_all(dir);result
 }
 #[derive(Clone,Default)]
-struct Shared {cutoff:Option<i64>,closed:bool,geometry_changed:bool,failure:Option<String>,#[cfg(test)] trace:qualification::Trace}
+struct Shared {cutoff:Option<i64>,closed:bool,geometry_changed:bool,source_availability:Option<SourceAvailabilityEnd>,failure:Option<String>,#[cfg(test)] trace:qualification::Trace}
 #[derive(Clone)]
 struct Flags {tx:SyncSender<Source>,shared:Arc<Mutex<Shared>>,live:Arc<OwnedCount>,geometry:Geometry,#[cfg(test)] window:u64,#[cfg(test)] pid:u32}
 struct Capture {flags:Flags,seq:u64,#[cfg(test)] rejected_seen:bool}
@@ -187,17 +210,17 @@ impl Drop for Supervisor {fn drop(&mut self){self.stop.store(true,Ordering::SeqC
 fn worker(window:u64,pid:u32,path:&Path,ffmpeg:&Path,job:&str)->Result<()> {
  control(1)?;
  #[cfg(test)] qualification::initialize(path)?;
- let _apartment=Apartment::initialize()?;
+ let _apartment=Apartment::initialize()?;let owner=SourceOwner::prepare(window,pid)?;
  let captured:GraphicsCaptureItemType=verify_identity(window,pid)?.try_into().map_err(err)?;
  let GraphicsCaptureItemType::Window((item,window_handle))=captured else{return Err("Expected a native window item".into());};
  let item=PreparedWindow{item,window:window_handle};let g=item_geometry(&item)?;probe_profile(ffmpeg,job)?;emit(Message::Prepared{width:g.width as u32,height:g.height as u32})?;control(2)?;
- verify_source(window,pid,&item,g)?;let freq=frequency()?;
+ verify_source(window,pid,&item,g)?;owner.require_available()?;let freq=frequency()?;
  let mut encoder=Encoder(encoder_command(ffmpeg,g,path).spawn().map_err(err)?);verify_job(&encoder.0,job)?;
  let stderr=drain(encoder.0.stderr.take().ok_or("Encoder stderr missing")?)?;
  emit(Message::Encoder{pid:encoder.0.id()})?;control(4)?;
  #[cfg(test)] qualification::park(path)?;
  // Revalidate immediately before admission; preparation never authorizes a replacement HWND.
- verify_source(window,pid,&item,g)?;
+ verify_source(window,pid,&item,g)?;owner.require_available()?;
  let progress=Arc::new(Mutex::new(Progress{#[cfg(test)] writes:qualification::Writes::allocated(),..Default::default()}));let supervisor=Supervisor::start(&encoder.0,progress.clone())?;
  let(writer_tx,writer_rx)=mpsc::sync_channel(2);let(done_tx,done_rx)=mpsc::sync_channel(1);let pipe=encoder.0.stdin.take().ok_or("Encoder stdin missing")?;let writer_progress=progress.clone();
  thread::Builder::new().name("wgc-raw-writer".into()).spawn(move||{let _=done_tx.send(write_outputs(pipe,writer_rx,writer_progress));}).map_err(err)?;
@@ -208,10 +231,11 @@ fn worker(window:u64,pid:u32,path:&Path,ffmpeg:&Path,job:&str)->Result<()> {
  let mut selector=Selector::new(admission,freq)?;let mut selected=0;let started=Instant::now();let mut handled=false;let mut state_at_end=Shared::default();
  let feed=(||->Result<()>{loop{
   match done_rx.try_recv(){Ok(r)=>{r?;return Err("Writer ended before input was closed".into());},Err(mpsc::TryRecvError::Disconnected)=>return Err("Writer lost".into()),Err(mpsc::TryRecvError::Empty)=>{}}
-  let mut ack=None;let mut output=None;let finished;
+  let availability=owner.observe();let mut ack=None;let mut output=None;let finished;
   {
    let mut state=shared.lock().map_err(err)?;if let Some(failure)=&state.failure{return Err(failure.clone());}
    if !handled {match control_rx.try_recv(){Ok(r)=>{r?;if state.cutoff.is_none(){state.cutoff=Some(qpc()?);}ack=state.cutoff;handled=true;},Err(mpsc::TryRecvError::Disconnected)=>return Err("Parent control lost".into()),Err(mpsc::TryRecvError::Empty)=>{}}}
+   if let Some(observed)=availability{if let Some(reason)=observed.install(&mut state.cutoff,qpc)?{state.source_availability=Some(reason);}}
    // Snapshot draining and decisions share the publication lock; all I/O follows unlock.
    while let Ok(source)=rx.try_recv(){selector.push(source)?;}
    let decision=qpc()?;
@@ -249,7 +273,7 @@ fn worker(window:u64,pid:u32,path:&Path,ffmpeg:&Path,job:&str)->Result<()> {
  #[cfg(test)] qualification::flush(path,&shared,&progress,g,freq,admission,selector.epoch,selected,&failure,encoder_exit,non_encoder_failure)?;
  if let Some(error)=failure{return Err(error);}
  let written=progress.try_lock().map_err(err)?.complete;
- let summary=Summary{frequency:freq,admission,epoch:selector.epoch.ok_or("No epoch")?,cutoff:state_at_end.cutoff.ok_or("No cutoff")?,closed:state_at_end.closed,selected,written,encoder_exit:code,geometry_changed:state_at_end.geometry_changed};summary.clock(0)?;
+ let summary=Summary{frequency:freq,admission,epoch:selector.epoch.ok_or("No epoch")?,cutoff:state_at_end.cutoff.ok_or("No cutoff")?,closed:state_at_end.closed,selected,written,encoder_exit:code,geometry_changed:state_at_end.geometry_changed,source_availability:state_at_end.source_availability};summary.clock(0)?;
  emit(Message::Terminal{summary})
 }
 pub(crate) fn dispatch(mut args:impl Iterator<Item=OsString>)->Option<i32>{

@@ -12,12 +12,35 @@ pub(crate) use process::dispatch;
 #[cfg(all(windows,test))]
 pub(super) use process::qualification;
 
+#[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(rename_all="camelCase")]
+enum SourceAvailabilityEnd {Unavailable,Unconfirmed}
+impl SourceAvailabilityEnd {
+ fn install(self,cutoff:&mut Option<i64>,now:impl FnOnce()->Result<i64,String>)->Result<Option<Self>,String>{
+  if cutoff.is_some(){return Ok(None);}*cutoff=Some(now()?);Ok(Some(self))
+ }
+ fn notice(self)->&'static str{match self{
+  Self::Unavailable=>"The selected window became unavailable. Complete frames were saved; select the window again to continue.",
+  Self::Unconfirmed=>"The selected window availability could not be confirmed. Complete frames were saved; select the window again to continue."
+ }}
+}
+fn observe_source(expected:(u32,u32),alive:impl FnOnce()->Result<bool,()>,identity:impl FnOnce()->Result<(u32,u32),SourceAvailabilityEnd>)->Option<SourceAvailabilityEnd>{
+ match alive(){Ok(false)=>Some(SourceAvailabilityEnd::Unavailable),Err(())=>Some(SourceAvailabilityEnd::Unconfirmed),Ok(true)=>match identity(){
+  Ok((0,_)|(_,0))=>Some(SourceAvailabilityEnd::Unconfirmed),Ok(actual) if actual==expected=>None,Ok(_)=>Some(SourceAvailabilityEnd::Unavailable),Err(reason)=>Some(reason)
+ }}
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Summary {frequency:i64,admission:i64,epoch:i64,cutoff:i64,closed:bool,selected:u32,written:u32,encoder_exit:i32,geometry_changed:bool}
+struct Summary {frequency:i64,admission:i64,epoch:i64,cutoff:i64,closed:bool,selected:u32,written:u32,encoder_exit:i32,geometry_changed:bool,source_availability:Option<SourceAvailabilityEnd>}
 impl Summary {
+ fn check_stop_ack(&self,sent:bool,ack:Option<i64>)->Result<(),&'static str>{
+  if !self.end_flags_valid(){return Err("Worker summary has contradictory end causes");}
+  if sent&&!self.closed&&!self.geometry_changed&&self.source_availability.is_none()&&ack!=Some(self.cutoff){return Err("Installed Stop acknowledgement missing or inconsistent");}Ok(())
+ }
+ fn end_flags_valid(&self)->bool{u8::from(self.closed)+u8::from(self.geometry_changed)+u8::from(self.source_availability.is_some())<=1}
  fn clock(&self,worker_exit:i32)->Result<WindowsOwnedClockV1,&'static str>{
-  if worker_exit!=0||self.encoder_exit!=0||self.written==0||self.written>owned_feed::MAX_FRAMES||self.written!=self.selected
+  if !self.end_flags_valid()||worker_exit!=0||self.encoder_exit!=0||self.written==0||self.written>owned_feed::MAX_FRAMES||self.written!=self.selected
    ||!owned_feed::admitted(self.epoch,self.admission,self.frequency)?||self.cutoff<self.admission
    ||owned_feed::complete_cells(self.epoch,self.cutoff,self.frequency)?!=self.written{return Err("Worker summary does not prove complete normal capture");}
   Ok(WindowsOwnedClockV1{provenance:WindowsClockProvenance::OwnedWgcCausalCfrV1,qpc_frequency:self.frequency.to_string(),admission_qpc:self.admission.to_string(),epoch_100ns:self.epoch.to_string(),cutoff_qpc:self.cutoff.to_string(),cutoff_reason:if self.closed{WindowsCutoffReason::SourceClosed}else{WindowsCutoffReason::Stop},completed_frames:self.written.into(),worker_exit_code:worker_exit,encoder_exit_code:self.encoder_exit,interactions:Unmeasured::Unmeasured,audio:Unmeasured::Unmeasured})
@@ -44,7 +67,7 @@ pub(super) struct Completion {manifest:WindowsCaptureManifestV2,clock:WindowsOwn
 impl Completion {
  fn new(manifest:WindowsCaptureManifestV2,summary:Summary,worker_exit:i32)->RecorderResult<Self>{
   let clock=summary.clock(worker_exit).map_err(recovery)?;
-  let notice=summary.geometry_changed.then(||"The selected window changed size. Complete frames were saved; start a new recording at the new size.".into());
+  let notice=summary.source_availability.map(|reason|reason.notice().into()).or_else(||summary.geometry_changed.then(||"The selected window changed size. Complete frames were saved; start a new recording at the new size.".into()));
   Ok(Self{manifest,clock,notice})
  }
  pub(super) fn count(&self)->u64{self.clock.completed_frames}
@@ -59,7 +82,41 @@ impl Completion {
 #[cfg(test)]
 mod tests {
  use super::*;
- fn summary()->Summary{Summary{frequency:3_000_000,admission:2_997_000,epoch:10_000_000,cutoff:6_000_000,closed:false,selected:30,written:30,encoder_exit:0,geometry_changed:false}}
+ fn summary()->Summary{Summary{frequency:3_000_000,admission:2_997_000,epoch:10_000_000,cutoff:6_000_000,closed:false,selected:30,written:30,encoder_exit:0,geometry_changed:false,source_availability:None}}
+
+ #[test] fn availability_observations_distinguish_loss_from_unconfirmed_and_stable_identity(){
+  use SourceAvailabilityEnd::*;
+  assert_eq!(observe_source((7,9),||Ok(false),||panic!("Exited exact owner must not query a recycled PID")),Some(Unavailable));
+  assert_eq!(observe_source((7,9),||Err(()),||panic!("Failed wait cannot prove window identity")),Some(Unconfirmed));
+  for observed in [(7,9),(8,9),(7,10)]{assert_eq!(observe_source((7,9),||Ok(true),||Ok(observed)),if observed==(7,9){None}else{Some(Unavailable)});}
+  assert_eq!(observe_source((7,9),||Ok(true),||Err(Unavailable)),Some(Unavailable));
+  assert_eq!(observe_source((7,9),||Ok(true),||Err(Unconfirmed)),Some(Unconfirmed));
+  assert_eq!(observe_source((7,9),||Ok(true),||Ok((0,9))),Some(Unconfirmed));
+ }
+ #[test] fn availability_first_cause_installs_actual_cutoff_and_never_backdates_or_relabels(){
+  use SourceAvailabilityEnd::*;
+  let mut cutoff=None;assert_eq!(Unavailable.install(&mut cutoff,||Ok(123)).unwrap(),Some(Unavailable));assert_eq!(cutoff,Some(123));
+  assert_eq!(Unconfirmed.install(&mut cutoff,||panic!("Existing cutoff wins without another QPC")).unwrap(),None);assert_eq!(cutoff,Some(123));
+  for _prior_cause in ["Stop","native Closed","geometry"]{let mut prior=Some(99);assert_eq!(Unavailable.install(&mut prior,||panic!("Late query cannot change first cause")).unwrap(),None);assert_eq!(prior,Some(99));}
+  let mut missing=None;assert!(Unavailable.install(&mut missing,||Err("QPC failed".into())).is_err());assert_eq!(missing,None);
+ }
+ #[test] fn availability_end_allows_only_automatic_ack_exception_and_preserves_stop_clock(){
+  let ordinary=summary();assert!(ordinary.check_stop_ack(true,None).is_err());assert!(ordinary.check_stop_ack(true,Some(ordinary.cutoff-1)).is_err());assert!(ordinary.check_stop_ack(true,Some(ordinary.cutoff)).is_ok());assert!(ordinary.check_stop_ack(false,None).is_ok());
+  for end in [SourceAvailabilityEnd::Unavailable,SourceAvailabilityEnd::Unconfirmed]{let mut s=summary();s.source_availability=Some(end);assert!(s.check_stop_ack(true,None).is_ok());let c=s.clock(0).unwrap();assert_eq!(c.cutoff_reason,WindowsCutoffReason::Stop);assert_eq!(c.completed_frames,30);}
+ }
+ #[test] fn availability_notice_is_durable_clock_diagnostic_without_changing_frozen_snapshot(){
+  for end in [SourceAvailabilityEnd::Unavailable,SourceAvailabilityEnd::Unconfirmed]{
+   let dir=std::env::temp_dir().join(format!("focusflow-availability-{}-{end:?}",std::process::id()));std::fs::create_dir(&dir).unwrap();let dir=dir.canonicalize().unwrap();let id=dir.file_name().unwrap().to_str().unwrap();
+   let defaults=crate::export::ExportSettings::default().legacy_defaults().unwrap();let m=incomplete(id,42,320,240,Bounds{x:0,y:0,width:320,height:240},defaults).unwrap();publish_windows_incomplete(&dir,&m).unwrap();std::fs::write(dir.join("screen.mp4"),b"retained source").unwrap();
+   let grid=SavedCfrGrid{completed_frames:30,video:focusflow_core::ffmpeg::ProbedVideoEvidence{video:focusflow_core::ffmpeg::ProbedVideo{width:320,height:240,duration_us:1_000_000},endpoint:focusflow_core::ffmpeg::PacketTime{ticks:30000,numerator:1,denominator:30000},first_packet_duration:focusflow_core::ffmpeg::PacketTime{ticks:1000,numerator:1,denominator:30000}}};
+   let mut s=summary();s.source_availability=Some(end);let c=Completion::new(m,s,0).unwrap();assert!(c.notice.is_some());c.publish(&dir,&grid,false).unwrap();let saved=decode_windows(&std::fs::read(dir.join("capture.json")).unwrap(),id).unwrap();let diagnostic=saved.diagnostic.as_ref().unwrap();assert_eq!(diagnostic.stage,DiagnosticStage::Clock);
+   assert!(diagnostic.message.contains(if end==SourceAvailabilityEnd::Unavailable{"became unavailable"}else{"could not be confirmed"}));let doc=saved.finalized_project().unwrap();assert_eq!(doc.video.cursor,CursorMode::Embedded);assert_eq!(doc.camera.pan_transition_us,defaults.pan_transition_us);assert_eq!(std::fs::read(dir.join("screen.mp4")).unwrap(),b"retained source");std::fs::remove_dir_all(dir).unwrap();
+  }
+ }
+ #[test] fn availability_rejects_contradictory_terminal_causes_without_ack_bypass(){
+  for (closed,geometry) in [(true,false),(false,true),(true,true)]{let mut s=summary();s.source_availability=Some(SourceAvailabilityEnd::Unavailable);s.closed=closed;s.geometry_changed=geometry;assert!(s.clock(0).is_err());assert!(s.check_stop_ack(true,None).is_err());}
+  let mut s=summary();s.closed=true;s.geometry_changed=true;assert!(s.clock(0).is_err());
+ }
  #[test] fn terminal_rejects_partial_killed_missing_and_inconsistent_results(){
   assert!(summary().clock(0).is_ok());assert!(summary().clock(1).is_err());
   for change in [0,1,2,3,4,5] {let mut s=summary();match change{0=>s.written=29,1=>s.selected=31,2=>s.encoder_exit=1,3=>{s.selected=0;s.written=0},4=>s.cutoff=5_999_999,_=>s.admission=3_000_001};assert!(s.clock(0).is_err());}

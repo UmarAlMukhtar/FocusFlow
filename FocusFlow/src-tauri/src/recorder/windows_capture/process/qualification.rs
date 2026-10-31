@@ -71,11 +71,11 @@ pub(super) fn identity(p:&OwnedPixels,g:Geometry)->Result<(u16,u16,[u8;4])> {
 }
 pub(super) fn flush(path:&Path,shared:&Arc<Mutex<Shared>>,progress:&Arc<Mutex<Progress>>,g:Geometry,freq:i64,admission:i64,epoch:Option<i64>,selected:u32,failure:&Option<String>,encoder_exit:Option<i32>,non_encoder_failure:bool)->Result<()> {
  // Move scalar collectors out while locked; all allocation/serialization/file I/O follows unlock.
- let (trace,cutoff)={let mut s=shared.lock().map_err(err)?;(std::mem::take(&mut s.trace),s.cutoff)};
+ let (trace,cutoff,source_closed,source_availability)={let mut s=shared.lock().map_err(err)?;(std::mem::take(&mut s.trace),s.cutoff,s.closed,s.source_availability)};
  let (writes,written,supervisor_terminated)={let mut p=progress.lock().map_err(err)?;(std::mem::take(&mut p.writes),p.complete,p.supervisor_terminated)};
  let overflow=trace.overflow||writes.overflow;
- #[derive(Serialize)] struct Receipt<'a>{frequency:i64,admission:i64,epoch:Option<i64>,cutoff:Option<i64>,selected:u32,written:u32,width:usize,height:usize,overflow:bool,events:&'a [Event],#[serde(rename="firstRejectedFrame")]first_rejected_frame:&'a Option<Rejected>,writes:&'a [WriteEvent],failure:&'a Option<String>,#[serde(rename="supervisorTerminated")]supervisor_terminated:Option<bool>,#[serde(rename="encoderExitCode")]encoder_exit:Option<i32>,#[serde(rename="nonEncoderFailure")]non_encoder_failure:bool}
- let value=Receipt{frequency:freq,admission,epoch,cutoff,selected,written,width:g.width,height:g.height,overflow,events:&trace.events,first_rejected_frame:&trace.rejected,writes:&writes.events,failure,supervisor_terminated,encoder_exit,non_encoder_failure};
+ #[derive(Serialize)] struct Receipt<'a>{frequency:i64,admission:i64,epoch:Option<i64>,cutoff:Option<i64>,#[serde(rename="sourceClosed")]source_closed:bool,#[serde(rename="sourceAvailabilityEnd")]source_availability:Option<SourceAvailabilityEnd>,selected:u32,written:u32,width:usize,height:usize,overflow:bool,events:&'a [Event],#[serde(rename="firstRejectedFrame")]first_rejected_frame:&'a Option<Rejected>,writes:&'a [WriteEvent],failure:&'a Option<String>,#[serde(rename="supervisorTerminated")]supervisor_terminated:Option<bool>,#[serde(rename="encoderExitCode")]encoder_exit:Option<i32>,#[serde(rename="nonEncoderFailure")]non_encoder_failure:bool}
+ let value=Receipt{frequency:freq,admission,epoch,cutoff,source_closed,source_availability,selected,written,width:g.width,height:g.height,overflow,events:&trace.events,first_rejected_frame:&trace.rejected,writes:&writes.events,failure,supervisor_terminated,encoder_exit,non_encoder_failure};
  let bytes=serde_json::to_vec(&value).map_err(err)?;if bytes.len()>4*1024*1024{return Err("Qualification serialized trace exceeds 4 MiB".into());}
  std::fs::write(path.with_file_name("trace.json"),bytes).map_err(err)?;
  if overflow{return Err("Qualification trace overflow".into());}Ok(())
