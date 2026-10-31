@@ -248,12 +248,13 @@ fn graph(snapshot: &crate::store::RenderSnapshot, plan: &RenderPlan, use_audio: 
         let branch_duration = format!("{:.9}", count as f64 / fps as f64);
         let mut input = format!("vc{index}");
         let initial_scale=if window.is_some(){String::new()}else{format!(",scale={width}:{height}")};
+        // Normalize before scaling so drawing ON/OFF use identical source pixels.
         // fps before indexed trim samples the preceding source-grid frame even for subframe EOF cuts.
         if let Some((input_index, _)) = selected_span.map(|(i,_)|(i,())).or_else(||window.map(|_|(cursor_window::VIDEO_INPUT,()))) {
             let source_time = source_first as f64 / fps as f64;
-            graph.chain(format_args!("[{input_index}:v]fps={fps}:round=up:eof_action=pass:start_time={source_time:.9},tpad=stop_mode=clone:stop_duration=1,trim=start_pts={source_first}:end_pts={source_end},setpts=PTS-STARTPTS{initial_scale}[{input}]"))?;
+            graph.chain(format_args!("[{input_index}:v]fps={fps}:round=up:eof_action=pass:start_time={source_time:.9},tpad=stop_mode=clone:stop_duration=1,trim=start_pts={source_first}:end_pts={source_end},setpts=PTS-STARTPTS,format=rgba{initial_scale}[{input}]"))?;
         } else {
-            graph.chain(format_args!("[0:v]fps={fps}:round=up:eof_action=pass,tpad=stop_mode=clone:stop_duration=1,trim=start_frame={source_first}:end_frame={source_end},setpts=PTS-STARTPTS{initial_scale}[{input}]"))?;
+            graph.chain(format_args!("[0:v]fps={fps}:round=up:eof_action=pass,tpad=stop_mode=clone:stop_duration=1,trim=start_frame={source_first}:end_frame={source_end},setpts=PTS-STARTPTS,format=rgba{initial_scale}[{input}]"))?;
         }
         if let Some(w)=window {
             if w.atlas.is_some() {graph.chain(format_args!("{}",w.graph))?;input="cursor_composed".into();}
@@ -272,7 +273,7 @@ fn graph(snapshot: &crate::store::RenderSnapshot, plan: &RenderPlan, use_audio: 
             let next = format!("click{index}_{click_index}");
             // Draw in capture space so the same zoom/pan transforms both the ring and video.
             graph.chain(format_args!("color=c=white@0:s=32x32:r={fps}:d={branch_duration},format=rgba,geq=r=255:g=255:b=255:a='if(between(hypot(X-15.5,Y-15.5),11,14),229*(0.5+0.5*cos(PI*clip((T-({start}))/0.3,0,1))),0)'[{ring}]"))?;
-            graph.chain(format_args!("[{input}][{ring}]overlay=x={}:y={}:enable='gte(t,{start})*lt(t,{stop})':eof_action=pass[{next}]",
+            graph.chain(format_args!("[{input}][{ring}]overlay=x={}:y={}:enable='gte(t,{start})*lt(t,{stop})':eof_action=pass:format=rgb:alpha=straight[{next}]",
                 click.x * width as f64 - 16.0, click.y * height as f64 - 16.0))?;
             input = next;
         }
@@ -294,9 +295,9 @@ fn graph(snapshot: &crate::store::RenderSnapshot, plan: &RenderPlan, use_audio: 
         if window.is_some() {
             let x = camera_axis_expression(&x, &zoom, "iw", remaining)?;
             let y = camera_axis_expression(&y, &zoom, "ih", remaining)?;
-            graph.chain(format_args!("[{input}]zoompan=z='{zoom}':x='{x}':y='{y}':d=1:s={width}x{height}:fps={fps},setsar=1[v{index}]"))?;
+            graph.chain(format_args!("[{input}]format=gbrap,zoompan=z='{zoom}':x='{x}':y='{y}':d=1:s={width}x{height}:fps={fps},setsar=1[v{index}]"))?;
         } else {
-        graph.chain(format_args!("[{input}]zoompan=z='{zoom}':x='clip(({x})*iw-iw/(2*({zoom})),0,iw-iw/({zoom}))':y='clip(({y})*ih-ih/(2*({zoom})),0,ih-ih/({zoom}))':d=1:s={width}x{height}:fps={fps},setsar=1[v{index}]"))?;
+        graph.chain(format_args!("[{input}]format=gbrap,zoompan=z='{zoom}':x='clip(({x})*iw-iw/(2*({zoom})),0,iw-iw/({zoom}))':y='clip(({y})*ih-ih/(2*({zoom})),0,ih-ih/({zoom}))':d=1:s={width}x{height}:fps={fps},setsar=1[v{index}]"))?;
         }
     }
     // concat gives duplicate PTS for single-frame segments; the allocated frame order owns time.

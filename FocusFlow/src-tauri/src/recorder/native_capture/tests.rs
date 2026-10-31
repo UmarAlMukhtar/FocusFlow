@@ -207,3 +207,192 @@ fn shutdown_during_start_returns_ownership_to_startup_cleanup() {
     active.click_tracker.request_stop();match active.capture{ActiveCapture::Ffmpeg{child,..}=>crate::capture_guard::close_and_reap(child)};active.click_tracker.finish().unwrap();drop(active.native_capture);drop(reservation);
     tauri::async_runtime::block_on(shutdown(&state));assert!(!state.cleanup_runtime().starting);
 }
+
+
+// The 37-frame endpoint and last request brackets reproduce the retained unmap timing.
+fn retained_unmap_fixture(dir: &Path, barrier: (i128, i128)) -> (cursor::Source, cursor::Outcome, video_clock::AcceptedClock) {
+    use focusflow_core::{cursor::CursorShape, ffmpeg::PacketTime};
+    let source = cursor::Source { bounds: CaptureBounds { x:1160, y:650, width:400, height:280 }, window:Some(4194307) };
+    let observed = |before_ns, after_ns| cursor::RawRecord { before_ns, after_ns,
+        state:cursor::RawState::Observed { x:0.15, y:0.21428571428571427, visible:true,
+            shape_id:Some("shape-000".into()), root:927, origin_x:1160, origin_y:650, discontinuity:false } };
+    let rows = [observed(97186637,97190131), observed(1315523012,1316286948),
+        cursor::RawRecord { before_ns:barrier.0, after_ns:barrier.1, state:cursor::RawState::Barrier {} }];
+    fs::create_dir_all(dir.join("cursor/shapes")).unwrap();
+    let mut pam = b"P7\nWIDTH 1\nHEIGHT 1\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n".to_vec();
+    pam.extend([220,120,60,255]);fs::write(dir.join("cursor/shapes/shape-000.pam"),pam).unwrap();
+    let bytes:Vec<_> = rows.iter().flat_map(|row| {let mut bytes=serde_json::to_vec(row).unwrap();bytes.push(b'\n');bytes}).collect();
+    let raw_path=dir.join("cursor/raw.ndjson");fs::write(&raw_path,&bytes).unwrap();
+    let outcome=cursor::Outcome {raw_path,committed_bytes:bytes.len() as u64,records:rows.len(),
+        shapes:vec![CursorShape {id:"shape-000".into(),path:"cursor/shapes/shape-000.pam".into(),width:1,height:1,hotspot_x:0,hotspot_y:0}],
+        cutoff_ns:None,trustworthy_prefix:true,degraded:false,reason:None};
+    let clock=video_clock::AcceptedClock {frame_zero_ns:97188384,anchor_low_ns:97186637,anchor_high_exclusive_ns:97190131,
+        completed_frames:37,saved_endpoint:PacketTime {ticks:18944,numerator:1,denominator:15360}};
+    (source,outcome,clock)
+}
+fn source_notice() -> CaptureDiagnosticV1 {
+    CaptureDiagnosticV1 {stage:DiagnosticStage::Cursor,message:"Selected window became unavailable. Saved video and available cursor observations were retained; cursor drawing starts disabled.".into()}
+}
+#[test]
+fn source_end_late_barrier_preserves_intrinsic_prefix_and_imports_disabled_projection() {
+    use focusflow_core::{ffmpeg::{PacketTime,ProbedVideo},store::ProjectStore,edits::Edit};
+    let dir=Directory::new("late-source-end");
+    let (source,outcome,clock)=retained_unmap_fixture(&dir.0,(1333165973,1333539670));
+    let raw=fs::read(&outcome.raw_path).unwrap();let shape=fs::read(dir.0.join("cursor/shapes/shape-000.pam")).unwrap();
+    let finalized=cursor::finalize(&dir.0,source,outcome,Some(&clock)).unwrap();
+    assert_eq!(finalized,cursor::FinalizedCursor::Separate {degraded:None});
+    let samples=fs::read(dir.0.join("cursor/samples.ndjson")).unwrap();
+    let rows:Vec<serde_json::Value>=std::str::from_utf8(&samples).unwrap().lines().map(|line|serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(rows.len(),2);assert_eq!(rows[0]["atUs"],0);assert_eq!(rows[1]["atUs"],1218716);
+    assert!(rows.iter().all(|row|row["visible"]==true&&row["atUs"].as_u64().unwrap()<1233333));
+    let status=Command::new(ffmpeg()).args(["-v","error","-f","lavfi","-i","color=c=0x228844:s=400x280:r=30","-frames:v","37","-c:v","libx264","-pix_fmt","yuv420p"])
+        .arg(dir.0.join("screen.mp4")).status().unwrap();assert!(status.success());
+    let saved=ProbedVideoEvidence {video:ProbedVideo {width:400,height:280,duration_us:1233333},endpoint:clock.saved_endpoint,
+        first_packet_duration:PacketTime {ticks:512,numerator:1,denominator:15360}};
+    let video=fs::read(dir.0.join("screen.mp4")).unwrap();
+    let id=dir.0.file_name().unwrap().to_str().unwrap();let mut manifest=incomplete(id,SourceKind::Window,source);
+    capture::publish(&dir.0,&manifest).unwrap();
+    manifest.diagnostic=Some(source_notice());
+    let mut defaults=crate::export::ExportSettings::default().legacy_defaults().unwrap();defaults.pan_transition_us=180000;defaults.settle_us=90000;
+    complete_snapshot(&mut manifest,defaults,&saved,Some(&clock),finalized,&InteractionEvents {clicks:vec![],drags:vec![]},false).unwrap();
+    assert!(manifest.diagnostic.is_some(),"active source-end cause was discarded at publication");
+    let doc=manifest.finalized_project().unwrap();
+    assert_eq!(doc.video.cursor,CursorMode::Separate);assert!(doc.cursor.is_some());assert!(!doc.cursor_settings.enabled);
+    assert_eq!(doc.clips[0].out_us,1233333);assert_eq!(doc.camera.pan_transition_us,180000);assert_eq!(doc.camera.settle_us,90000);
+    assert!(doc.warnings.contains(&ProjectWarning::CursorCaptureIncomplete));manifest.validate(id).unwrap();
+    capture::publish_finalized_assets(&dir.0,&manifest,&saved).unwrap();
+    let authority=fs::read(dir.0.join("capture.json")).unwrap();let store=ProjectStore::new(dir.0.parent().unwrap()).unwrap();
+    let imported=store.open_or_import(id,&ffmpeg(),crate::export::ExportSettings::default().legacy_defaults().unwrap()).unwrap();
+    assert_eq!(&imported,doc);assert_eq!(store.get(id).unwrap(),imported);
+    assert!(store.capabilities(&imported).cursor_native_style);
+    // An edited existing document must win over the initial precaution on later opens.
+    let edited=store.apply_edits(id,0,&[Edit::SetCursorSettings {settings:CursorSettings {enabled:true,..imported.cursor_settings.clone()}}]).unwrap();
+    assert_eq!(store.open_or_import(id,&ffmpeg(),defaults).unwrap(),edited);
+    assert_eq!(fs::read(dir.0.join("capture.json")).unwrap(),authority);
+    assert_eq!(fs::read(dir.0.join("screen.mp4")).unwrap(),video);assert_eq!(fs::read(dir.0.join("cursor/raw.ndjson")).unwrap(),raw);
+    assert_eq!(fs::read(dir.0.join("cursor/samples.ndjson")).unwrap(),samples);assert_eq!(fs::read(dir.0.join("cursor/shapes/shape-000.pam")).unwrap(),shape);
+}
+#[test]
+fn source_end_late_generic_barriers_do_not_degrade_or_fabricate_endpoint_rows() {
+    for (before,after,degraded) in [(1330521383,1330521383,true),(1330521717,1330521717,false),(1330521718,1330521718,false),(1333165973,1333539670,false)] {
+        let dir=Directory::new("endpoint-barrier");let (source,outcome,clock)=retained_unmap_fixture(&dir.0,(before,after));
+        let raw=fs::read(&outcome.raw_path).unwrap();
+        let finalized=cursor::finalize(&dir.0,source,outcome,Some(&clock)).unwrap();
+        assert_eq!(matches!(finalized,cursor::FinalizedCursor::Separate {degraded:Some(_)}),degraded);
+        let rows:Vec<serde_json::Value>=fs::read_to_string(dir.0.join("cursor/samples.ndjson")).unwrap().lines().map(|line|serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(rows.len(),if degraded {3}else {2});assert!(rows.iter().all(|row|row["atUs"].as_u64().unwrap()<1233333));
+        assert_eq!(fs::read(dir.0.join("cursor/raw.ndjson")).unwrap(),raw);
+    }
+}
+#[test]
+fn source_end_owned_notice_survives_common_stop_and_shutdown_with_clock_failure() {
+    for shutdown_owner in [false,true] {
+        let dir=Directory::new("owned-source-end");synthetic_video(&dir.0);
+        let mut active=active_without_sampler(&dir.0,false);active.source=RecordingSource::Window {hwnd:"0x400003".into(),title:"Selected title".into()};capture::publish(&dir.0,&active.native_capture.as_ref().unwrap().manifest).unwrap();
+        let state=RecorderState::new();state.lock_runtime().unwrap().active=Some(active);
+        // This is the owner the status poll holds before a competing Stop takes the session.
+        {let mut runtime=state.lock_runtime().unwrap();let active=runtime.active.as_mut().unwrap();
+            assert!(active_recording_ended(active,|id,w,h|{assert_eq!((id,w,h),("0x400003",320,240));Ok(false)}).unwrap());
+            assert!(active_recording_ended(active,|_,_,_|Err(RecorderError::new("query_failed","later query error",true))).unwrap());
+            assert!(active_recording_ended(active,|_,_,_|Ok(true)).unwrap());}
+        if shutdown_owner {tauri::async_runtime::block_on(shutdown(&state));}
+        else {assert_eq!(tauri::async_runtime::block_on(stop_active_recording(&state)).unwrap().phase,RecordingPhase::Completed);}
+        let authority=fs::read(dir.0.join("capture.json")).unwrap();
+        let manifest:CaptureManifestV1=serde_json::from_slice(&authority).unwrap();
+        let diagnostic=manifest.diagnostic.unwrap();assert_eq!(diagnostic.stage,DiagnosticStage::Clock);
+        assert!(diagnostic.message.contains("clock"));assert!(diagnostic.message.contains("became unavailable"),"owned cause was lost during common Stop");
+        assert!(tauri::async_runtime::block_on(stop_active_recording(&state)).is_err());tauri::async_runtime::block_on(shutdown(&state));
+        assert_eq!(fs::read(dir.0.join("capture.json")).unwrap(),authority);
+    }
+}
+
+#[test]
+fn source_end_status_preserves_first_reason_and_distinguishes_unconfirmed_queries() {
+    for query_error_first in [false,true] {
+        let dir=Directory::new("first-source-reason");let mut active=active_without_sampler(&dir.0,false);
+        active.source=RecordingSource::Window {hwnd:"0x400003".into(),title:"Selected title".into()};
+        let state=RecorderState::new();state.lock_runtime().unwrap().active=Some(active);
+        {let mut runtime=state.lock_runtime().unwrap();let active=runtime.active.as_mut().unwrap();
+            // A completed/capped encoder must still execute the source observation before Stop.
+            let ActiveCapture::Ffmpeg {child,..}=&mut active.capture;child.wait().unwrap();
+            assert!(active_recording_ended(active,|_,_,_|if query_error_first {Err(RecorderError::new("query_failed","generic reply failure",true))}else {Ok(false)}).unwrap());
+            let first=active.native_capture.as_ref().unwrap().manifest.diagnostic.as_ref().expect("status lost source-end reason").clone();
+            assert_eq!(first.message.contains("could not be confirmed"),query_error_first);
+            assert_eq!(first.message.contains("became unavailable"),!query_error_first);assert!(!first.message.contains("unmapped"));
+            assert!(active_recording_ended(active,|_,_,_|if query_error_first {Ok(false)}else {Err(RecorderError::new("query_failed","later reply failure",true))}).unwrap());
+            assert!(active_recording_ended(active,|_,_,_|Ok(true)).unwrap());
+            assert_eq!(active.native_capture.as_ref().unwrap().manifest.diagnostic.as_ref().unwrap(),&first);
+        }
+        // The controlled child was already waited above; no media finalization is needed here.
+        state.lock_runtime().unwrap().active.take();
+    }
+}
+#[test]
+fn source_end_normal_cap_and_nonwindow_sources_do_not_latch_interruptions() {
+    for window in [false,true] {
+        let dir=Directory::new("normal-source-end");let mut active=active_without_sampler(&dir.0,false);
+        if window {active.source=RecordingSource::Window {hwnd:"0x400003".into(),title:"Changed title".into()};}
+        let state=RecorderState::new();state.lock_runtime().unwrap().active=Some(active);
+        {let mut runtime=state.lock_runtime().unwrap();let active=runtime.active.as_mut().unwrap();
+            let ActiveCapture::Ffmpeg {child,..}=&mut active.capture;child.wait().unwrap();
+            assert!(active_recording_ended(active,|_,_,_|{assert!(window);Ok(true)}).unwrap());
+            assert!(active.native_capture.as_ref().unwrap().manifest.diagnostic.is_none());}
+        state.lock_runtime().unwrap().active.take();
+    }
+}
+
+#[test]
+fn source_end_merge_keeps_cursor_failure_and_clean_normal_stop_stays_unmarked() {
+    for cursor_failure in [false,true] {
+        let mut manifest=incomplete("fixture",SourceKind::Screen,source());
+        if cursor_failure {manifest.diagnostic=Some(source_notice());}
+        let finalized=cursor::FinalizedCursor::Separate {degraded:cursor_failure.then_some("Native cursor image is unavailable; choose Arrow explicitly")};
+        let saved=ProbedVideoEvidence {video:focusflow_core::ffmpeg::ProbedVideo {width:320,height:240,duration_us:3000000},
+            endpoint:focusflow_core::ffmpeg::PacketTime {ticks:90,numerator:1,denominator:30},
+            first_packet_duration:focusflow_core::ffmpeg::PacketTime {ticks:1,numerator:1,denominator:30}};
+        let clock=video_clock::AcceptedClock {frame_zero_ns:100000000,anchor_low_ns:99999999,anchor_high_exclusive_ns:100000002,
+            completed_frames:90,saved_endpoint:saved.endpoint};
+        complete_snapshot(&mut manifest,crate::export::ExportSettings::default().legacy_defaults().unwrap(),&saved,Some(&clock),
+            finalized,&InteractionEvents {clicks:vec![],drags:vec![]},false).unwrap();
+        let doc=manifest.finalized_project().unwrap();assert_eq!(doc.video.cursor,CursorMode::Separate);
+        assert_eq!(doc.cursor_settings.enabled,!cursor_failure);
+        if cursor_failure {let diagnostic=manifest.diagnostic.unwrap();assert_eq!(diagnostic.stage,DiagnosticStage::Cursor);
+            assert!(diagnostic.message.contains("Native cursor image is unavailable"));assert!(diagnostic.message.contains("became unavailable"));}
+        else {assert!(manifest.diagnostic.is_none());assert!(!doc.warnings.contains(&ProjectWarning::CursorCaptureIncomplete));}
+    }
+}
+#[test]
+fn source_end_status_latch_survives_competing_stop_ownership_transfer() {
+    let dir=Directory::new("source-stop-race");synthetic_video(&dir.0);
+    let mut active=active_without_sampler(&dir.0,false);active.source=RecordingSource::Window {hwnd:"0x400003".into(),title:"Selected title".into()};
+    capture::publish(&dir.0,&active.native_capture.as_ref().unwrap().manifest).unwrap();
+    let state=Arc::new(RecorderState::new());state.lock_runtime().unwrap().active=Some(active);
+    let mut runtime=state.lock_runtime().unwrap();
+    let (ready,receive)=std::sync::mpsc::channel();let competing=Arc::clone(&state);
+    let stopper=thread::spawn(move || {ready.send(()).unwrap();tauri::async_runtime::block_on(stop_active_recording(&competing))});
+    receive.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(active_recording_ended(runtime.active.as_mut().unwrap(),|_,_,_|Ok(false)).unwrap());
+    drop(runtime);
+    assert_eq!(stopper.join().unwrap().unwrap().phase,RecordingPhase::Completed);
+    let bytes=fs::read(dir.0.join("capture.json")).unwrap();let manifest:CaptureManifestV1=serde_json::from_slice(&bytes).unwrap();
+    assert!(manifest.diagnostic.unwrap().message.contains("became unavailable"));
+    assert!(state.lock_runtime().unwrap().active.is_none());
+    assert!(tauri::async_runtime::block_on(stop_active_recording(&state)).is_err());
+    assert_eq!(fs::read(dir.0.join("capture.json")).unwrap(),bytes);
+}
+
+#[test]
+fn source_end_equivalent_exact_endpoints_exclude_barriers_without_degrading_prefix() {
+    use focusflow_core::ffmpeg::PacketTime;
+    for endpoint in [PacketTime {ticks:3,numerator:1,denominator:2},PacketTime {ticks:30,numerator:1,denominator:20}] {
+        for (relative_ns,degraded) in [(1499998999,true),(1500000000,false),(1500000001,false)] {
+            let dir=Directory::new("exact-source-end");let barrier=97188384+relative_ns;
+            let (source,outcome,mut clock)=retained_unmap_fixture(&dir.0,(barrier,barrier));clock.saved_endpoint=endpoint;clock.completed_frames=45;
+            let raw=fs::read(&outcome.raw_path).unwrap();let finalized=cursor::finalize(&dir.0,source,outcome,Some(&clock)).unwrap();
+            assert_eq!(matches!(finalized,cursor::FinalizedCursor::Separate {degraded:Some(_)}),degraded);
+            let rows:Vec<serde_json::Value>=fs::read_to_string(dir.0.join("cursor/samples.ndjson")).unwrap().lines().map(|line|serde_json::from_str(line).unwrap()).collect();
+            assert_eq!(rows.len(),if degraded {3}else {2});assert!(rows.iter().all(|row|row["atUs"].as_u64().unwrap()<1500000));
+            assert_eq!(fs::read(dir.0.join("cursor/raw.ndjson")).unwrap(),raw);
+        }
+    }
+}

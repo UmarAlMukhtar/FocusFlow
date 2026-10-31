@@ -640,22 +640,37 @@ pub async fn recording_status(
     let ended = {
         let mut runtime = state.lock_runtime()?;
         if let Some(active) = runtime.active.as_mut() {
-            match &mut active.capture {
-                ActiveCapture::Ffmpeg { child, .. } => {
-                    let mut ended = child.try_wait().map_err(|e| RecorderError::new("capture_status_failed", e.to_string(), true))?.is_some();
-                    #[cfg(target_os = "linux")]
-                    if let RecordingSource::Window { hwnd, .. } = &active.source {
-                        ended |= !x11::source_alive(hwnd, active.capture_bounds.width, active.capture_bounds.height);
-                    }
-                    ended
-                }
-                #[cfg(windows)]
-                ActiveCapture::WindowsCapture { capture } => capture.ended()?,
-            }
+            active_recording_ended(active, #[cfg(target_os = "linux")] x11::source_alive)?
         } else { false }
     };
     if ended { return stop_active_recording(state.inner()).await; }
     current_recording_status(&app, state.inner())
+}
+
+fn active_recording_ended(active: &mut ActiveRecording,
+    #[cfg(target_os = "linux")] mut source_alive: impl FnMut(&str, u32, u32) -> RecorderResult<bool>,
+) -> RecorderResult<bool> {
+    match &mut active.capture {
+        ActiveCapture::Ffmpeg { child, .. } => {
+            let mut ended = child.try_wait().map_err(|e| RecorderError::new("capture_status_failed", e.to_string(), true))?.is_some();
+            #[cfg(target_os = "linux")]
+            if let RecordingSource::Window { hwnd, .. } = &active.source {
+                let reason = match source_alive(hwnd, active.capture_bounds.width, active.capture_bounds.height) {
+                    Ok(true) => None,
+                    Ok(false) => Some("Selected window became unavailable. Saved video and available cursor observations were retained; cursor drawing starts disabled."),
+                    Err(_) => Some("Availability of the selected window could not be confirmed. Saved video and available cursor observations were retained; cursor drawing starts disabled."),
+                };
+                if let Some(reason) = reason {
+                    // The runtime still owns this session, including when the encoder already ended.
+                    if let Some(session) = active.native_capture.as_mut() { session.note_source_end(reason); }
+                    ended = true;
+                }
+            }
+            Ok(ended)
+        }
+        #[cfg(windows)]
+        ActiveCapture::WindowsCapture { capture } => capture.ended(),
+    }
 }
 
 #[tauri::command]

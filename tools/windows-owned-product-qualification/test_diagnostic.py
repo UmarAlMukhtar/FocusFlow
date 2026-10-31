@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import run
 from package_evidence import package
 
@@ -17,18 +17,23 @@ class Diagnostic(unittest.TestCase):
                 args=SimpleNamespace(evidence=root/'evidence',ffmpeg=root/'ffmpeg',ffprobe=root/'ffprobe',scope='close-diagnostic')
                 metadata={'packages':[{'name':'windows-capture','source':None,'manifest_path':str(repo/'FocusFlow/vendor/windows-capture/Cargo.toml')}]}
                 builds=[];calls=[]
+                analyzer=Mock()
                 def build(repo,evidence,manifest,name,test):
                     builds.append((name,test));return root/'harness.exe'
                 def execute(argv,evidence,name,*unused,**kwargs):
                     calls.append((name,argv));self.assertEqual(name,'close')
                     self.assertEqual(argv[2:6],['close',641,359,202])
                     case=evidence/'close/session-0';case.mkdir(parents=True)
-                    if fail:raise RuntimeError('retained identity failure')
-                with patch('run.sys.platform','win32'),patch.dict(os.environ,{'GITHUB_REF':'refs/heads/codex-windows-owned-close-diagnostic'}),patch('run.os.chdir'),patch('run.source_manifest',return_value={}),patch('run.sha',side_effect=lambda p:run.FFMPEG_SHA if p==args.ffmpeg else run.FFPROBE_SHA if p==args.ffprobe else 'fixture-hash'),patch('run.subprocess.check_output',side_effect=lambda argv,**kw:json.dumps(metadata) if argv[0]=='cargo' else 'fixture-head'),patch('run.build_exe',side_effect=build),patch('run.execute',side_effect=execute),patch('run.analyze.analyze'):
+                    if fail:
+                        (case/'result.json').write_text(json.dumps({'primaryFailure':'Natural window end not observed before Stop','diagnosticOnly':True,'passed':False,'naturalEndObservedBeforeStop':False,'manualStopRequested':True,'finishSucceeded':True,'cleanupSucceeded':True}))
+                        raise RuntimeError('Natural window end not observed before Stop')
+                with patch('run.sys.platform','win32'),patch.dict(os.environ,{'GITHUB_REF':'refs/heads/codex-windows-owned-close-diagnostic'}),patch('run.os.chdir'),patch('run.source_manifest',return_value={}),patch('run.sha',side_effect=lambda p:run.FFMPEG_SHA if p==args.ffmpeg else run.FFPROBE_SHA if p==args.ffprobe else 'fixture-hash'),patch('run.subprocess.check_output',side_effect=lambda argv,**kw:json.dumps(metadata) if argv[0]=='cargo' else 'fixture-head'),patch('run.build_exe',side_effect=build),patch('run.execute',side_effect=execute),patch('run.analyze.analyze',analyzer):
                     if fail:
                         with self.assertRaises(RuntimeError):run.run(args)
                     else:run.run(args)
                 self.assertEqual(builds,[('windows_owned_qualification',True)]);self.assertEqual(len(calls),1)
+                if fail:analyzer.assert_not_called()
+                else:analyzer.assert_called_once()
                 result=json.loads((args.evidence/'result.json').read_text())
                 self.assertFalse(result['passed']);self.assertTrue(result['diagnosticOnly']);self.assertEqual(result['scope'],'close-diagnostic');self.assertEqual(result['diagnosticPassed'],not fail)
                 provenance=json.loads((args.evidence/'provenance.json').read_text());self.assertEqual(provenance['scope'],'close-diagnostic');self.assertEqual(provenance['expectedBranch'],'codex-windows-owned-close-diagnostic')
@@ -57,11 +62,14 @@ class Diagnostic(unittest.TestCase):
         globs=[line.strip() for line in workflow.splitlines() if line.strip().startswith('qualification-upload/')]
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);ev=root/'evidence';case=ev/'close/session-0';case.mkdir(parents=True)
+            receipt=b'{"primaryFailure":"Natural window end not observed before Stop","diagnosticOnly":true,"passed":false,"naturalEndObservedBeforeStop":false,"manualStopRequested":true,"finishSucceeded":true,"cleanupSucceeded":true}'
+            (case/'result.json').write_bytes(receipt)
             (case/'source.log').write_bytes(b'');(case/'source-actions.json').write_text('{"records":[]}');(case/'private.log').write_text('never upload')
             hashes=package(ev,root/'absent',root/'qualification-upload')
-            expected={'cases/close/session-0/source.log','cases/close/session-0/source-actions.json'}
+            expected={'cases/close/session-0/source.log','cases/close/session-0/source-actions.json','cases/close/session-0/result.json'}
             self.assertEqual(set(hashes),expected)
             uploaded={p.relative_to(root/'qualification-upload').as_posix() for glob in globs for p in root.glob(glob) if p.is_file()}
+            self.assertEqual((root/'qualification-upload/cases/close/session-0/result.json').read_bytes(),receipt)
             self.assertTrue(expected<=uploaded);self.assertFalse(any('private' in p for p in uploaded))
             (case/'source-actions.json').write_bytes(b' '*4097)
             with self.assertRaises(AssertionError):run.bound(ev)

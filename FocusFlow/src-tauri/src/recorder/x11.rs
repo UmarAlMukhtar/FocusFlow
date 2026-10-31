@@ -142,9 +142,19 @@ pub(super) fn track(stop: Arc<AtomicBool>, clicks: Arc<Mutex<Vec<ClickEvent>>>, 
     }
 }
 
-pub(super) fn source_alive(id: &str, width: u32, height: u32) -> bool {
-    let Ok(id) = parse_id(id) else { return false };
-    with_connection(|c, root| inspect(c,root,id).ok().map(|w| w.width >= width && w.height >= height)).unwrap_or(false)
+pub(super) fn source_alive(id: &str, width: u32, height: u32) -> RecorderResult<bool> {
+    let id = parse_id(id)?;
+    // Admission metadata may change during capture; only drawable availability bounds liveness.
+    with_connection(|c, _| Some((|| {
+        let attr = match c.get_window_attributes(id).map_err(error)?.reply() {
+            Ok(attr) => attr,
+            Err(x11rb::errors::ReplyError::X11Error(reply)) if reply.error_kind == x11rb::protocol::ErrorKind::Window => return Ok(false),
+            Err(reply) => return Err(error(reply)),
+        };
+        if attr.map_state != MapState::VIEWABLE { return Ok(false); }
+        let geometry = c.get_geometry(id).map_err(error)?.reply().map_err(error)?;
+        Ok(u32::from(geometry.width) >= width && u32::from(geometry.height) >= height)
+    })())).unwrap_or_else(||Err(error("X11 source availability could not be queried")))
 }
 
 #[cfg(test)]
@@ -232,7 +242,7 @@ mod native_tests {
             if action == "unmapped" { c.unmap_window(window).unwrap().check().unwrap(); }
             else { c.configure_window(window,&ConfigureWindowAux::new().width(300).height(200)).unwrap().check().unwrap(); }
             c.flush().unwrap();
-            assert!(!source_alive(&w.id,640,480));
+            assert!(!source_alive(&w.id,640,480).unwrap());
             let stop = tauri::async_runtime::block_on(stop_capture_backend(capture, &log));
             assert_reaped(pid);
             let probe = focusflow_core::ffmpeg::probe_video(&ffmpeg,&path).unwrap();
@@ -242,7 +252,7 @@ mod native_tests {
             c.map_window(window).unwrap().check().unwrap(); c.flush().unwrap();
         }
         c.configure_window(window,&ConfigureWindowAux::new().width(300).height(200)).unwrap().check().unwrap(); c.flush().unwrap();
-        assert!(!source_alive(&w.id,640,480));
+        assert!(!source_alive(&w.id,640,480).unwrap());
         c.unmap_window(window).unwrap().check().unwrap(); c.flush().unwrap();
         assert!(inspect(&c,screen.root,window).is_err());
         c.configure_window(window,&ConfigureWindowAux::new().width(640).height(480)).unwrap().check().unwrap();
@@ -253,7 +263,7 @@ mod native_tests {
         let close_pid = capture.pid().unwrap();
         thread::sleep(Duration::from_millis(700));
         c.destroy_window(window).unwrap().check().unwrap(); c.flush().unwrap();
-        assert!(!source_alive(&w.id,640,480));
+        assert!(!source_alive(&w.id,640,480).unwrap());
         // Production stop always waits/reaps, even after the drawable disappears.
         let close_result = tauri::async_runtime::block_on(stop_capture_backend(capture, &log));
         assert_reaped(close_pid);

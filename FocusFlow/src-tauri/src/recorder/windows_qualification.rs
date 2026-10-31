@@ -123,6 +123,85 @@ fn source(dir:&Path,w:u32,h:u32,nonce:u16,animated:bool)->TestResult<()> {
  result?;observed?;if let Some((sequence,value,_,_))=close_ack{fixture_json(&dir.join(format!("source-ack-{sequence}.json")),&value)?;}Ok(())
 }
 fn incomplete(dir:&Path)->TestResult<()>{let m=decode_windows(&fs::read(dir.join("capture.json"))?,dir.file_name().unwrap().to_str().unwrap())?;assert!(matches!(m.state,WindowsCaptureStateV2::Incomplete{..}));assert!(!dir.join("project.json").exists());Ok(())}
+fn close_timeout<T>(
+ wait_elapsed:Duration, mut qpc:impl FnMut()->Option<i64>, finish:impl FnOnce()->Result<T,String>,
+ verify:impl FnOnce()->Result<(),String>, mut write:impl FnMut(&[u8])->std::io::Result<()>,
+)->TestResult<()> {
+ const PRIMARY:&str="Natural window end not observed before Stop";
+ fn detail(error:impl std::fmt::Display)->String{error.to_string().chars().take(128).collect()}
+ let mut save=|value:&serde_json::Value|->Result<(),String>{
+  let bytes=serde_json::to_vec(value).map_err(detail)?;
+  if bytes.len()>4096{return Err("Close-timeout observation exceeds 4 KiB".into());}
+  write(&bytes).map_err(detail)
+ };
+ let mut receipt=serde_json::json!({"primaryFailure":PRIMARY,"diagnosticOnly":true,"passed":false,"naturalEndObservedBeforeStop":false,"waitElapsedMs":wait_elapsed.as_millis(),"timeoutQpc":qpc()});
+ // This records a request to finish, not delivery or acknowledgement of byte 3.
+ receipt["manualStopRequested"]=true.into();receipt["manualStopRequestQpc"]=qpc().into();
+ let preliminary=save(&receipt).err();
+ let start=Instant::now();let finished=finish().map(drop);let elapsed=start.elapsed();
+ let cleanup=verify();
+ receipt["finishSucceeded"]=finished.is_ok().into();receipt["finishMs"]=serde_json::json!(elapsed.as_millis());
+ receipt["finishError"]=finished.as_ref().err().map(detail).into();receipt["cleanupSucceeded"]=cleanup.is_ok().into();
+ receipt["cleanupError"]=cleanup.as_ref().err().map(detail).into();receipt["preliminaryReceiptError"]=preliminary.clone().into();
+ let final_write=save(&receipt).err();
+ let mut failure=PRIMARY.to_owned();
+ for (stage,error) in [("finish",finished.err()),("cleanup",cleanup.err()),("preliminary receipt",preliminary),("final receipt",final_write)]{
+  if let Some(error)=error{failure.push_str(&format!("; {stage}: {}",detail(error)));}
+ }
+ Err(failure.into())
+}
+#[cfg(test)]
+mod close_timeout_tests {
+ use super::*;
+ use std::cell::{Cell,RefCell};
+ const PRIMARY:&str="Natural window end not observed before Stop";
+ struct Unpublished<'a>(&'a Cell<bool>);
+ impl Drop for Unpublished<'_>{fn drop(&mut self){self.0.set(true);}}
+ #[test]
+ fn close_timeout_recovers_without_publishing_or_passing_natural_end(){
+  let dropped=Cell::new(false);let calls=RefCell::new(Vec::new());let writes=RefCell::new(Vec::new());let clock=Cell::new(100);
+  let result=close_timeout(Duration::from_millis(8003),||{let n=clock.get();clock.set(n+1);Some(n)},
+   ||{calls.borrow_mut().push("finish");Ok(Unpublished(&dropped))},
+   ||{assert!(dropped.get());calls.borrow_mut().push("verify");Ok(())},
+   |bytes|{calls.borrow_mut().push("write");writes.borrow_mut().push(bytes.to_vec());Ok(())});
+  assert_eq!(result.unwrap_err().to_string(),PRIMARY);
+  assert_eq!(*calls.borrow(),["write","finish","verify","write"]);
+  let receipts:Vec<serde_json::Value>=writes.borrow().iter().map(|b|serde_json::from_slice(b).unwrap()).collect();
+  assert_eq!(receipts.len(),2);let first=&receipts[0];let last=&receipts[1];
+  assert_eq!(first["primaryFailure"],PRIMARY);assert_eq!(first["diagnosticOnly"],true);assert_eq!(first["passed"],false);
+  assert_eq!(first["naturalEndObservedBeforeStop"],false);assert_eq!(first["waitElapsedMs"],8003);
+  assert_eq!(first["timeoutQpc"],100);assert_eq!(first["manualStopRequestQpc"],101);assert_eq!(first["manualStopRequested"],true);
+  assert!(first.get("finishSucceeded").is_none());assert_eq!(last["finishSucceeded"],true);assert_eq!(last["cleanupSucceeded"],true);
+  assert!(last["finishMs"].is_number());assert_eq!(last["primaryFailure"],PRIMARY);assert_eq!(last["passed"],false);
+ }
+ #[test]
+ fn close_timeout_always_checks_owned_cleanup_despite_finish_or_receipt_errors(){
+  for (finish_fails,cleanup_fails,initial_write_fails,final_write_fails) in [(true,false,false,false),(false,true,false,false),(false,false,true,false),(false,false,false,true),(true,true,true,true)]{
+   let calls=RefCell::new(Vec::new());let writes=RefCell::new(Vec::new());let count=Cell::new(0);
+   let result=close_timeout(Duration::from_secs(8),||None,
+    ||{calls.borrow_mut().push("finish");if finish_fails{Err("finish failed".into())}else{Ok(())}},
+    ||{calls.borrow_mut().push("verify");if cleanup_fails{Err("cleanup failed".into())}else{Ok(())}},
+    |bytes|{calls.borrow_mut().push("write");let n=count.get();count.set(n+1);writes.borrow_mut().push(bytes.to_vec());if (n==0&&initial_write_fails)||(n==1&&final_write_fails){Err(std::io::Error::other("receipt failed"))}else{Ok(())}});
+   let error=result.unwrap_err().to_string();assert!(error.starts_with(PRIMARY));
+   assert_eq!(*calls.borrow(),["write","finish","verify","write"]);
+   let receipts:Vec<serde_json::Value>=writes.borrow().iter().map(|b|serde_json::from_slice(b).unwrap()).collect();let last=&receipts[1];
+   assert_eq!(last["finishSucceeded"],!finish_fails);assert_eq!(last["cleanupSucceeded"],!cleanup_fails);assert!(last["timeoutQpc"].is_null());assert!(last["manualStopRequestQpc"].is_null());
+   if finish_fails{assert_eq!(last["finishError"],"finish failed");assert!(error.contains("finish failed"));}
+   if cleanup_fails{assert_eq!(last["cleanupError"],"cleanup failed");assert!(error.contains("cleanup failed"));}
+   if initial_write_fails{assert!(last["preliminaryReceiptError"].as_str().unwrap().contains("receipt failed"));assert!(error.contains("receipt failed"));}
+   if final_write_fails{assert!(error.contains("receipt failed"));}
+   assert_eq!(last["naturalEndObservedBeforeStop"],false);assert_eq!(last["passed"],false);
+  }
+ }
+ #[test]
+ fn close_timeout_bounds_adversarial_secondary_errors(){
+  for text in ["\u{1}".repeat(10000),"🙂".repeat(10000)]{
+   let writes=RefCell::new(Vec::new());let result=close_timeout(Duration::from_secs(8),||None,||Err::<(),_>(text.clone()),||Err(text.clone()),|bytes|{assert!(bytes.len()<=4096);writes.borrow_mut().push(bytes.to_vec());Err(std::io::Error::other(text.clone()))});
+   let error=result.unwrap_err().to_string();assert!(error.starts_with(PRIMARY));assert!(error.len()<4096);assert_eq!(writes.borrow().len(),2);
+   for bytes in writes.borrow().iter(){let receipt:serde_json::Value=serde_json::from_slice(bytes).unwrap();assert_eq!(receipt["passed"],false);}
+  }
+ }
+}
 fn case(root:&Path,id:&str,mode:&str,w:u32,h:u32,nonce:u16,ffmpeg:&Path,worker:&Path,state:&RecorderState)->TestResult<()>{
  let dir=root.join(id);fs::create_dir(&dir)?;let dir=dir.canonicalize()?;
  if mode=="parent-death"{fs::write(dir.join("parent-death"),b"generated isolation only")?;}
@@ -148,7 +227,10 @@ fn case(root:&Path,id:&str,mode:&str,w:u32,h:u32,nonce:u16,ffmpeg:&Path,worker:&
  }else{thread::sleep(Duration::from_millis(1200));}
  if mode=="close"{window.close()?;}
  if mode=="resize"{window.resize()?;}
- if mode=="close"||mode=="resize"{let end=Instant::now()+Duration::from_secs(8);while !session.ended()?{if Instant::now()>=end{return Err("Natural window end not observed before Stop".into());}thread::sleep(Duration::from_millis(5));}}
+ if mode=="close"||mode=="resize"{let wait=Instant::now();let end=wait+Duration::from_secs(8);while !session.ended()?{if Instant::now()>=end{
+  if mode=="close"{return close_timeout(wait.elapsed(),observation_qpc,||session.finish().map_err(|e|e.to_string()),||owned.verify(&dir).map_err(|e|e.to_string()),|bytes|fs::write(dir.join("result.json"),bytes));}
+  return Err("Natural window end not observed before Stop".into());
+ }thread::sleep(Duration::from_millis(5));}}
  if ["transfer-shutdown","stop-shutdown","close-stop"].contains(&mode){
   let started_at=Instant::now();
   // No input thread: lifecycle fixture supplies empty, untrusted interaction buffers.

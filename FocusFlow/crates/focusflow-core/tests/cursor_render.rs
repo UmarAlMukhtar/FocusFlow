@@ -125,3 +125,51 @@ fn follow_without_overlay_centers_generated_markers_across_windows_and_seeks() {
  let raw=run("ffmpeg",&["-v","error","-i",dir.join(j.output_relative_path.unwrap()).to_str().unwrap(),"-f","rawvideo","-pix_fmt","rgb24","-"]);assert_eq!(raw.len(),5*15000);for k in 0..5 {assert!(raw[k*15000+(25*100+50)*3+if k<2{0}else{2}]>180);}
  for(p,b)in before {assert_eq!(fs::read(dir.join(p)).unwrap(),b);}
 }
+
+// Changing cursor visibility must never change source conversion or camera resampling.
+#[test]
+fn production_cursor_pixels_only_change_inside_resampled_glyph() {
+ let temp=common::TestDir::new();let dir=temp.path().join("fixture");fs::create_dir(&dir).unwrap();common::write_legacy(&dir);
+ let mut ppm=b"P6\n192 128\n255\n".to_vec();
+ for y in 0..128 {for x in 0..192 {ppm.extend([[255,12,28],[8,238,47],[24,41,255],[248,215,11]][(x/3+y/5)%4]);}}
+ fs::write(dir.join("edges.ppm"),ppm).unwrap();
+ run("ffmpeg",&["-v","error","-y","-loop","1","-i",dir.join("edges.ppm").to_str().unwrap(),"-t","1","-r","30","-c:v","libx264","-crf","0","-pix_fmt","yuv420p",dir.join("screen.mp4").to_str().unwrap()]);
+ let mut doc=common::fixture_project();doc.schema_version=4;doc.video.width=192;doc.video.height=128;doc.video.duration_us=1_000_000;doc.video.cursor=CursorMode::Separate;
+ doc.cursor=Some(CursorAsset{index_path:"index.json".into()});doc.clips=vec![Clip{id:"clip-0".into(),in_us:0,out_us:1_000_000}];
+ fs::write(dir.join("index.json"),serde_json::json!({"schemaVersion":1,"width":192,"height":128,"durationUs":1_000_000,"samplesPath":"samples.ndjson","shapes":[{"id":"native","path":"native.pam","width":8,"height":8,"hotspotX":4,"hotspotY":4}]}).to_string()).unwrap();
+ fs::write(dir.join("samples.ndjson"),(0..10).map(|i|serde_json::json!({"atUs":i*100_000,"x":0.0,"y":0.5,"visible":true,"shapeId":"native","discontinuity":false}).to_string()+"\n").collect::<String>()).unwrap();
+ let manager=JobManager::new(temp.path(),Path::new("ffmpeg")).unwrap();
+ for transparent in [false,true] {
+  let mut pam=b"P7\nWIDTH 8\nHEIGHT 8\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n".to_vec();
+  for y in 0..8 {for x in 0..8 {pam.extend([247,29,173,if transparent{0}else if x==0||y==0||x==7||y==7{128}else{255}]);}}
+  fs::write(dir.join("native.pam"),pam).unwrap();
+  let assets=["screen.mp4","index.json","samples.ndjson","native.pam"].map(|name|(name,fs::read(dir.join(name)).unwrap()));
+  for mode in [Some(ZoomMode::Follow),Some(ZoomMode::Fixed),None] {for click in [false,true] {for styled in [false,true] {
+   doc.zooms=mode.map(|mode|ZoomElement{mode,id:"zoom".into(),clip_id:"clip-0".into(),start_us:0,end_us:1_000_000,x:0.0,y:0.5,scale:2.0,intro_us:0,hold_us:0,outro_us:0}).into_iter().collect();
+   doc.clicks=if click{vec![Click{at_us:300_000,x:0.25,y:0.5}]}else{vec![]};
+   doc.frame_style=Default::default();if styled{doc.frame_style.padding_px=4;doc.frame_style.corner_radius_px=4;doc.frame_style.shadow=true;doc.frame_style.background=FrameBackground::Solid{color:"#123456".into()};}
+   let mut results=Vec::new();let mut cameras=Vec::new();
+   for enabled in [false,true] {
+    doc.cursor_settings.enabled=enabled;fs::write(dir.join("project.json"),serde_json::to_vec(&doc).unwrap()).unwrap();
+    let mut snapshot=RenderSnapshot{project_dir:dir.clone(),document:doc.clone(),prepared_focus:None,prepared_cursor:None};let plan=render::compile(&doc,ExportPreset::Balanced).unwrap();snapshot.prepare_cursor(&std::sync::atomic::AtomicBool::new(false)).unwrap();snapshot.prepare_focus(&plan,&||Ok(false)).unwrap();
+    if mode==Some(ZoomMode::Follow){cameras.push(render::cursor_window::next(&snapshot,&plan,12,13,&std::sync::atomic::AtomicBool::new(false)).unwrap().camera);}
+    let job=manager.start_preview("fixture",0,PreviewRequest::Still{at_us:400_000}).unwrap();let job=manager.wait("fixture",&job.job_id).unwrap();assert_eq!(job.state,JobState::Completed,"{:?}",job.error);
+    let metadata=job.output_metadata.as_ref().unwrap();assert_eq!((metadata.width,metadata.height,metadata.first_frame,metadata.frame_count,metadata.fps),(192,128,12,1,30));
+    let output=dir.join(job.output_relative_path.unwrap());let graph=fs::read_to_string(output.parent().unwrap().join("render.filter_complex.txt")).unwrap();
+    if !enabled{assert!(!graph.contains("[1:v]"));assert!(!graph.contains("cursor_tile"));}
+    results.push(run("ffmpeg",&["-v","error","-i",output.to_str().unwrap(),"-f","rawvideo","-pix_fmt","rgb24","-"]));
+   }
+   if !cameras.is_empty(){assert_eq!(cameras[0],cameras[1],"drawing must not alter Follow camera");}
+   assert_eq!(results[0].len(),192*128*3);assert_eq!(results[0].len(),results[1].len());
+   let mut inside=0;let mut outside=0;
+   for (i,(off,on)) in results[0].chunks_exact(3).zip(results[1].chunks_exact(3)).enumerate(){if off!=on {
+    // The clipped 8px glyph, 2x camera, bicubic scales, styled fit and final chroma kernel all fit this fixed bound.
+    if !transparent && i%192<32 && (40..88).contains(&(i/192)){inside+=1;}else{outside+=1;}
+   }}
+   assert_eq!(outside,0,"mode={mode:?} click={click} styled={styled} transparent={transparent}: nonlocal RGB differences");
+   if !transparent{assert!(inside>0,"native cursor must remain visible");}
+   eprintln!("pixel invariant: mode={mode:?} click={click} styled={styled} transparent={transparent}, glyph changes={inside}, exterior changes={outside}");
+  }}}
+  for (name,bytes) in assets{assert_eq!(fs::read(dir.join(name)).unwrap(),bytes,"render mutated {name}");}
+ }
+}

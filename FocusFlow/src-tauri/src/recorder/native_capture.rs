@@ -37,6 +37,10 @@ impl Session {
         Ok(())
     }
 
+    pub(super) fn note_source_end(&mut self, reason: &'static str) {
+        self.manifest.diagnostic.get_or_insert_with(|| CaptureDiagnosticV1 {stage:DiagnosticStage::Cursor,message:reason.into()});
+    }
+
     pub(super) fn request_stop(&self) {if let Some(sampler)=&self.sampler {sampler.request_stop();}}
     pub(super) fn join(&mut self) {if let Some(sampler)=self.sampler.take() {self.outcome=Some(sampler.finish());}}
     pub(super) fn publish(mut self, dir:&Path, saved:&ProbedVideoEvidence,
@@ -90,8 +94,16 @@ fn complete_snapshot(manifest:&mut CaptureManifestV1,defaults:LegacyDefaults,sav
     let separate=mode==CursorMode::Separate;
     let mut warnings=vec![ProjectWarning::LegacyTimingUnknown];
     warnings.extend(converted.warnings);
-    if diagnostic.is_some() {warnings.push(ProjectWarning::CursorCaptureIncomplete);}
-    manifest.diagnostic=diagnostic.map(|message|CaptureDiagnosticV1 {stage:if clock.is_some(){DiagnosticStage::Cursor}else{DiagnosticStage::Clock},message:message.into()});
+    if let Some(message) = diagnostic {
+        let source_end = manifest.diagnostic.take();
+        manifest.diagnostic = Some(CaptureDiagnosticV1 {
+            stage:if clock.is_some(){DiagnosticStage::Cursor}else{DiagnosticStage::Clock},
+            message:source_end.map_or_else(||message.into(), |notice|format!("{message}. {}",notice.message)),
+        });
+    }
+    // A source-end notice disables initial drawing as a precaution; the retained cursor quality is unchanged.
+    let drawing_disabled = manifest.diagnostic.is_some();
+    if drawing_disabled {warnings.push(ProjectWarning::CursorCaptureIncomplete);}
     let endpoint=saved.endpoint;
     manifest.state=CaptureStateV1::Finalized {
         video_timing:VideoTimingV1 {
@@ -105,7 +117,7 @@ fn complete_snapshot(manifest:&mut CaptureManifestV1,defaults:LegacyDefaults,sav
         initial_project:ProjectDocument {
             schema_version:3,revision:0,project_id:manifest.capture_id.clone(),frame_style:Default::default(),
             video:VideoAsset {path:"screen.mp4".into(),width:saved.video.width,height:saved.video.height,duration_us:saved.video.duration_us,cursor:mode},
-            cursor:separate.then_some(CursorAsset {index_path:"cursor/index.json".into()}),cursor_settings:CursorSettings {enabled:separate&&diagnostic.is_none(),..Default::default()},
+            cursor:separate.then_some(CursorAsset {index_path:"cursor/index.json".into()}),cursor_settings:CursorSettings {enabled:separate&&!drawing_disabled,..Default::default()},
             microphone:has_mic.then_some(AudioAsset {path:"mic.wav".into()}),timing:Timing {provenance:TimingProvenance::LegacyUnknown,audio_offset_us:None},
             camera:CameraDefaults {pan_transition_us:defaults.pan_transition_us,settle_us:defaults.settle_us},
             clips:vec![Clip {id:"clip-0".into(),in_us:0,out_us:saved.video.duration_us}],zooms:converted.zooms,clicks:converted.clicks,warnings,
