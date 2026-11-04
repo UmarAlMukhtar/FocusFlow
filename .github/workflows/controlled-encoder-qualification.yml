@@ -96,6 +96,8 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
           path: |
+            encoder-cache/acquisition.json
+            encoder-cache/acquisition-failure.json
             encoder-setup/*.txt
             encoder-setup/*.json
             encoder-setup/host-install.log

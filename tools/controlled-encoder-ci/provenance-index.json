@@ -3,9 +3,9 @@
   "receipts": [
     {
       "file": "source-rpm-acquisition.json",
-      "source": "target/windows-encoder-source-bundle-20261031/receipts/acquisition.json",
-      "original_sha256": "1362bb3d046426992e087fe204b49d7dd001b72a512fdcbe80f43f1ae84473bc",
-      "derived_sha256": "3de9918818f518376d8fe010162d2711b1765fd3409336253fbd970f076beadc"
+      "source": "target/windows-encoder-source-bundle-20261031-fix1/receipts/acquisition.json",
+      "original_sha256": "e733bb947e4276a1e2b7c08ae9b1b117799f7f25f53bf020359d99afb897f511",
+      "derived_sha256": "e2695ba27ac0c6c573a77d9f378921ad268588d09922511d5a1cd11f9ac3edce"
     },
     {
       "file": "feature-assertions.json",

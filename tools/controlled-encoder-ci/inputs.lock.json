@@ -137,7 +137,7 @@
       "sha256": "3eafd5123217d319ea5883f4fabad7951e45f39c415a67605821f426030683d1",
       "bytes": 10727035,
       "url": "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Everything/source/tree/Packages/m/mingw-winpthreads-13.0.0-3.fc44.src.rpm",
-      "receipt": "source-bundle/receipts/acquisition.json"
+      "receipt": "source-bundle-fix1/receipts/acquisition.json"
     },
     {
       "kind": "source-rpm",
@@ -145,7 +145,7 @@
       "sha256": "0c52a5c6bcb1b0dca7ce03341f03612dfe8be36eb66a818c707571133f4ccceb",
       "bytes": 10834297,
       "url": "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Everything/source/tree/Packages/m/mingw-crt-13.0.0-3.fc44.src.rpm",
-      "receipt": "source-bundle/receipts/acquisition.json"
+      "receipt": "source-bundle-fix1/receipts/acquisition.json"
     },
     {
       "kind": "source-rpm",
@@ -153,7 +153,7 @@
       "sha256": "71a1e0a20d1b304c003c46348f1da8d39a63168bf3e27153f5eab304c117aaca",
       "bytes": 10738260,
       "url": "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Everything/source/tree/Packages/m/mingw-headers-13.0.0-3.fc44.src.rpm",
-      "receipt": "source-bundle/receipts/acquisition.json"
+      "receipt": "source-bundle-fix1/receipts/acquisition.json"
     },
     {
       "kind": "source-rpm",
@@ -161,15 +161,15 @@
       "sha256": "7122e1b15d3691edd7e15f01de3cd8750a752a1bd8b6eca79428f4d60f8d3882",
       "bytes": 93889339,
       "url": "https://kojipkgs.fedoraproject.org/packages/mingw-gcc/16.2.1/1.fc44/data/signed/6d9f90a6/src/mingw-gcc-16.2.1-1.fc44.src.rpm",
-      "receipt": "source-bundle/receipts/acquisition.json"
+      "receipt": "source-bundle-fix1/receipts/acquisition.json"
     },
     {
       "kind": "source-rpm",
       "name": "mingw-filesystem-152-1.fc44.src.rpm",
       "sha256": "d23fc556540b42f027af86ccf2b2d80edb146e6ee9818474dd4f015c98783ea4",
-      "bytes": 91490,
+      "bytes": 97250,
       "url": "https://kojipkgs.fedoraproject.org/packages/mingw-filesystem/152/1.fc44/data/signed/6d9f90a6/src/mingw-filesystem-152-1.fc44.src.rpm",
-      "receipt": "source-bundle/receipts/acquisition.json"
+      "receipt": "source-bundle-fix1/receipts/acquisition.json"
     },
     {
       "kind": "source-rpm",
@@ -177,7 +177,7 @@
       "sha256": "303cca49a3ca09a5cebae9c7ce05ffe7fff7d6bf7ccecc9b98e16eef4c49988b",
       "bytes": 28629295,
       "url": "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Everything/source/tree/Packages/m/mingw-binutils-2.46.0-1.fc44.src.rpm",
-      "receipt": "source-bundle/receipts/acquisition.json"
+      "receipt": "source-bundle-fix1/receipts/acquisition.json"
     },
     {
       "kind": "signature",

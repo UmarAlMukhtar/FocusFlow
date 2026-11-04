@@ -52,7 +52,7 @@ this CI input artifact is not a repack of the older full source bundle.
 
 ## Flow and artifact boundaries
 
-1. Ubuntu runs six offline controls and checks pinned metadata.
+1. Ubuntu runs eight offline controls and checks pinned metadata.
 2. The pinned disposable Fedora44 container installs/records official host
    helpers, downloads exact inputs, validates hashes/signatures, and extracts
    target RPM payloads into a new owned root without running RPM scriptlets.
@@ -103,5 +103,7 @@ python encoder-handoff/recipe/windows-smoke.py --candidate encoder-handoff/candi
 Preparation has not executed the container, DNF, download routes, extraction,
 rebuild, static inspector against a rebuilt PE, or Windows smoke. Those remain
 first-run compatibility/runtime checks, including normal-policy zlib signature
-acceptance. No command-only smoke success can qualify hardware recording,
+acceptance. On acquisition failure, the error names the file, received count and exact byte limit; the explicit acquisition-failure.json receipt and completed acquisition.json are uploaded by the failure path. The signed source RPM byte/hash/URL identities are checked against FIX1 final receipts before network work.
+
+No command-only smoke success can qualify hardware recording,
 installed product behavior or distribution/legal closure.

@@ -9,8 +9,20 @@ import subprocess
 BASE = pathlib.Path(__file__).resolve().parent
 
 
+def validate_source_receipts(lock, receipts):
+    rows = {row['name']:row for row in lock['files']}
+    for package in receipts['packages']:
+        signed = package['final']
+        name = signed['source_rpm']
+        row = rows[name]
+        for field in ['bytes', 'sha256', 'url']:
+            if row[field] != signed[field]:
+                raise ValueError(f"Signed source receipt mismatch: {name} {field}: lock={row[field]} signed={signed[field]}")
+
+
 def validate(platform=False):
     lock = json.loads((BASE / 'inputs.lock.json').read_text())
+    validate_source_receipts(lock, json.loads((BASE / 'provenance/source-rpm-acquisition.json').read_text()))
     names = []
     for row in lock['files']:
         if pathlib.PurePosixPath(row['name']).name != row['name'] or not re.fullmatch('[0-9a-f]{64}', row['sha256']):
