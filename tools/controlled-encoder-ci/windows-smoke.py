@@ -86,7 +86,7 @@ run('missing-explicit-video-fallback',[*base,*inp(s/'cursor-video.mp4'),'-map','
 argv=[str(binary),'-v','error','-re','-f','lavfi','-i','color=size=160x90:rate=30','-c:v','libx264','-f','null','-'];p=subprocess.Popen(argv,stdout=subprocess.PIPE,stderr=subprocess.PIPE);time.sleep(.25);assert p.poll() is None;p.kill();stdout,stderr=p.communicate(timeout=2);assert p.returncode!=0
 records.append({'name':'cancellation-kill-reap','argv':argv,'exit':p.returncode});(s/'commands.json').write_text(json.dumps(records,indent=2)+'\n')
 # Assert fixture outputs, exact executable identity, and retained results.
-outputs=[{'path':str(p.relative_to(c)),'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(s.iterdir()) if p.is_file()]
+outputs=[{'path':p.relative_to(c).as_posix(),'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(s.iterdir()) if p.is_file()]
 (s/'output-manifest.json').write_text(json.dumps(outputs,indent=2)+'\n')
 (s/'result.json').write_text(json.dumps({'status':'IN_PROGRESS','candidate_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'commands':len(records),'scope':'focused direct command/filter profiles derived from current consumers; no full product/native/MCP integration; WAV fallback explicitly exercised rather than attributed to app'},indent=2)+'\n')
 
@@ -99,7 +99,7 @@ center=raw[(40*160+40)*3:(40*160+40)*3+3];corner=raw[-3:];assert center[0]>150 a
 (s/'silence.filter_complex.txt').write_text('anullsrc=r=48000:cl=1c,atrim=end_sample=48000,asetpts=PTS-STARTPTS[a]')
 run('preview-silence-audio',[*base,*inp(s/'cursor-video.mp4'),'-filter_complex_script',s/'silence.filter_complex.txt','-map','0:v','-map','[a]','-c:v','copy','-c:a','aac','-b:a','128k',s/'preview-silence.mp4']);assert probe('preview-silence-independent',s/'preview-silence.mp4')['streams'][1]['codec_name']=='aac'
 r=json.loads((s/'result.json').read_text());r['commands']=len(records);(s/'result.json').write_text(json.dumps(r,indent=2)+'\n');print('Independent decoded frame/pixel and preview silence assertions completed')
-(s/'output-manifest.json').write_text(json.dumps([{'path':str(p.relative_to(c)),'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(s.iterdir()) if p.is_file() and p.name!='output-manifest.json'],indent=2)+'\n')
+(s/'output-manifest.json').write_text(json.dumps([{'path':p.relative_to(c).as_posix(),'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(s.iterdir()) if p.is_file() and p.name!='output-manifest.json'],indent=2)+'\n')
 
 # Exact bounded first-packet command and preservation of unexpected audio in all-stream CFR probes.
 first=run('exact-first-packet',['-v','error','-copyts',*inp(source),'-frames:v','1','-map','0:v:0','-an','-c:v','copy','-f','framehash','-hash','adler32','pipe:1']).decode()
@@ -107,7 +107,7 @@ rows=[r for r in first.splitlines() if r and not r.startswith('#')];assert len(r
 allstreams=run('all-stream-audio-visible',['-v','error','-copyts',*inp(s/'audio-s16-2400.mp4'),'-map','0','-c','copy','-f','framehash','-hash','adler32','pipe:1']).decode()
 assert '#media_type 0: video' in allstreams and '#media_type 1: audio' in allstreams and any(r.startswith('1,') for r in allstreams.splitlines())
 r=json.loads((s/'result.json').read_text());r['commands']=len(records);(s/'result.json').write_text(json.dumps(r,indent=2)+'\n');print('Exact bounded first-packet and all-stream audio visibility completed')
-(s/'output-manifest.json').write_text(json.dumps([{'path':str(p.relative_to(c)),'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(s.iterdir()) if p.is_file() and p.name!='output-manifest.json'],indent=2)+'\n')
+(s/'output-manifest.json').write_text(json.dumps([{'path':p.relative_to(c).as_posix(),'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(s.iterdir()) if p.is_file() and p.name!='output-manifest.json'],indent=2)+'\n')
 # Evidence metadata must describe the finalized result and every current smoke output.
 manifest=json.loads((s/'output-manifest.json').read_text())
 assert any(e['path']=='smoke/result.json' for e in manifest)
@@ -119,5 +119,5 @@ assert json.loads((s/'result.json').read_text())['commands']==len(records)
 r=json.loads((s/'result.json').read_text())
 r.update(status='PASS',commands=len(records),native_candidate_executed=True,scope='bounded generated candidate command/filter consumer profiles with independent decode/probe; explicit WAV fallback is a harness model; no Rust/Tauri/desktop capture/microphone/installer integration')
 (s/'result.json').write_text(json.dumps(r,indent=2)+'\n')
-(s/'output-manifest.json').write_text(json.dumps([{'path':str(p.relative_to(c)),'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(s.iterdir()) if p.is_file() and p.name!='output-manifest.json'],indent=2)+'\n')
+(s/'output-manifest.json').write_text(json.dumps([{'path':p.relative_to(c).as_posix(),'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(s.iterdir()) if p.is_file() and p.name!='output-manifest.json'],indent=2)+'\n')
 print((s/'result.json').read_text())

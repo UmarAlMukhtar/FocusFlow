@@ -1,10 +1,12 @@
 import importlib.util
+import ast
 import io
 import json
 import pathlib
 import tempfile
 import tarfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import prepare
@@ -115,6 +117,46 @@ class PreparationControls(unittest.TestCase):
         self.assertIn('Candidate must be distinct', smoke)
         self.assertIn("exe=args.ffmpeg_reference", smoke)
         self.assertNotIn("'libx264'", '\n'.join(line for line in smoke.splitlines() if 'exe=args.ffmpeg_reference' in line))
+
+    def test_windows_smoke_manifests_roundtrip_through_final_checks(self):
+        # Execute the real writers/checker without running the script's native encoder commands.
+        script = ast.parse((prepare.BASE / 'windows-smoke.py').read_text())
+        writers = [node for node in ast.walk(script) if isinstance(node, ast.ListComp)
+                   and isinstance(node.elt, ast.Dict) and any(isinstance(key, ast.Constant)
+                   and key.value == 'path' for key in node.elt.keys)]
+        start = next(i for i, node in enumerate(script.body) if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == 'manifest' for target in node.targets))
+        checker = compile(ast.Module(body=script.body[start:start + 4], type_ignores=[]), 'smoke-final-checker', 'exec')
+
+        class WindowsFile:
+            def __init__(self, real): self.real, self.name = real, real.name
+            def __lt__(self, other): return self.name < other.name
+            def relative_to(self, root): return (pathlib.PureWindowsPath('C:/evidence/smoke') / self.name).relative_to(root)
+            def is_file(self): return self.real.is_file()
+            def stat(self): return self.real.stat()
+            def read_bytes(self): return self.real.read_bytes()
+
+        self.assertEqual(len(writers), 4)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp); smoke = root / 'smoke'; smoke.mkdir()
+            result = smoke / 'result.json'; result.write_text('{"commands":1}')
+            payload = smoke / 'payload ü.txt'; payload.write_bytes(b'abc')
+            output = smoke / 'output-manifest.json'
+            for writer in writers:
+                with self.subTest(writer_line=writer.lineno):
+                    output.unlink(missing_ok=True)
+                    entries = eval(compile(ast.Expression(writer), 'smoke-writer', 'eval'), {
+                        'c': pathlib.PureWindowsPath('C:/evidence'), 'hashlib': hashlib,
+                        's': SimpleNamespace(iterdir=lambda: [WindowsFile(p) for p in smoke.iterdir()])})
+                    self.assertEqual(sorted(entry['path'] for entry in entries),
+                                     ['smoke/payload ü.txt', 'smoke/result.json'])
+                    output.write_text(json.dumps(entries))
+                    context = {'c': root, 's': smoke, 'json': json, 'hashlib': hashlib, 'records': ['fixture']}
+                    exec(checker, context)
+                    payload.write_bytes(b'abd')
+                    with self.assertRaises(AssertionError): exec(checker, context)
+                    payload.write_bytes(b'abc')
+                    with self.assertRaises(AssertionError): exec(checker, {**context, 'records': []})
 
 
 if __name__ == '__main__':
