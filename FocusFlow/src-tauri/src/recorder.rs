@@ -13,7 +13,6 @@ mod x11;
 #[cfg(target_os = "linux")]
 mod native_capture;
 use crate::audio_recorder::AudioRecorder;
-use hound::WavReader;
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsStr,
@@ -75,7 +74,6 @@ const TIMELINE_MERGE_WINDOW_SECONDS: f64 = 0.3;
 const TARGET_FPS: u32 = 30;
 const STOP_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_CAPTURED_LOG_BYTES: usize = 96 * 1024;
-const WAV_HEADER_SIZE_BYTES: u64 = 44;
 
 pub type RecorderResult<T> = Result<T, RecorderError>;
 
@@ -1085,7 +1083,8 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
     // ── Stop microphone recording ─────────────────────────────────────────
     //
     // Join the already-stopping microphone owner. Audio failure is non-fatal.
-    let has_mic_audio = stop_audio_recorder(audio_recorder, &output_path);
+    let mic_result = stop_audio_recorder(audio_recorder, &output_path);
+    let has_mic_audio = matches!(mic_result, Ok(true));
     // ── End microphone stop ───────────────────────────────────────────────
 
     if let Err(error)=&capture_stop {
@@ -1110,6 +1109,10 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
         Some(tauri::async_runtime::spawn_blocking(move || focusflow_core::ffmpeg::probe_cfr_grid(&executable,&path,count,&AtomicBool::new(false),Instant::now()+Duration::from_secs(600)))
             .await.map_err(windows_capture::recovery)?.map_err(windows_capture::recovery)?)
     } else {None};
+    let notice = match mic_result {
+        Err(error) => Some(format!("{}Microphone audio was not saved: {error}. Any partial microphone recording was retained for recovery.", notice.map(|message| format!("{message} ")).unwrap_or_default())),
+        Ok(_) => notice,
+    };
     let probe = if windows_completion {
         #[cfg(windows)]
         { Ok(Ok(grid.as_ref().ok_or_else(||windows_capture::recovery("Saved grid missing"))?.video)) }
@@ -1266,9 +1269,9 @@ fn persist_clock_interactions(output_path:&Path, evidence:Option<&mut video_cloc
 
 }
 
-fn stop_audio_recorder(audio_recorder: Option<AudioRecorder>, output_path: &Path) -> bool {
+fn stop_audio_recorder(audio_recorder: Option<AudioRecorder>, output_path: &Path) -> Result<bool, String> {
     let Some(recorder) = audio_recorder else {
-        return false;
+        return Ok(false);
     };
 
     println!("[FocusFlow audio] Stopped microphone recording");
@@ -1280,7 +1283,7 @@ fn stop_audio_recorder(audio_recorder: Option<AudioRecorder>, output_path: &Path
         Some(parent) => parent.join(MIC_AUDIO_FILE_NAME),
         None => {
             eprintln!("[FocusFlow audio] Could not resolve session folder to check mic.wav");
-            return false;
+            return Err("Could not resolve the session folder to check mic.wav".into());
         }
     };
 
@@ -1289,10 +1292,10 @@ fn stop_audio_recorder(audio_recorder: Option<AudioRecorder>, output_path: &Path
             "[FocusFlow audio] Failed to stop/finalize mic recording: {}",
             error
         );
-        return false;
+        return Err(error.to_string());
     }
 
-    if is_usable_mic_wav(&mic_path) {
+    if focusflow_core::audio::is_usable_wav(&mic_path) {
         if let Ok(metadata) = fs::metadata(&mic_path) {
             println!("[FocusFlow audio] mic.wav size: {}", metadata.len());
         }
@@ -1300,31 +1303,16 @@ fn stop_audio_recorder(audio_recorder: Option<AudioRecorder>, output_path: &Path
             "[FocusFlow audio] mic.wav is usable: {}",
             mic_path.display()
         );
-        true
+        Ok(true)
     } else {
         eprintln!(
             "[FocusFlow audio] mic.wav is missing, empty, header-only, or unreadable: {}",
             mic_path.display()
         );
-        false
+        Err("mic.wav is missing, empty, or unreadable".into())
     }
 }
 
-fn is_usable_mic_wav(path: &Path) -> bool {
-    let Ok(metadata) = fs::metadata(path) else {
-        return false;
-    };
-
-    if metadata.len() <= WAV_HEADER_SIZE_BYTES {
-        return false;
-    }
-
-    let Ok(reader) = WavReader::open(path) else {
-        return false;
-    };
-
-    reader.duration() > 0
-}
 
 #[derive(Debug)]
 enum CaptureCompletion {

@@ -56,7 +56,10 @@ fn copied_shape(cursor:HCURSOR,dir:&Path,index:usize,fail_stage:u8)->TestResult<
  if info.0.fIcon.as_bool()||info.0.hbmMask.is_invalid(){return Err("Not a cursor or missing mask".into());}let hotspot=[info.0.xHotspot,info.0.yHotspot];let(mw,mh,mask)=bitmap(info.0.hbmMask)?;if fail_stage==3{return Err("Injected failure after complete mask DIB read".into());}
  let shape=if info.0.hbmColor.is_invalid(){if mh%2!=0{return Err("Odd monochrome mask height".into());}let half=mh as usize/2*mw as usize;let bits:Vec<bool>=mask.chunks_exact(4).map(|p|p[0]!=0||p[1]!=0||p[2]!=0).collect();math::monochrome(mw,mh/2,hotspot,&bits[..half],&bits[half..])?}else{
   let(w,h,bgra)=bitmap(info.0.hbmColor)?;if(w,h)!=(mw,mh){return Err("Mask/color dimensions disagree".into());}math::color(w,h,hotspot,&bgra)?
- };native_raster(icon.0,&shape,dir,index)?;Ok(shape)
+ };
+ // Keep failed candidates for diagnosis; only the successful caller publishes shape metadata.
+ pam(&dir.join(format!("cursor-{index}.pam")),shape.width,shape.height,&shape.rgba)?;
+ native_raster(icon.0,&shape,dir,index)?;Ok(shape)
 }
 fn pam(path:&Path,w:u32,h:u32,pixels:&[u8])->TestResult<()>{if w==0||h==0||w>1920||h>1080||pixels.len()!=w as usize*h as usize*4{return Err("Invalid PAM budget".into());}let mut out=format!("P7\nWIDTH {w}\nHEIGHT {h}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n").into_bytes();out.extend_from_slice(pixels);fs::write(path,out)?;Ok(())}
 #[derive(serde::Serialize)]
@@ -76,7 +79,11 @@ pub(super) fn case(root:&Path,w:u32,h:u32,nonce:u16,ffmpeg:&Path,worker:&Path)->
  require_disposable()?;let mut dpi=DpiScope::enter()?;let mut position=Position::save()?;
  let fixture=root.join("session-0");fs::create_dir(&fixture)?;fixture_json(&fixture.join("source-request.json"),&serde_json::json!({"width":w,"height":h,"nonce":nonce,"animated":false,"privateProfile":profile}))?;let mut window=GeneratedWindow::observed(fixture.clone())?;let hwnd=HWND(window.hwnd as *mut _);let g=geometry(hwnd)?;
  let mut physical=Vec::with_capacity(3);for [x,y] in [[8,8],[w as i32-8,8],[8,h as i32-8]]{let mut point=POINT{x,y};unsafe{if !ClientToScreen(hwnd,&mut point).as_bool(){return Err("Physical fiducial query failed".into());}}physical.push([point.x,point.y]);}
- fixture_json(&fixture.join("native-topology.json"),&topology()?)?;fixture_json(&fixture.join("resource-paths.json"),&resource_paths(&fixture)?)?;let mut observations=Vec::with_capacity(8);let start_handles=unsafe{GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS)};
+ fixture_json(&fixture.join("native-topology.json"),&topology()?)?;fixture_json(&fixture.join("resource-paths.json"),&resource_paths(&fixture)?)?;
+ let challenges=fixture.join("challenge");fs::create_dir(&challenges)?;
+ // Diagnose the required alpha oracle before replaying successful capture controls.
+ {let alpha=FixtureCursor::color()?;copied_shape(alpha.0,&challenges,10,0)?;}
+ let mut observations=Vec::with_capacity(8);let start_handles=unsafe{GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS)};
  let p=[g.client_origin[0]+w as i32/2,g.client_origin[1]+h as i32/2];position.place(p)?;
  require_disposable()?;
  // A hosted VM may suppress the pointer until actual mouse input reaches its desktop.
@@ -97,7 +104,7 @@ pub(super) fn case(root:&Path,w:u32,h:u32,nonce:u16,ffmpeg:&Path,worker:&Path)->
   thread::sleep(Duration::from_millis(400));proof.finish(&dir)?;
   fixture_json(&dir.join("geometry.json"),&serde_json::json!({"selectedHwnd":window.hwnd,"space":"NativeRaw fiducials versus PMv2 independently measured physical client points","physicalAnchors":physical,"clientAnchors":[[8,8],[w-8,8],[8,h-8]],"geometry":g,"rawSize":raw,"encodedSize":[raw[0]+raw[0]%2,raw[1]+raw[1]%2],"withCursor":with_cursor,"profile":profile,"observations":&observations[i*3..],"telemetry":[],"prefix":"rejectedAll","physicalLatencyClaim":false}))?;
  }
- let challenges=fixture.join("challenge");fs::create_dir(&challenges)?;let mut proof=Proof::prepare(&challenges,window.hwnd as u64,g.pid,true,ffmpeg,worker)?;proof.arm(&challenges)?;thread::sleep(Duration::from_millis(150));let mut challenge_rows=Vec::with_capacity(10);
+ let mut proof=Proof::prepare(&challenges,window.hwnd as u64,g.pid,true,ffmpeg,worker)?;proof.arm(&challenges)?;thread::sleep(Duration::from_millis(150));let mut challenge_rows=Vec::with_capacity(10);
  for (i,action) in ["alpha","hidden","restore-cursor","occlude","unocclude","move-away-back","move","move-back","minimize-restore"].into_iter().enumerate(){window.command(action)?;thread::sleep(Duration::from_millis(40));challenge_rows.push(observe(hwnd,&challenges,i)?);}
  window.resize()?;thread::sleep(Duration::from_millis(100));proof.finish(&challenges)?;fixture_json(&challenges.join("challenges.json"),&serde_json::json!({"observations":challenge_rows,"telemetry":[],"prefix":"rejectedAll","noResumeAfterEqualPolls":true,"observerInputs":"native queries only; independent source actions are checker truth"}))?;
  let closed=fixture.join("closed");fs::create_dir(&closed)?;let mut proof=Proof::prepare(&closed,window.hwnd as u64,g.pid,true,ffmpeg,worker)?;proof.arm(&closed)?;thread::sleep(Duration::from_millis(300));window.close()?;let start=Instant::now();while !proof.ended()?{if start.elapsed()>Duration::from_secs(2){return Err("Private close did not automatically end worker before manual Stop".into());}thread::sleep(Duration::from_millis(5));}proof.finish(&closed)?;fixture_json(&closed.join("close-observation.json"),&serde_json::json!({"workerEndedBeforeFinish":true,"manualStopRequested":false,"qpc":observation_qpc()}))?;
@@ -131,9 +138,17 @@ fn native_raster(icon:HICON,shape:&math::Shape,dir:&Path,index:usize)->TestResul
   let pixels=unsafe{std::slice::from_raw_parts_mut(raster.bits,raster.len)};
   for (i,p) in pixels.chunks_exact_mut(4).enumerate(){let x=i%shape.width as usize;let y=i/shape.width as usize;let rgb=match background{0=>[0,0,0],1=>[255,255,255],2=>if(x/4+y/4)%2==0{[35,35,35]}else{[210,210,210]},_=>[37,91,173]};colors.push(rgb);p.copy_from_slice(&[rgb[2],rgb[1],rgb[0],255]);}
   unsafe{DrawIconEx(raster.dc,0,0,icon,shape.width as i32,shape.height as i32,0,None,DI_NORMAL)?;GdiFlush().ok()?;}
-  let mut rgba=Vec::with_capacity(raster.len);
-  for ((got,source),bg) in pixels.chunks_exact(4).zip(shape.rgba.chunks_exact(4)).zip(colors){for c in 0..3{let expected=(u32::from(source[c])*u32::from(source[3])+u32::from(bg[c])*(255-u32::from(source[3]))+127)/255;let actual=u32::from(got[2-c]);if actual.abs_diff(expected)>1{return Err("Native DrawIconEx differs from straight RGBA by more than 1 channel value".into());}}rgba.extend_from_slice(&[got[2],got[1],got[0],255]);}
+  let mut rgba=Vec::with_capacity(raster.len);let mut mismatch=None;
+  for (pixel,((got,source),bg)) in pixels.chunks_exact(4).zip(shape.rgba.chunks_exact(4)).zip(colors).enumerate(){
+   for c in 0..3{
+    let expected=(u32::from(source[c])*u32::from(source[3])+u32::from(bg[c])*(255-u32::from(source[3]))+127)/255;
+    let actual=u32::from(got[2-c]);
+    if actual.abs_diff(expected)>1&&mismatch.is_none(){mismatch=Some(format!("Native DrawIconEx mismatch: background={background}, pixel={pixel}, channel={c}, actual={actual}, expected={expected}"));}
+   }
+   rgba.extend_from_slice(&[got[2],got[1],got[0],255]);
+  }
   pam(&dir.join(format!("raster-{index}-{background}.pam")),shape.width,shape.height,&rgba)?;
+  if let Some(error)=mismatch{return Err(error.into());}
  }Ok(())
 }
 pub(super) fn source(dir:&Path,w:u32,h:u32,nonce:u16,profile:&str)->TestResult<()> {

@@ -9,23 +9,20 @@
 //!  CPAL callback thread
 //!  (realtime priority, short deadline)
 //!       │
-//!       │  Vec<i16>  (mpsc channel)
+//!       │  Vec<i16>  (bounded, nonblocking channel)
 //!       ▼
 //!  focusflow-audio-owner thread
 //!  (normal priority, blocking I/O allowed)
 //!       │
 //!       ▼  hound::WavWriter
-//!    mic.wav
+//!    mic.wav.partial → mic.wav only after clean finalization
 //! ```
 //!
-//! The audio callback converts every incoming sample batch to `i16` and sends
-//! it through a channel.  All file I/O happens on the writer thread, keeping
-//! the realtime callback free of blocking operations.
-//!
-//! When [`AudioRecorder::stop`] is called the WASAPI stream is dropped first.
-//! That drops the `Sender` inside the callback closure, which closes the
-//! channel.  The writer thread exits its `recv` loop and calls
-//! `WavWriter::finalize()`, writing the WAV chunk-size header.
+//! The callback caps each batch, converts to `i16`, and tries to enqueue it.
+//! Overflow or a stream error permanently fails this track, preventing later
+//! samples from concealing a gap. The owner drops the stream, drains accepted
+//! batches, and finalizes away from the callback. Failed audio stays in an
+//! exclusively created recovery file; only clean, usable audio is published.
 
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
@@ -35,8 +32,8 @@ use hound::{WavSpec, WavWriter};
 use serde::Serialize;
 use std::{
     fmt,
-    path::Path,
-    sync::mpsc::{self, Sender},
+    path::{Path, PathBuf},
+    sync::{mpsc::{self, Sender, SyncSender}, atomic::{AtomicU8, Ordering}, Arc},
     thread::{self, JoinHandle},
 };
 
@@ -139,6 +136,98 @@ pub fn list_audio_input_devices() -> AudioResult<Vec<AudioDevice>> {
     Ok(result)
 }
 
+// Bound queued PCM to 256 KiB, plus one owner-held and one callback-held batch.
+const SAMPLE_QUEUE_BATCHES: usize = 8;
+const MAX_CALLBACK_SAMPLES: usize = 16_384;
+const QUEUE_OVERFLOW: u8 = 1;
+const BATCH_TOO_LARGE: u8 = 2;
+const STREAM_FAILED: u8 = 3;
+const WRITER_DISCONNECTED: u8 = 4;
+
+#[derive(Default)]
+struct CaptureStatus(AtomicU8);
+impl CaptureStatus {
+    fn fail(&self, reason: u8) {
+        let _ = self.0.compare_exchange(0, reason, Ordering::AcqRel, Ordering::Acquire);
+    }
+    fn failed(&self) -> u8 { self.0.load(Ordering::Acquire) }
+    fn error(&self) -> Option<AudioError> {
+        let (code, message) = match self.failed() {
+            0 => return None,
+            QUEUE_OVERFLOW => ("mic_queue_overflow", "Microphone writing could not keep up with capture."),
+            BATCH_TOO_LARGE => ("mic_batch_too_large", "The microphone delivered an unsupported sample batch size."),
+            STREAM_FAILED => ("mic_stream_failed", "The microphone stream failed. Check the device connection and microphone access before recording again."),
+            _ => ("mic_writer_disconnected", "The microphone writer stopped accepting samples."),
+        };
+        Some(AudioError::new(code, message, true))
+    }
+}
+#[derive(Clone)]
+struct CallbackQueue {
+    tx: SyncSender<Vec<i16>>,
+    status: Arc<CaptureStatus>,
+}
+impl CallbackQueue {
+    fn new() -> (Self, mpsc::Receiver<Vec<i16>>) {
+        let (tx, rx) = mpsc::sync_channel(SAMPLE_QUEUE_BATCHES);
+        (Self { tx, status: Arc::new(CaptureStatus::default()) }, rx)
+    }
+    fn stream_error(&self, _error: cpal::StreamError) { self.status.fail(STREAM_FAILED); }
+    fn error_handler(&self) -> impl FnMut(cpal::StreamError) + Send + 'static {
+        // EOF must cover both callbacks, even if the backend drops them separately.
+        let queue = self.clone();
+        move |error| queue.stream_error(error)
+    }
+    fn push<T: Copy>(&self, data: &[T], convert: fn(T) -> i16) {
+        if self.status.failed() != 0 || data.is_empty() { return; }
+        if data.len() > MAX_CALLBACK_SAMPLES { self.status.fail(BATCH_TOO_LARGE); return; }
+        let samples = data.iter().copied().map(convert).collect();
+        if self.status.failed() != 0 { return; }
+        match self.tx.try_send(samples) {
+            Ok(()) => {},
+            Err(mpsc::TrySendError::Full(_)) => self.status.fail(QUEUE_OVERFLOW),
+            Err(mpsc::TrySendError::Disconnected(_)) => self.status.fail(WRITER_DISCONNECTED),
+        }
+    }
+}
+
+type WavOutput = WavWriter<std::io::BufWriter<std::fs::File>>;
+struct PendingWav {
+    writer: WavOutput,
+    partial: PathBuf,
+    output: PathBuf,
+}
+impl PendingWav {
+    fn finish(self, capture_result: AudioResult<()>) -> AudioResult<()> {
+        let finalized = self.writer.finalize().map_err(wav_error);
+        // Always finalize for recovery, but never publish a discontinuous track.
+        capture_result?;
+        finalized?;
+        if !focusflow_core::audio::is_usable_wav(&self.partial) {
+            return Err(AudioError::new("mic_audio_unusable", "Microphone audio was empty or unreadable; the partial recording was retained for recovery.", true));
+        }
+        // hard_link publishes without replacing an existing file, including a dangling symlink.
+        std::fs::hard_link(&self.partial, &self.output).map_err(|error| AudioError::new("mic_publish_failed", format!("Could not publish microphone audio: {error}; partial recording retained for recovery."), true))?;
+        if let Err(error) = std::fs::remove_file(&self.partial) {
+            eprintln!("[FocusFlow audio] Published microphone audio; could not remove owned partial: {error}");
+        }
+        Ok(())
+    }
+}
+fn write_samples(writer: &mut WavOutput, batch: Vec<i16>) -> AudioResult<()> {
+    for sample in batch { writer.write_sample(sample).map_err(wav_error)?; }
+    Ok(())
+}
+fn finish_samples(samples: mpsc::Receiver<Vec<i16>>, mut wav: PendingWav, capture_result: AudioResult<()>, status: &CaptureStatus) -> AudioResult<()> {
+    let mut write_result = Ok(());
+    for batch in samples {
+        if write_result.is_ok() { write_result = write_samples(&mut wav.writer, batch); }
+    }
+    // All callback senders are gone; include errors raised during the drain.
+    let capture_result = status.error().map_or(capture_result, Err);
+    wav.finish(capture_result.and(write_result))
+}
+
 // ── AudioRecorder ──────────────────────────────────────────────────────────
 
 /// The CPAL stream is created, played, and dropped only on its owning thread.
@@ -156,29 +245,34 @@ impl AudioRecorder {
         let (ready, ready_rx) = mpsc::sync_channel(1);
         let owner = thread::Builder::new().name("focusflow-audio-owner".into()).spawn(move || {
             let initialized = initialize_audio(device_name.as_deref(), &output_path);
-            let (stream, samples, mut writer) = match initialized {
+            let (stream, samples, mut wav, status) = match initialized {
                 Ok(value) => value,
                 Err(error) => { let _ = ready.send(Err(error.clone())); return Err(error); }
             };
-            if ready.send(Ok(())).is_err() { drop(stream); return Ok(()); }
-            let write_samples = |writer: &mut WavWriter<std::io::BufWriter<std::fs::File>>, batch: Vec<i16>| -> AudioResult<()> {
-                for sample in batch { writer.write_sample(sample).map_err(wav_error)?; }
-                Ok(())
-            };
+            if ready.send(Ok(())).is_err() {
+                drop(stream);
+                return finish_samples(samples, wav, Err(AudioError::new("audio_start_cancelled", "Microphone startup was cancelled.", true)), &status);
+            }
+            let mut result = Ok(());
             loop {
+                if let Some(error) = status.error() { result = Err(error); break; }
                 match stop_rx.try_recv() {
                     Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
                     Err(mpsc::TryRecvError::Empty) => {}
                 }
                 match samples.recv_timeout(std::time::Duration::from_millis(20)) {
-                    Ok(batch) => write_samples(&mut writer, batch)?,
+                    Ok(batch) => {
+                        if let Err(error) = write_samples(&mut wav.writer, batch) { result = Err(error); break; }
+                    },
                     Err(mpsc::RecvTimeoutError::Timeout) => {},
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        result = Err(AudioError::new("mic_stream_failed", "The microphone stream ended unexpectedly.", true));
+                        break;
+                    },
                 }
             }
             drop(stream);
-            for batch in samples { write_samples(&mut writer, batch)?; }
-            writer.finalize().map_err(wav_error)
+            finish_samples(samples, wav, result, &status)
         }).map_err(|error| AudioError::new("audio_thread_failed", error.to_string(), true))?;
         let startup_error = match ready_rx.recv() {
             Ok(Ok(())) => return Ok(Self { stop: Some(stop), owner: Some(owner) }),
@@ -205,7 +299,19 @@ impl Drop for AudioRecorder {
     fn drop(&mut self) { if let Err(error) = self.finish() { eprintln!("[FocusFlow audio] {error}"); } }
 }
 fn wav_error(error: hound::Error) -> AudioError { AudioError::new("wav_writer_failed", error.to_string(), true) }
-fn initialize_audio(device_name: Option<&str>, output_path: &Path) -> AudioResult<(cpal::Stream, mpsc::Receiver<Vec<i16>>, WavWriter<std::io::BufWriter<std::fs::File>>)> {
+fn create_wav_writer(output_path: &Path, spec: WavSpec) -> AudioResult<PendingWav> {
+    match std::fs::symlink_metadata(output_path) {
+        Ok(_) => return Err(AudioError::new("mic_output_exists", "Microphone output already exists; existing recording was preserved.", true)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) => return Err(AudioError::new("wav_writer_failed", error.to_string(), true)),
+    }
+    let partial = output_path.with_file_name("mic.wav.partial");
+    let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&partial)
+        .map_err(|error| AudioError::new("wav_writer_failed", format!("Could not create microphone recovery file: {error}"), true))?;
+    let writer = WavWriter::new(std::io::BufWriter::new(file), spec).map_err(wav_error)?;
+    Ok(PendingWav { writer, partial, output: output_path.to_owned() })
+}
+fn initialize_audio(device_name: Option<&str>, output_path: &Path) -> AudioResult<(cpal::Stream, mpsc::Receiver<Vec<i16>>, PendingWav, Arc<CaptureStatus>)> {
         let host = cpal::default_host();
 
         let device = match device_name {
@@ -275,11 +381,13 @@ fn initialize_audio(device_name: Option<&str>, output_path: &Path) -> AudioResul
         };
 
     // File creation is part of the readiness handshake, before video may start.
-    let writer = WavWriter::create(output_path, spec).map_err(wav_error)?;
-    let (tx, rx) = mpsc::channel();
+    let writer = create_wav_writer(output_path, spec)?;
+    let (tx, rx) = CallbackQueue::new();
+    let status = Arc::clone(&tx.status);
     let stream = build_input_stream(&device, &stream_config, sample_format, tx)?;
     stream.play().map_err(|error| AudioError::new("stream_play_failed", error.to_string(), true))?;
-    Ok((stream, rx, writer))
+    if let Some(error) = status.error() { return Err(error); }
+    Ok((stream, rx, writer, status))
 }
 
 // ── Stream construction ────────────────────────────────────────────────────
@@ -295,7 +403,7 @@ fn build_input_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     sample_format: SampleFormat,
-    tx: Sender<Vec<i16>>,
+    tx: CallbackQueue,
 ) -> AudioResult<cpal::Stream> {
     let stream = match sample_format {
         // Float formats (most common on modern WASAPI devices)
@@ -345,49 +453,28 @@ fn build_input_stream(
 /// `tx` is **moved** into the callback closure.  When the stream is dropped
 /// the closure is dropped and `tx` is dropped, closing the channel.
 ///
-/// The error callback logs the WASAPI error to stderr but does not terminate
-/// the recording — transient device errors (e.g. brief glitches) are
-/// recoverable and the stream will resume automatically.
+/// Both callbacks latch the first failure. The owner stops the stream; later
+/// callback data is rejected so a device interruption cannot become a hidden gap.
 fn build_typed_input_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    tx: Sender<Vec<i16>>,
+    tx: CallbackQueue,
     convert: fn(T) -> i16,
 ) -> Result<cpal::Stream, cpal::BuildStreamError>
 where
     T: cpal::SizedSample + Send + 'static,
 {
+    let on_error = tx.error_handler();
     device.build_input_stream(
         config,
         move |data: &[T], _info: &cpal::InputCallbackInfo| {
-            let samples: Vec<i16> = data.iter().copied().map(convert).collect();
-            // Silently discard if the writer thread has already exited.
-            let _ = tx.send(samples);
+            tx.push(data, convert);
         },
-        on_stream_error,
+        on_error,
         None, // no timeout
     )
 }
 
-/// Platform stream error handler.
-///
-/// Logs the error to stderr.  Returning from this function allows cpal to
-/// continue; transient errors will self-recover.  Fatal errors (e.g. device
-/// removed) will eventually cause the callback to stop being invoked.
-fn on_stream_error(error: cpal::StreamError) {
-    eprintln!("[FocusFlow audio] Stream error: {error}");
-}
-
-// ── WAV writer thread ──────────────────────────────────────────────────────
-
-/// Receives `Vec<i16>` batches from the audio callback via `rx` and writes
-/// them to `mic.wav`.
-///
-/// Runs until the channel is closed (all senders dropped), then calls
-/// [`WavWriter::finalize`] to write the RIFF chunk-size header.
-///
-/// Any I/O error is returned to the caller of [`AudioRecorder::stop`] which
-/// joins this thread.
 // ── Sample conversion functions ────────────────────────────────────────────
 //
 // All conversions map the full range of the source type to [-32768, 32767].
@@ -465,6 +552,176 @@ fn u64_to_i16(sample: u64) -> i16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn test_dir() -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!("focusflow-bounded-mic-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        std::fs::create_dir(&path).unwrap();
+        path
+    }
+    fn test_spec() -> WavSpec {
+        WavSpec { channels: 1, sample_rate: 48000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int }
+    }
+    #[test]
+    fn wav_writer_never_overwrites_existing_output() {
+        let dir = test_dir();
+        let path = dir.join("mic.wav");
+        std::fs::write(&path, b"preexisting recording").unwrap();
+        let result = create_wav_writer(&path, test_spec());
+        let rejected = result.is_err();
+        drop(result);
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(rejected, "must reject an existing output before opening it");
+        assert_eq!(bytes, b"preexisting recording");
+    }
+    #[test]
+    fn queue_overflow_is_nonblocking_and_stops_all_later_batches() {
+        let (queue, rx) = CallbackQueue::new();
+        let status = Arc::clone(&queue.status);
+        let (done, completed) = mpsc::channel();
+        let producer = thread::spawn(move || {
+            for _ in 0..SAMPLE_QUEUE_BATCHES + 1 { queue.push(&[7i16], i16_identity); }
+            let _ = done.send(());
+            queue
+        });
+        let returned = completed.recv_timeout(std::time::Duration::from_secs(1)).is_ok();
+        // Release a wrongly blocking producer before asserting, so failures cannot hang the suite.
+        if !returned { while !producer.is_finished() { let _ = rx.recv_timeout(std::time::Duration::from_millis(20)); } }
+        let queue = producer.join().unwrap();
+        assert!(returned, "the real-time callback must not wait for queue capacity");
+        assert_eq!(status.failed(), QUEUE_OVERFLOW);
+        assert_eq!(rx.try_iter().count(), 8, "memory must be bounded even when the owner stalls");
+        queue.push(&[99i16], i16_identity);
+        assert!(rx.try_recv().is_err(), "never concatenate resumed audio after a dropped batch");
+    }
+    #[test]
+    fn oversized_batch_is_rejected_before_conversion_or_allocation() {
+        fn must_not_convert(_: i16) -> i16 { panic!("oversized batch was converted"); }
+        let (queue, rx) = CallbackQueue::new();
+        queue.push(&vec![0i16; MAX_CALLBACK_SAMPLES + 1], must_not_convert);
+        assert_eq!(queue.status.failed(), BATCH_TOO_LARGE);
+        assert!(rx.try_recv().is_err());
+    }
+    #[test]
+    fn first_stream_error_stops_batches_and_cannot_be_replaced() {
+        let (queue, rx) = CallbackQueue::new();
+        queue.push(&[1i16, 2], i16_identity);
+        queue.status.fail(STREAM_FAILED);
+        queue.push(&[3i16, 4], i16_identity);
+        queue.status.fail(QUEUE_OVERFLOW);
+        assert_eq!(queue.status.failed(), STREAM_FAILED);
+        assert_eq!(rx.try_recv().unwrap(), vec![1, 2]);
+        assert!(rx.try_recv().is_err());
+    }
+    #[test]
+    fn failed_stream_retains_only_accepted_prefix_and_never_publishes_mic_wav() {
+        let dir = test_dir();
+        let output = dir.join("mic.wav");
+        let wav = create_wav_writer(&output, test_spec()).unwrap();
+        let (queue, rx) = CallbackQueue::new();
+        queue.push(&[11i16, 22], i16_identity);
+        queue.status.fail(STREAM_FAILED);
+        queue.push(&[33i16, 44], i16_identity);
+        let error = queue.status.error().unwrap();
+        let status = Arc::clone(&queue.status);
+        drop(queue);
+        let result = finish_samples(rx, wav, Err(error), &status);
+        let published = output.exists();
+        let prefix = hound::WavReader::open(dir.join("mic.wav.partial")).unwrap().samples::<i16>().collect::<Result<Vec<_>, _>>().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(result.unwrap_err().code, "mic_stream_failed");
+        assert!(!published, "legacy importer must never see the failed track");
+        assert_eq!(prefix, vec![11, 22], "recovery keeps accepted audio without post-error samples");
+    }
+    #[test]
+    fn error_handler_keeps_receiver_alive_until_device_error_is_reported() {
+        let (queue, rx) = CallbackQueue::new();
+        let status = Arc::clone(&queue.status);
+        let mut on_error = queue.error_handler();
+        drop(queue);
+        let before_error = rx.try_recv();
+        on_error(cpal::StreamError::DeviceNotAvailable);
+        drop(on_error);
+        let after_error = rx.try_recv();
+        assert!(matches!(before_error, Err(mpsc::TryRecvError::Empty)), "draining must wait for the error callback as well as the data callback");
+        assert!(matches!(after_error, Err(mpsc::TryRecvError::Disconnected)));
+        assert_eq!(status.failed(), STREAM_FAILED);
+    }
+    #[test]
+    fn drain_rechecks_error_latched_after_stop_result() {
+        let dir = test_dir();
+        let output = dir.join("mic.wav");
+        let wav = create_wav_writer(&output, test_spec()).unwrap();
+        let (queue, rx) = CallbackQueue::new();
+        queue.push(&[11i16, 22], i16_identity);
+        let status = Arc::clone(&queue.status);
+        let initial_stop_result = Ok(());
+        // A final callback may fail after the owner's initial stop/status check.
+        status.fail(STREAM_FAILED);
+        drop(queue);
+        let result = finish_samples(rx, wav, initial_stop_result, &status);
+        let published = output.exists();
+        let retained = dir.join("mic.wav.partial").exists();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(result.is_err(), "a late error must prevent publication");
+        assert!(!published);
+        assert!(retained);
+    }
+    #[test]
+    fn clean_audio_is_published_only_after_finalize_and_validation() {
+        let dir = test_dir();
+        let output = dir.join("mic.wav");
+        let mut wav = create_wav_writer(&output, test_spec()).unwrap();
+        assert!(!output.exists());
+        assert!(dir.join("mic.wav.partial").exists());
+        write_samples(&mut wav.writer, vec![12, 34]).unwrap();
+        wav.finish(Ok(())).unwrap();
+        assert!(focusflow_core::audio::is_usable_wav(&output));
+        assert!(!dir.join("mic.wav.partial").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn empty_audio_remains_partial_and_is_not_published() {
+        let dir = test_dir();
+        let output = dir.join("mic.wav");
+        let wav = create_wav_writer(&output, test_spec()).unwrap();
+        let result = wav.finish(Ok(()));
+        let published = output.exists();
+        let retained = dir.join("mic.wav.partial").exists();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(result.unwrap_err().code, "mic_audio_unusable");
+        assert!(!published);
+        assert!(retained);
+    }
+    #[test]
+    fn existing_recovery_file_is_preserved() {
+        let dir = test_dir();
+        let output = dir.join("mic.wav");
+        let partial = dir.join("mic.wav.partial");
+        std::fs::write(&partial, b"earlier recovery").unwrap();
+        let rejected = create_wav_writer(&output, test_spec()).is_err();
+        let bytes = std::fs::read(&partial).unwrap();
+        let published = output.exists();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(rejected);
+        assert_eq!(bytes, b"earlier recovery");
+        assert!(!published);
+    }
+    #[test]
+    fn output_created_during_capture_is_never_replaced() {
+        let dir = test_dir();
+        let output = dir.join("mic.wav");
+        let mut wav = create_wav_writer(&output, test_spec()).unwrap();
+        write_samples(&mut wav.writer, vec![1, 2]).unwrap();
+        std::fs::write(&output, b"another recording").unwrap();
+        let result = wav.finish(Ok(()));
+        let bytes = std::fs::read(&output).unwrap();
+        let retained = focusflow_core::audio::is_usable_wav(&dir.join("mic.wav.partial"));
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(result.unwrap_err().code, "mic_publish_failed");
+        assert_eq!(bytes, b"another recording");
+        assert!(retained);
+    }
     #[test]
     fn owner_handle_is_send_sync_without_unsafe_impls() {
         fn check<T: Send + Sync>() {}
