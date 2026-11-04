@@ -53,7 +53,12 @@ fn bitmap(bitmap:HBITMAP)->TestResult<(u32,u32,Vec<u8>)>{
 fn copied_shape(cursor:HCURSOR,dir:&Path,index:usize,fail_stage:u8)->TestResult<math::Shape>{
  if index>=12{return Err("Cursor diagnostic index cap".into());}
  // CURSORINFO supplies a borrowed cursor. CopyIcon owns a separate reference; only that copy is destroyed.
- let icon=Icon(unsafe{CopyIcon(HICON(cursor.0))?});if fail_stage==1{return Err("Injected failure after owned copy".into());}let mut info=Bitmaps(ICONINFO::default());let result=unsafe{GetIconInfo(icon.0,&mut info.0)};result?;if fail_stage==2{return Err("Injected failure after owned GetIconInfo bitmaps".into());}
+ let icon=Icon(unsafe{CopyIcon(HICON(cursor.0))?});if fail_stage==1{return Err("Injected failure after owned copy".into());}
+ owned_shape(&icon,cursor,dir,index,fail_stage)
+}
+fn owned_shape(icon:&Icon,original:HCURSOR,dir:&Path,index:usize,fail_stage:u8)->TestResult<math::Shape>{
+ if index>=12{return Err("Cursor diagnostic index cap".into());}
+ let mut info=Bitmaps(ICONINFO::default());let result=unsafe{GetIconInfo(icon.0,&mut info.0)};result?;if fail_stage==2{return Err("Injected failure after owned GetIconInfo bitmaps".into());}
  if info.0.fIcon.as_bool()||info.0.hbmMask.is_invalid(){return Err("Not a cursor or missing mask".into());}let hotspot=[info.0.xHotspot,info.0.yHotspot];let(mw,mh,mask)=bitmap(info.0.hbmMask)?;if fail_stage==3{return Err("Injected failure after complete mask DIB read".into());}
  let shape=if info.0.hbmColor.is_invalid(){if mh%2!=0{return Err("Odd monochrome mask height".into());}let half=mh as usize/2*mw as usize;let bits:Vec<bool>=mask.chunks_exact(4).map(|p|p[0]!=0||p[1]!=0||p[2]!=0).collect();math::monochrome(mw,mh/2,hotspot,&bits[..half],&bits[half..])?}else{
   let(w,h,bgra)=bitmap(info.0.hbmColor)?;if(w,h)!=(mw,mh){return Err("Mask/color dimensions disagree".into());}
@@ -69,7 +74,7 @@ fn copied_shape(cursor:HCURSOR,dir:&Path,index:usize,fail_stage:u8)->TestResult<
  };
  // Keep failed candidates for diagnosis; only the successful caller publishes shape metadata.
  pam(&dir.join(format!("cursor-{index}.pam")),shape.width,shape.height,&shape.rgba)?;
- native_raster(HICON(cursor.0),&shape,dir,index)?;Ok(shape)
+ native_raster(HICON(original.0),&shape,dir,index)?;Ok(shape)
 }
 fn pam(path:&Path,w:u32,h:u32,pixels:&[u8])->TestResult<()>{if w==0||h==0||w>1920||h>1080||pixels.len()!=w as usize*h as usize*4{return Err("Invalid PAM budget".into());}let mut out=format!("P7\nWIDTH {w}\nHEIGHT {h}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n").into_bytes();out.extend_from_slice(pixels);fs::write(path,out)?;Ok(())}
 #[derive(serde::Serialize)]
@@ -78,9 +83,13 @@ struct Observation {q0:i64,q1:i64,before:Geometry,after:Geometry,position:[i32;2
 fn observe(hwnd:HWND,dir:&Path,index:usize)->TestResult<Observation>{
  let q0=observation_qpc().ok_or("QPC unavailable")?;let before=geometry(hwnd)?;let mut info=CURSORINFO{cbSize:std::mem::size_of::<CURSORINFO>() as u32,..Default::default()};let mut p=POINT::default();
  unsafe{GetCursorInfo(&mut info)?;GetPhysicalCursorPos(&mut p)?;}let hit=unsafe{WindowFromPhysicalPoint(p)};let root=unsafe{GetAncestor(hit,GA_ROOT)};let mut hit_pid=0;let hit_thread=unsafe{GetWindowThreadProcessId(hit,Some(&mut hit_pid))};
- let image=copied_shape(info.hCursor,dir,index,0);let(shape,image_error)=match image{Ok(s)=>{let filename=format!("cursor-{index}.pam");pam(&dir.join(&filename),s.width,s.height,&s.rgba)?;(Some(serde_json::json!({"path":filename,"width":s.width,"height":s.height,"hotspot":s.hotspot,"animation":"unqualified; static generated fixtures only"})),None)},Err(e)=>(None,Some(e.to_string().chars().take(256).collect()))};
+ // Only native queries and owned snapshot acquisition belong to this QPC bracket.
+ let icon=unsafe{CopyIcon(HICON(info.hCursor.0))}.map(Icon);
  let mut last=CURSORINFO{cbSize:std::mem::size_of::<CURSORINFO>() as u32,..Default::default()};let mut lastp=POINT::default();unsafe{GetCursorInfo(&mut last)?;GetPhysicalCursorPos(&mut lastp)?;}let after=geometry(hwnd)?;let q1=observation_qpc().ok_or("QPC unavailable")?;
  let consistent=before==after&&p.x==info.ptScreenPos.x&&p.y==info.ptScreenPos.y&&p.x==lastp.x&&p.y==lastp.y&&info.flags==last.flags&&info.hCursor==last.hCursor&&last.ptScreenPos.x==p.x&&last.ptScreenPos.y==p.y;
+ // The controlled source retains the original cursor; validation/I/O consumes the immutable owned copy after q1.
+ let image=match icon{Ok(icon)=>owned_shape(&icon,info.hCursor,dir,index,0),Err(e)=>Err(e.into())};
+ let(shape,image_error)=match image{Ok(s)=>{let filename=format!("cursor-{index}.pam");(Some(serde_json::json!({"path":filename,"width":s.width,"height":s.height,"hotspot":s.hotspot,"animation":"unqualified; static generated fixtures only"})),None)},Err(e)=>(None,Some(e.to_string().chars().take(256).collect()))};
  Ok(Observation{q0,q1,before,after,position:[p.x,p.y],cursor_info_position:[info.ptScreenPos.x,info.ptScreenPos.y],flags:info.flags.0,hit:hit.0 as usize as u64,hit_root:root.0 as usize as u64,hit_pid,hit_thread,handle:info.hCursor.0 as usize as u64,consistent,shape,image_error,telemetry_accepted:false,reason:"No independently defensible historical stationary boundary; all telemetry rejected"})
 }
 // Fixture command history is checker truth only; observe() never receives it.

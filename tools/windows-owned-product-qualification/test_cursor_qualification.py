@@ -36,6 +36,10 @@ class PrivateChecks(unittest.TestCase):
         self.assertEqual(c.bracket(dict(q0=3000000,q1=3000006),clock)['atUs'],1)
         for q0,q1 in [(-1,0),(2999999,3000001),(5999999,6000001),(6000000,6000000),(3000000,3100001),(3000001,3000000)]:
             with self.assertRaises(AssertionError):c.bracket(dict(q0=q0,q1=q1),clock)
+        # Actual rejected native interval remains rejected after acquisition/processing separation.
+        native_clock=dict(frequency=10000000,epoch=5977187500,admission=5975549528,cutoff=5984583167,written=22)
+        with self.assertRaisesRegex(AssertionError,'invalid/overwide QPC bracket'):
+            c.bracket(dict(q0=5979106388,q1=5980388292),native_clock)
 
     def test_raw_upload_allowlist_includes_decisive_pams_and_rejects_authority_leaks(self):
         import tempfile
@@ -310,3 +314,24 @@ class Codec420Crop(unittest.TestCase):
         check=c.codec_crop
         for actual,expected,w,h,crop in [(bytes(35),bytes(36),6,4,[1,1,5,3]),(bytes(36),bytes(35),6,4,[1,1,5,3]),(bytes(36),bytes(36),5,4,[1,1,4,3]),(bytes(36),bytes(36),6,4,[2,1,2,3]),(bytes(36),bytes(36),6,4,[-1,1,5,3]),(bytes(36),bytes(36),6,4,[1,1,7,3])]:
             with self.subTest(w=w,h=h,crop=crop),self.assertRaises(AssertionError):check(actual,expected,w,h,crop)
+
+class OwnedAcquisitionScope(unittest.TestCase):
+    def test_portable_source_guard_keeps_owned_snapshot_between_real_qpc_queries(self):
+        # Static ordering guard only: this is not a Windows timing/resource execution test.
+        repo=Path(__file__).resolve().parents[2]
+        source=(repo/'FocusFlow/src-tauri/src/recorder/windows_qualification/cursor.rs').read_text()
+        observe=source.split('fn observe(',1)[1].split('// Fixture command history',1)[0]
+        acquisition=observe.split('let q0=',1)[1].split('let q1=',1)[0]
+        self.assertIn('CopyIcon(',acquisition,'owned native snapshot must be acquired within q0/q1')
+        self.assertEqual(observe.count('CopyIcon('),1)
+        self.assertEqual(acquisition.count('GetCursorInfo('),2);self.assertEqual(acquisition.count('GetPhysicalCursorPos('),2);self.assertEqual(acquisition.count('geometry(hwnd)'),2)
+        self.assertLess(acquisition.index('GetCursorInfo('),acquisition.index('CopyIcon('));self.assertLess(acquisition.index('CopyIcon('),acquisition.rindex('GetCursorInfo('))
+        for deferred in ['copied_shape(','owned_shape(','GetIconInfo(','bitmap(','DrawIconEx(','native_raster(','pam(','fs::']:
+            self.assertNotIn(deferred,acquisition,'validation and filesystem work must be deferred until after q1')
+        self.assertNotIn('copied_shape(',observe,'observer must not acquire a second copy after q1')
+        self.assertLess(observe.index('let q1='),observe.index('owned_shape('))
+        owned=source.split('fn owned_shape(',1)[1].split('fn pam(',1)[0]
+        self.assertNotIn('CopyIcon(',owned,'deferred extraction consumes the already-owned snapshot')
+        self.assertIn('native_raster(HICON(original.0)',owned,'native oracle must retain the original borrowed handle')
+        wrapper=source.split('fn copied_shape(',1)[1].split('fn owned_shape(',1)[0]
+        self.assertIn('fail_stage==1',wrapper);self.assertIn('owned_shape(',wrapper)
