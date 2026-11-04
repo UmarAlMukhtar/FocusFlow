@@ -13,7 +13,7 @@ COMMANDS={'driver','analyzer','native-platform','core-publication','core-import'
 
 CURSOR_MODES={'cursor-borderless-even','cursor-decorated-even','cursor-borderless-odd','cursor-decorated-odd'}
 PRIVATE_NAMES={'proof-with-cursor.mp4','proof-without-cursor.mp4','proof-summary.json','geometry.json','trace.json','owned.json','first-write-started.json','challenges.json','visibility.json','close-observation.json'}|{f'raw-{i}.pam' for i in range(2)}|{f'cursor-{i}.pam' for i in range(12)}|{f'native-color-{i}.pam' for i in range(12)}|{f'raster-{i}-{j}.pam' for i in range(12) for j in range(4)}
-COMMANDS|=CURSOR_MODES|{'cursor-portable','cursor-renderer'}
+COMMANDS|=CURSOR_MODES|{'cursor-portable','cursor-renderer','startup-metadata'}
 
 def package(evidence,setup,out):
     out.mkdir();total=0;omitted=[];hashes={}
@@ -40,6 +40,16 @@ def package(evidence,setup,out):
                 for name in PRIVATE_NAMES:
                     p=session/proof/name
                     if p.is_file():candidates.append((p,Path('cases')/mode/'session-0'/proof/name))
+        session=evidence/'startup-metadata/session-0'
+        for p in session.rglob('*'):
+            if p.is_file() and (p.suffix in {'.pam','.mp4'} or p.name in {'capture.json','capture.windows-v2','project.json','session.json','first-write-started.json','metadata.json','trace.json','clicks.json','drags.json','timeline.json'}):omitted.append(p.relative_to(evidence).as_posix())
+        source_names={'source-request.json','source-ready.json','source-observed.json','source-selection.json','source-exit.json','source-cleanup.json','source-actions.json','source-command-1.json','source-ack-1.json','paint-history.json','source.log'}
+        for name in source_names:
+            p=session/name
+            if p.is_file():candidates.append((p,Path('cases/startup-metadata/session-0')/name))
+        for name in ['startup-metadata.json','startup-phase.json','metadata-owned.json','metadata-cleanup.json','startup-analysis.json']:
+            p=session/'startup-probe'/name
+            if p.is_file():candidates.append((p,Path('cases/startup-metadata/session-0/startup-probe')/name))
         for mode in PIPE_NAMES:
             p=evidence/'core-pipes'/(mode+'.json')
             if p.is_file():candidates.append((p,Path('cases/core-pipes')/p.name))
@@ -48,6 +58,9 @@ def package(evidence,setup,out):
     # Diagnostics first; a cap failure remains explicit and never deletes original local evidence.
     for p,relative in sorted(candidates,key=lambda pair:pair[0].suffix=='.mp4'):
         limit=64*1024*1024 if p.name in {'screen.mp4','proof-with-cursor.mp4','proof-without-cursor.mp4'} else 4*1024*1024 if p.name=='trace.json' else 4096 if p.name=='source-actions.json' else 9*1024*1024 if p.suffix=='.pam' else 16*1024*1024
+        if p.name in {'startup-metadata.json','startup-analysis.json'}:limit=64*1024
+        if p.name in {'startup-phase.json','metadata-owned.json'}:limit=4096
+        if p.name=='metadata-cleanup.json':limit=16*1024
         n=p.stat().st_size
         if p.is_symlink() or n>limit or total+n>255*1024*1024:omitted.append(relative.as_posix());continue
         target=out/relative;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(p,target);total+=n

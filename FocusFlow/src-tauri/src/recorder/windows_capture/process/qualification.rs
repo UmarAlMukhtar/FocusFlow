@@ -4,6 +4,7 @@ use serde::Serialize;
 mod pixels;
 pub(in crate::recorder) mod cursor_math;
 pub(in crate::recorder) mod proof;
+pub(in crate::recorder) mod startup;
 static DIRECTORY:std::sync::OnceLock<PathBuf>=std::sync::OnceLock::new();
 static FIRST_WRITE:AtomicBool=AtomicBool::new(false);
 pub(super) fn initialize(path:&Path)->Result<()> {DIRECTORY.set(path.parent().ok_or("Case directory missing")?.to_owned()).map_err(|_|"Duplicate observation initialization".into())}

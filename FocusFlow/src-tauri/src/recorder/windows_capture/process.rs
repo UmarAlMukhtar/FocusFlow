@@ -282,6 +282,7 @@ fn worker(window:u64,pid:u32,path:&Path,ffmpeg:&Path,job:&str,#[cfg(test)] proof
 }
 pub(crate) fn dispatch(mut args:impl Iterator<Item=OsString>)->Option<i32>{
  let mode=args.next();
+ #[cfg(test)] if mode.as_deref()==Some(OsStr::new(qualification::startup::MODE)){return Some(qualification::startup::dispatch(args));}
  #[cfg(test)] let private=mode.as_deref()==Some(OsStr::new(qualification::proof::MODE));
  #[cfg(not(test))] let private=false;
  if mode.as_deref()!=Some(OsStr::new(MODE))&&!private{return None;}
