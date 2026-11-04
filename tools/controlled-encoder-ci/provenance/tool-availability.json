@@ -1,0 +1,117 @@
+[
+  {
+    "name": "make",
+    "path": "/usr/bin/make",
+    "available": true,
+    "exit": 0,
+    "version_output": "GNU Make 4.4.1\nBuilt for x86_64-redhat-linux-gnu\nCopyright (C) 1988-2023 Free Software Foundation, Inc.\nLicense GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n",
+    "stderr": "",
+    "sha256": "25544ed459e6f5c79daf61383d7ef1c83cd9e77f2dfbe2bdbeaa8defec9d0bc9",
+    "host_package": "make-4.4.1-12.fc44.x86_64 source=make-4.4.1-12.fc44.src.rpm"
+  },
+  {
+    "name": "pkg-config",
+    "path": "/usr/bin/pkg-config",
+    "available": true,
+    "exit": 0,
+    "version_output": "2.5.1\n",
+    "stderr": "",
+    "sha256": "b717e9f6d51553f6bb88d0603bcc07dd6ea7c2cf5ab4295b41a28ae6b627a62b",
+    "host_package": "pkgconf-pkg-config-2.5.1-1.fc44.x86_64 source=pkgconf-2.5.1-1.fc44.src.rpm"
+  },
+  {
+    "name": "pkgconf",
+    "path": "/usr/bin/pkgconf",
+    "available": true,
+    "exit": 0,
+    "version_output": "2.5.1\n",
+    "stderr": "",
+    "sha256": "473a53d0087232f054444c26a16d9cbe2055178ae2952536313eaaf772503320",
+    "host_package": "pkgconf-2.5.1-1.fc44.x86_64 source=pkgconf-2.5.1-1.fc44.src.rpm"
+  },
+  {
+    "name": "gcc",
+    "path": "/usr/bin/gcc",
+    "available": true,
+    "exit": 0,
+    "version_output": "gcc (GCC) 16.2.1 20260819 (Red Hat 16.2.1-2)\nCopyright (C) 2026 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n",
+    "stderr": "",
+    "sha256": "153e46b4657620f2baef1b4a70b4b4f275772faa5b0fb9e415697e87ebcb7fea",
+    "host_package": "gcc-16.2.1-2.fc44.x86_64 source=gcc-16.2.1-2.fc44.src.rpm"
+  },
+  {
+    "name": "gpg",
+    "path": "/usr/bin/gpg",
+    "available": true,
+    "exit": 0,
+    "version_output": "gpg (GnuPG) 2.4.9\nlibgcrypt 1.12.2-unknown\nCopyright (C) 2025 g10 Code GmbH\nLicense GNU GPL-3.0-or-later <https://gnu.org/licenses/gpl.html>\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n\nHome: HISTORICAL_HOME/.gnupg\nSupported algorithms:\nPubkey: RSA, ELG, DSA, ECDH, ECDSA, EDDSA\nCipher: IDEA, 3DES, CAST5, BLOWFISH, AES, AES192, AES256, TWOFISH,\n        CAMELLIA128, CAMELLIA192, CAMELLIA256\nHash: SHA1, RIPEMD160, SHA256, SHA384, SHA512, SHA224\nCompression: Uncompressed, ZIP, ZLIB, BZIP2\n",
+    "stderr": "",
+    "sha256": "d784f5bd16f1b116e7ac10e21a41e5cefd765062432c7e266518347776c9f18a",
+    "host_package": "gnupg2-2.4.9-16.fc44.x86_64 source=gnupg2-2.4.9-16.fc44.src.rpm"
+  },
+  {
+    "name": "git",
+    "path": "/usr/bin/git",
+    "available": true,
+    "exit": 0,
+    "version_output": "git version 2.56.0\n",
+    "stderr": "",
+    "sha256": "20739384fd97e904e8545b39753c3e42a0cd7a8016d382f6ec1aadc910f8c872",
+    "host_package": "git-core-2.56.0-1.fc44.x86_64 source=git-2.56.0-1.fc44.src.rpm"
+  },
+  {
+    "name": "nasm",
+    "path": null,
+    "available": false
+  },
+  {
+    "name": "private-mingw-gcc",
+    "path": "target/windows-verification/gnu-route/mingw/usr/bin/x86_64-w64-mingw32-gcc",
+    "actual": "target/windows-verification/gnu-route/mingw/usr/bin/x86_64-w64-mingw32-gcc",
+    "sha256": "5a614b15fb10d2b70525bd931ca5af3f3399907d6cb5b697df9aa1df128f6e9d",
+    "matches_signed_rpm_digest": true,
+    "rpm": "target/windows-verification/gnu-route/downloads/mingw64-gcc-16.2.1-1.fc44.x86_64.rpm",
+    "version_output": "x86_64-w64-mingw32-gcc (GCC) 16.2.1 20260819 (Fedora MinGW 16.2.1-1.fc44)\nCopyright (C) 2026 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n",
+    "stderr": ""
+  },
+  {
+    "name": "private-mingw-ar",
+    "path": "target/windows-verification/gnu-route/mingw/usr/bin/x86_64-w64-mingw32-ar",
+    "actual": "target/windows-verification/gnu-route/mingw/usr/bin/x86_64-w64-mingw32-ar",
+    "sha256": "b7b0da1905f4ffb2d9e309a9988c85ca2637072e77f2f3cfc85397506003a436",
+    "matches_signed_rpm_digest": true,
+    "rpm": "target/windows-verification/gnu-route/downloads/mingw64-binutils-2.46.0-1.fc44.x86_64.rpm",
+    "version_output": "GNU ar version 2.46.0.20260210\nCopyright (C) 2026 Free Software Foundation, Inc.\nThis program is free software; you may redistribute it under the terms of\nthe GNU General Public License version 3 or (at your option) any later version.\nThis program has absolutely no warranty.\n",
+    "stderr": ""
+  },
+  {
+    "name": "private-mingw-ld",
+    "path": "target/windows-verification/gnu-route/mingw/usr/bin/x86_64-w64-mingw32-ld",
+    "actual": "target/windows-verification/gnu-route/mingw/usr/bin/x86_64-w64-mingw32-ld",
+    "sha256": "c75bb868a6eece195326409d12dd7178185c59bcfc16e5f4e130322d0520de6e",
+    "matches_signed_rpm_digest": true,
+    "rpm": "target/windows-verification/gnu-route/downloads/mingw64-binutils-2.46.0-1.fc44.x86_64.rpm",
+    "version_output": "GNU ld version 2.46.0.20260210\nCopyright (C) 2026 Free Software Foundation, Inc.\nThis program is free software; you may redistribute it under the terms of\nthe GNU General Public License version 3 or (at your option) a later version.\nThis program has absolutely no warranty.\n",
+    "stderr": ""
+  },
+  {
+    "name": "private-mingw-windres",
+    "path": "target/windows-verification/gnu-route/mingw/usr/bin/x86_64-w64-mingw32-windres",
+    "actual": "target/windows-verification/gnu-route/mingw/usr/bin/x86_64-w64-mingw32-windres",
+    "sha256": "f11b9bd33598338883f55a6b89c49737783bcff9920ed854274538858842672f",
+    "matches_signed_rpm_digest": true,
+    "rpm": "target/windows-verification/gnu-route/downloads/mingw64-binutils-2.46.0-1.fc44.x86_64.rpm",
+    "version_output": "GNU windres version 2.46.0.20260210\nCopyright (C) 2026 Free Software Foundation, Inc.\nThis program is free software; you may redistribute it under the terms of\nthe GNU General Public License version 3 or (at your option) any later version.\nThis program has absolutely no warranty.\n",
+    "stderr": ""
+  },
+  {
+    "name": "private-mingw-dlltool",
+    "path": "target/windows-verification/gnu-route/mingw/usr/bin/x86_64-w64-mingw32-dlltool",
+    "actual": "target/windows-verification/gnu-route/mingw/usr/bin/x86_64-w64-mingw32-dlltool",
+    "sha256": "012d11b471c6b5fbcfef23ba5d630233984a3d4da8a7a474662707c143a8df75",
+    "matches_signed_rpm_digest": true,
+    "rpm": "target/windows-verification/gnu-route/downloads/mingw64-binutils-2.46.0-1.fc44.x86_64.rpm",
+    "version_output": "GNU target/windows-verification/gnu-route/mingw/usr/bin/x86_64-w64-mingw32-dlltool version 2.46.0.20260210\nCopyright (C) 2026 Free Software Foundation, Inc.\nThis program is free software; you may redistribute it under the terms of\nthe GNU General Public License version 3 or (at your option) any later version.\nThis program has absolutely no warranty.\n",
+    "stderr": ""
+  }
+]

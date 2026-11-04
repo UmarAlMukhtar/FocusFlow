@@ -1,0 +1,97 @@
+{
+  "all_assertions_passed": true,
+  "method": "static generated config and linked unstripped PE symbols; no executable run",
+  "exact_enabled_component_sets": {
+    "ENCODER": [
+      "AAC",
+      "LIBX264",
+      "PNG"
+    ],
+    "DECODER": [
+      "BMP",
+      "H264",
+      "PAM",
+      "PCM_F32LE",
+      "PCM_S16LE",
+      "PCM_S24LE",
+      "PCM_S32LE",
+      "PCM_U8",
+      "RAWVIDEO",
+      "WRAPPED_AVFRAME"
+    ],
+    "PARSER": [
+      "AC3",
+      "H264"
+    ],
+    "DEMUXER": [
+      "CONCAT",
+      "IMAGE2",
+      "MOV",
+      "RAWVIDEO",
+      "WAV"
+    ],
+    "MUXER": [
+      "FRAMEHASH",
+      "IMAGE2",
+      "MOV",
+      "MP4",
+      "NULL"
+    ],
+    "PROTOCOL": [
+      "FILE",
+      "PIPE"
+    ],
+    "BSF": [
+      "AAC_ADTSTOASC",
+      "H264_MP4TOANNEXB",
+      "SETTS",
+      "VP9_SUPERFRAME"
+    ],
+    "INDEV": [
+      "GDIGRAB",
+      "LAVFI"
+    ],
+    "OUTDEV": [],
+    "FILTER": [
+      "ADELAY",
+      "AFORMAT",
+      "ANULL",
+      "ANULLSRC",
+      "APAD",
+      "ARESAMPLE",
+      "ASETPTS",
+      "ASETTB",
+      "ASPLIT",
+      "ATRIM",
+      "COLOR",
+      "CONCAT",
+      "CROP",
+      "FORMAT",
+      "FPS",
+      "GBLUR",
+      "GEQ",
+      "HFLIP",
+      "LOOP",
+      "NULL",
+      "OVERLAY",
+      "ROTATE",
+      "SCALE",
+      "SETPTS",
+      "SETSAR",
+      "SETTB",
+      "TPAD",
+      "TRANSPOSE",
+      "TRIM",
+      "VFLIP",
+      "ZOOMPAN"
+    ],
+    "HWACCEL": []
+  },
+  "baseline": "accepted Linux candidate ee4cbd38b7ecf22071a93596f3521b06bb35cc4ededc9a85dfa105e29465180a; replace XCBGRAB with GDIGRAB",
+  "runtime_cpu_dispatch": true,
+  "generic_x86_64_c_flags": true,
+  "x264_win32_threads": true,
+  "ffmpeg_win32_threads": true,
+  "network": false,
+  "future_amix": false
+}

@@ -1,0 +1,141 @@
+{
+  "checked_at_utc": "2026-10-21T05:47:10.421376+00:00",
+  "package": "nasm-3.02-1.fc44.x86_64",
+  "source_package": "nasm-3.02-1.fc44.src.rpm",
+  "koji_build_id": 3065669,
+  "binary_rpm": {
+    "url": "https://kojipkgs.fedoraproject.org/packages/nasm/3.02/1.fc44/data/signed/6d9f90a6/x86_64/nasm-3.02-1.fc44.x86_64.rpm",
+    "koji_rpm_id": 48194793,
+    "koji_unsigned_bytes": 453525,
+    "argv": [
+      "curl",
+      "--fail",
+      "--location",
+      "--silent",
+      "--show-error",
+      "--connect-timeout",
+      "15",
+      "--max-time",
+      "60",
+      "--proto",
+      "=https",
+      "--output",
+      "target/release-encoder-experiment/nasm-tool/downloads/nasm-3.02-1.fc44.x86_64.rpm.part",
+      "--write-out",
+      "%{http_code} %{url_effective}",
+      "https://kojipkgs.fedoraproject.org/packages/nasm/3.02/1.fc44/data/signed/6d9f90a6/x86_64/nasm-3.02-1.fc44.x86_64.rpm"
+    ],
+    "exit": 0,
+    "response": "200 https://kojipkgs.fedoraproject.org/packages/nasm/3.02/1.fc44/data/signed/6d9f90a6/x86_64/nasm-3.02-1.fc44.x86_64.rpm",
+    "stderr": "",
+    "seconds": 2.63,
+    "path": "target/release-encoder-experiment/nasm-tool/downloads/nasm-3.02-1.fc44.x86_64.rpm",
+    "bytes": 453525,
+    "sha256": "f0a4cbfbd91c9ba0b6eeb4d4bf8b6bf07b718eed29b7eb56e8aeeea86e072646"
+  },
+  "source_rpm": {
+    "url": "https://kojipkgs.fedoraproject.org/packages/nasm/3.02/1.fc44/data/signed/6d9f90a6/src/nasm-3.02-1.fc44.src.rpm",
+    "koji_rpm_id": 48194788,
+    "koji_unsigned_bytes": 2548277,
+    "argv": [
+      "curl",
+      "--fail",
+      "--location",
+      "--silent",
+      "--show-error",
+      "--connect-timeout",
+      "15",
+      "--max-time",
+      "60",
+      "--proto",
+      "=https",
+      "--output",
+      "target/release-encoder-experiment/nasm-tool/downloads/nasm-3.02-1.fc44.src.rpm.part",
+      "--write-out",
+      "%{http_code} %{url_effective}",
+      "https://kojipkgs.fedoraproject.org/packages/nasm/3.02/1.fc44/data/signed/6d9f90a6/src/nasm-3.02-1.fc44.src.rpm"
+    ],
+    "exit": 0,
+    "response": "200 https://kojipkgs.fedoraproject.org/packages/nasm/3.02/1.fc44/data/signed/6d9f90a6/src/nasm-3.02-1.fc44.src.rpm",
+    "stderr": "",
+    "seconds": 5.965,
+    "path": "target/release-encoder-experiment/nasm-tool/downloads/nasm-3.02-1.fc44.src.rpm",
+    "bytes": 2548277,
+    "sha256": "22f1a7d29984d509fd47c40210280d8cb810645480ab35e56c4eb7d5d924df0d"
+  },
+  "signature_fingerprint": "36F612DCF27F7D1A48A835E4DBFCF71C6D9F90A6",
+  "binary_and_source_rpm_signatures_valid": true,
+  "private_executable": "target/release-encoder-experiment/nasm-tool/prefix/usr/bin/nasm",
+  "private_executable_bytes": 1894272,
+  "private_executable_sha256": "7bc33b386cf2bf783afd32c4b990125a9a1fa3ec8886adb31b11851575890d43",
+  "matches_signed_binary_rpm_file_digest": true,
+  "version_exit": 0,
+  "version_stdout": "NASM version 3.02 compiled on Jul 14 2026\n",
+  "ldd_exit": 0,
+  "ldd_stdout": "\tlinux-vdso.so.1 (0x00007fe8b8d3a000)\n\tlibc.so.6 => /lib64/libc.so.6 (0x00007fe8b8950000)\n\t/lib64/ld-linux-x86-64.so.2 (0x00007fe8b8d3c000)\n",
+  "required_glibc_symbol_versions": [
+    "2.2.5",
+    "2.3",
+    "2.3.4",
+    "2.4",
+    "2.14",
+    "2.33",
+    "2.34",
+    "2.38"
+  ],
+  "source_rpm_payload_files": [
+    {
+      "path": "target/release-encoder-experiment/nasm-tool/source-rpm/nasm-3.02-xdoc.tar.xz",
+      "bytes": 980024,
+      "sha256": "7632368f9eea30bfd438f970e3a534796aecc3783b7b9c9b7a705b93dab0714f"
+    },
+    {
+      "path": "target/release-encoder-experiment/nasm-tool/source-rpm/nasm-3.02.tar.xz",
+      "bytes": 1531636,
+      "sha256": "87336eba53b4acfe917424ab5d500d2b0054d9f5148d35c2273ccf2cfb712f0d"
+    },
+    {
+      "path": "target/release-encoder-experiment/nasm-tool/source-rpm/nasm-CVE-2026-6067.patch",
+      "bytes": 731,
+      "sha256": "3c1f5ff0136bb7a093ba0c61974f0f93736122ae5f08eb68e0767aabc1391186"
+    },
+    {
+      "path": "target/release-encoder-experiment/nasm-tool/source-rpm/nasm.spec",
+      "bytes": 16924,
+      "sha256": "325a8a4874786ad6a3ff35c60574cab889e2e2c1ee7262f0ed03799ecc0d6972"
+    }
+  ],
+  "selected_upstream_source_inventory": [
+    {
+      "path": "LICENSE",
+      "bytes": 1554,
+      "sha256": "7436a7c46b6e4d969b41e1ce387885ae4ced25710662189ff2983665253729ac"
+    },
+    {
+      "path": "configure",
+      "bytes": 416686,
+      "sha256": "09b32d28f01876ec5006f18b548c65b947bff66ee62f436435862def6e7a2c7b"
+    },
+    {
+      "path": "Makefile.in",
+      "bytes": 54549,
+      "sha256": "7791f995160c9952e504d5130422a59a375022c4a4c4893a56ffe98f33f473e1"
+    },
+    {
+      "path": "README.md",
+      "bytes": 760,
+      "sha256": "fe2c57ae95ae47966caaebb361cc9db9867ca467f0fb51209871da87391b0c66"
+    }
+  ],
+  "source_and_installed_license_match_sha256": "7436a7c46b6e4d969b41e1ce387885ae4ced25710662189ff2983665253729ac",
+  "rpm_scriptlets_run": false,
+  "source_script_configure_or_build_run": false,
+  "global_path_or_host_package_changes": false,
+  "source_inputs_receipts_unchanged": {
+    "source_inputs_top_level_regular_files_checked": 24,
+    "mismatches": [],
+    "old_source_pins_sha256": "b542672cb598075f2e0c076a69249628b96aee30de2e7f3ff0145d5bff41691c"
+  },
+  "encoder_integration_tested": false,
+  "build_reproducibility_proven": false
+}

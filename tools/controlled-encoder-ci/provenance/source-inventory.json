@@ -1,0 +1,165 @@
+[
+  {
+    "archive": "target/release-encoder-experiment/source-inputs/ffmpeg-8.0.3.tar.xz",
+    "archive_sha256": "6136812ea6d4e68bdba27e33c2a94382711cdf4f8602ffef056ff792bd6f9818",
+    "root": "target/release-encoder-experiment/source-inputs/sources/ffmpeg-8.0.3",
+    "regular_file_count": 9893,
+    "total_regular_file_bytes": 85894392,
+    "license_files": [
+      {
+        "path": "COPYING.LGPLv2.1",
+        "bytes": 26517,
+        "sha256": "246041b6ecf9bc32d718a62c57877c78b5eb397b6467e74ed7ae2626ab189c30"
+      },
+      {
+        "path": "COPYING.GPLv2",
+        "bytes": 18092,
+        "sha256": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643"
+      },
+      {
+        "path": "COPYING.LGPLv3",
+        "bytes": 7651,
+        "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768"
+      },
+      {
+        "path": "COPYING.GPLv3",
+        "bytes": 35147,
+        "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+      },
+      {
+        "path": "LICENSE.md",
+        "bytes": 4346,
+        "sha256": "2e1d16c72fd74e12063776371da757322f8b77589386532f4fd8634bde7de1af"
+      }
+    ],
+    "build_and_version_files": [
+      {
+        "path": "configure",
+        "bytes": 294581,
+        "sha256": "495e6d5433f0c151f54d2eaac03489d2627b6d576d8493739a7e4856455bd832"
+      },
+      {
+        "path": "Makefile",
+        "bytes": 7420,
+        "sha256": "d28d6bc9adce43db6b52c935056b949451caae6e80f9905763ab0f48bc5de7cd"
+      },
+      {
+        "path": "VERSION",
+        "bytes": 6,
+        "sha256": "b9b67ee4fe0a68d41bbd49590aae6444210bed05c493d0903607b86ba9f231de"
+      },
+      {
+        "path": "ffbuild/version.sh",
+        "bytes": 1933,
+        "sha256": "cf34357a8a7ce476e38e30664ae86153f3a4580d00079ea684046997e1f95b0b"
+      },
+      {
+        "path": "ffbuild/library.mak",
+        "bytes": 4963,
+        "sha256": "14b78a89dbe931e9341a8c686969eca567273da97af35a409ca9f48e3882c970"
+      },
+      {
+        "path": "tools/ffhash.c",
+        "bytes": 3420,
+        "sha256": "d4585d35686cc4c2c45cdbe5df9a428d8a2568b2eb2a1530806f61b63b8d82e7"
+      }
+    ]
+  },
+  {
+    "archive": "target/release-encoder-experiment/source-inputs/zlib-1.3.2.tar.xz",
+    "archive_sha256": "d7a0654783a4da529d1bb793b7ad9c3318020af77667bcae35f95d0e42a792f3",
+    "root": "target/release-encoder-experiment/source-inputs/sources/zlib-1.3.2",
+    "regular_file_count": 254,
+    "total_regular_file_bytes": 3579037,
+    "license_files": [
+      {
+        "path": "LICENSE",
+        "bytes": 1002,
+        "sha256": "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2"
+      },
+      {
+        "path": "contrib/dotzlib/LICENSE_1_0.txt",
+        "bytes": 1359,
+        "sha256": "36266a8fd073568394cb81cdb2b124f7fdae2c64c1a7ed09db34b4d22efa2951"
+      },
+      {
+        "path": "contrib/minizip/LICENSE.Info-Zip",
+        "bytes": 3509,
+        "sha256": "fc686023047ce5ce3a18a9b8a777156f0e475929d3de06bac279f3c025d2b2ca"
+      }
+    ],
+    "build_and_version_files": [
+      {
+        "path": "configure",
+        "bytes": 32907,
+        "sha256": "c07499bd24003913f8488b4100db86c79830a8faa09e4b950f09f5b51a48787d"
+      },
+      {
+        "path": "Makefile",
+        "bytes": 100,
+        "sha256": "ef23b08ce01239843f1ded3f373bfc432627a477d62f945cbf63b2ac03db118a"
+      },
+      {
+        "path": "win32/Makefile.gcc",
+        "bytes": 4983,
+        "sha256": "71135ef48a9fcea23c3946b5b7f41ae866e248b1c1e20fd580045a593054c39f"
+      },
+      {
+        "path": "CMakeLists.txt",
+        "bytes": 9873,
+        "sha256": "4c3a70936312909462e360ca60b509a71cbad1f651434d100a84e19b4743ccb8"
+      },
+      {
+        "path": "zlib.h",
+        "bytes": 103848,
+        "sha256": "818667d6ab6a37fe7469cb06a7f0cb2c2cb2f2c948a03e5accf1a4a74bf3020a"
+      },
+      {
+        "path": "zconf.h",
+        "bytes": 16955,
+        "sha256": "cb7c2c84211473b4699223edd363d3207b43b9578e739b5bf638f42204ea6e0f"
+      }
+    ]
+  },
+  {
+    "archive": "target/release-encoder-experiment/source-inputs/x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar",
+    "archive_sha256": "df62afece4eecef8ddf196f115dfec6e936a21b04ec2117a0f4e412de29b20e5",
+    "root": "target/release-encoder-experiment/source-inputs/sources/x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55",
+    "regular_file_count": 270,
+    "total_regular_file_bytes": 5908546,
+    "license_files": [
+      {
+        "path": "COPYING",
+        "bytes": 17992,
+        "sha256": "32b1062f7da84967e7019d01ab805935caa7ab7321a7ced0e30ebe75e5df1670"
+      }
+    ],
+    "build_and_version_files": [
+      {
+        "path": "configure",
+        "bytes": 57274,
+        "sha256": "3120354a746e3b5924ff43a39ff772f0a23a93c1daa366d9d7f5ce60b23fe8d7"
+      },
+      {
+        "path": "Makefile",
+        "bytes": 13393,
+        "sha256": "e870c51c06a19b49a72d2dda03ac1732811dec7fd2dcb643ca70a597ba0b7559"
+      },
+      {
+        "path": "version.sh",
+        "bytes": 854,
+        "sha256": "bd2ba5e775c650c8d67518fea122f8dba80db995305af793f19ac60458826d8d"
+      },
+      {
+        "path": "x264.h",
+        "bytes": 49056,
+        "sha256": "cec084bdb3cd2330800d0726bdbd99d91112df3fdb6d79f94e15ba67808b715c"
+      },
+      {
+        "path": "common/x86/x86inc.asm",
+        "bytes": 60460,
+        "sha256": "3beb1b973049966b4411037bbf3531c4da83611f4a9a68105f257a7fb0d122d6"
+      }
+    ]
+  }
+]

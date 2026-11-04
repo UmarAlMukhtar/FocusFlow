@@ -1,0 +1,89 @@
+{
+  "adaptation": "Historical checkout prefix removed from copied provenance; paths are repository-relative evidence, not executable lookups. Build flags/profile copied byte-for-byte; full environment dump replaced by explicit build-variable allowlist; inspector only reads staged baseline header; smoke paths made explicit and Windows kill status portable. No codec/filter flags changed.",
+  "receipts": [
+    {
+      "file": "source-rpm-acquisition.json",
+      "source": "target/windows-encoder-source-bundle-20261031/receipts/acquisition.json",
+      "original_sha256": "1362bb3d046426992e087fe204b49d7dd001b72a512fdcbe80f43f1ae84473bc",
+      "derived_sha256": "3de9918818f518376d8fe010162d2711b1765fd3409336253fbd970f076beadc"
+    },
+    {
+      "file": "feature-assertions.json",
+      "source": "target/release-encoder-experiment/windows-candidate-20261031/receipts/feature-assertions.json",
+      "original_sha256": "6ab966f2d86e489c4738e2bbb7d9dec6855fdb9e609994305e04873cea10ee2e",
+      "derived_sha256": "6ab966f2d86e489c4738e2bbb7d9dec6855fdb9e609994305e04873cea10ee2e"
+    },
+    {
+      "file": "linux-config_components.h",
+      "source": "target/release-encoder-experiment/linux-candidate-20261028/receipts/ffmpeg-config_components.h",
+      "original_sha256": "feded7f5e690bc4b1501f7b165c35e5118e8b22cd939a1f16ae03a6a2c230595",
+      "derived_sha256": "feded7f5e690bc4b1501f7b165c35e5118e8b22cd939a1f16ae03a6a2c230595"
+    },
+    {
+      "file": "source-bundle-NOTICES.txt",
+      "source": "target/windows-encoder-source-bundle-20261031/NOTICES.txt",
+      "original_sha256": "425b958924180a8a1b5096a30e558f2437948481ca33611f3112c5ffe9466ab8",
+      "derived_sha256": "425b958924180a8a1b5096a30e558f2437948481ca33611f3112c5ffe9466ab8"
+    },
+    {
+      "file": "source-bundle-LIMITATIONS.md",
+      "source": "target/windows-encoder-source-bundle-20261031/LIMITATIONS.md",
+      "original_sha256": "f0ad95ac84ac19345ba48f20129b8fa98e2524114af511eeacb2161f94c3810b",
+      "derived_sha256": "f0ad95ac84ac19345ba48f20129b8fa98e2524114af511eeacb2161f94c3810b"
+    },
+    {
+      "file": "source-and-header-notices.txt",
+      "source": "target/windows-encoder-source-bundle-20261031/notices/source-and-header-notices.txt",
+      "original_sha256": "bc917f8ab51eb43d0f29e393cbd09d41288b7e057034f70ee7964ca2273af273",
+      "derived_sha256": "bc917f8ab51eb43d0f29e393cbd09d41288b7e057034f70ee7964ca2273af273"
+    },
+    {
+      "file": "nasm-inputs.json",
+      "source": "target/release-encoder-experiment/nasm-tool/nasm-inputs.json",
+      "original_sha256": "d660faf1d6e485e1ef3ab8a146cc8b07794bcef17b4e46c89cdef7a47d70ff19",
+      "derived_sha256": "4456a8e79227da0c22ccb48de42b4169b2e36ad9d790f65176752ab8d7f4797a"
+    },
+    {
+      "file": "encoder-source-pins.json",
+      "source": "target/release-encoder-experiment/source-inputs/encoder-source-pins.json",
+      "original_sha256": "b542672cb598075f2e0c076a69249628b96aee30de2e7f3ff0145d5bff41691c",
+      "derived_sha256": "58a8cb0a278ae0d4885f90accc40f97d2a8b6f3b9dc3a2d81fc45d7c641fb9ed"
+    },
+    {
+      "file": "source-inventory.json",
+      "source": "target/release-encoder-experiment/source-inputs/source-inventory.json",
+      "original_sha256": "c1d41993985ddf2677c892c04849e663bee4f3c2bf6beb89660abac86d868fe0",
+      "derived_sha256": "c9c049c3d279b96586346e5822179b5fa90b49c8d9fe5d38d6910aad23c40182"
+    },
+    {
+      "file": "reused-gnu-rpm-verification.json",
+      "source": "target/release-encoder-experiment/source-inputs/reused-gnu-rpm-verification.json",
+      "original_sha256": "d71ca9fa30c8283bf294c9c4205caa3f8478f9cfa1e586c0d7ef78f5c83e87ac",
+      "derived_sha256": "e474cf1cf706ff2180c7944d10fa8ca9ae7e2474412774db7c1e81910971a8d6"
+    },
+    {
+      "file": "tool-availability.json",
+      "source": "target/release-encoder-experiment/source-inputs/tool-availability.json",
+      "original_sha256": "b013596a7d2f924072cf1f4eb968809b621d05212d9d8149f782f7e7b7de2c29",
+      "derived_sha256": "5528f4824831d14a731f290ae0c7110bf4ee1daed766f4edc1fdf437943691d6"
+    },
+    {
+      "file": "coverage-397.json",
+      "source": "target/windows-encoder-source-bundle-20261031/coverage-397.json",
+      "original_sha256": "b734df6a280f997866c38699ed8d8bca3786eb559912852cd9633f59eec98a07",
+      "derived_sha256": "b734df6a280f997866c38699ed8d8bca3786eb559912852cd9633f59eec98a07"
+    },
+    {
+      "file": "source-index.json",
+      "source": "target/windows-encoder-source-bundle-20261031/source-index.json",
+      "original_sha256": "96285f00cd3dbacd323517ef4c585f8d7c69f908cd1d160b6420b4b19d17bbdd",
+      "derived_sha256": "a6cbac2951a9a7b76009ce7bb7bc7f23185bf60de2149850e034f8dfbc826e0a"
+    },
+    {
+      "file": "include-closure.json",
+      "source": "target/windows-encoder-source-bundle-20261031/receipts/include-closure.json",
+      "original_sha256": "96f2adf42710098faf4c5efeb6c80a211e41ae1ab77f91b5b511fbedfb78c557",
+      "derived_sha256": "96f2adf42710098faf4c5efeb6c80a211e41ae1ab77f91b5b511fbedfb78c557"
+    }
+  ]
+}

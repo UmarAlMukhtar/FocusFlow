@@ -1,0 +1,160 @@
+name: Controlled encoder qualification
+on:
+  push:
+    branches: [codex-controlled-encoder-qualification]
+permissions:
+  contents: read
+concurrency:
+  group: controlled-encoder-qualification
+  cancel-in-progress: false
+jobs:
+  reviewed-inputs:
+    if: github.ref == 'refs/heads/codex-controlled-encoder-qualification'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      container: ${{ steps.pins.outputs.container }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          sparse-checkout: tools/controlled-encoder-ci
+      - name: Offline controls and publication gate
+        id: pins
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python3 -m unittest discover -s tools/controlled-encoder-ci -v
+          python3 tools/controlled-encoder-ci/validate.py --platform
+          python3 - <<'PY'
+          import json, os, pathlib
+          lock=json.loads(pathlib.Path('tools/controlled-encoder-ci/inputs.lock.json').read_text())
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('container='+lock['platform']['container_image']+'\n')
+          PY
+  controlled-build:
+    needs: reviewed-inputs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container:
+      image: ${{ needs.reviewed-inputs.outputs.container }}
+      options: --cpus 2 --memory 8g
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          sparse-checkout: tools/controlled-encoder-ci
+      - name: Install official host helpers and record exact identities
+        run: |
+          bash tools/controlled-encoder-ci/host-tools.sh "$GITHUB_WORKSPACE/encoder-setup"
+          python3 - <<'PY'
+          import json, os, pathlib
+          fields=['GITHUB_SHA','GITHUB_REF','GITHUB_REPOSITORY','GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','RUNNER_OS']
+          pathlib.Path('encoder-setup/run-context.json').write_text(json.dumps({key:os.environ.get(key) for key in fields},indent=2)+'\n')
+          PY
+      - name: Acquire exact source and tool inputs
+        run: python3 tools/controlled-encoder-ci/acquire.py --cache "$GITHUB_WORKSPACE/encoder-cache"
+      - name: Isolated controlled build and static inspection
+        run: |
+          set -eu
+          python3 tools/controlled-encoder-ci/prepare.py --cache "$GITHUB_WORKSPACE/encoder-cache" --work "$GITHUB_WORKSPACE/encoder-work"
+          candidate="$GITHUB_WORKSPACE/encoder-work/target/release-encoder-experiment/candidate"
+          env -i PATH=/usr/bin:/bin /bin/bash "$candidate/build.sh" > "$candidate/build.log" 2>&1
+          python3 "$candidate/inspect-candidate.py" > "$candidate/inspect.log" 2>&1
+          python3 tools/controlled-encoder-ci/artifact.py pack --candidate "$candidate" --artifact encoder-handoff
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: controlled-encoder-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: error
+          path: encoder-handoff/
+      - name: Hash complete source/tool archive boundary
+        run: |
+          cd encoder-cache
+          sha256sum *.rpm *.tar *.tar.xz *.asc acquisition.json > SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: controlled-encoder-inputs-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            encoder-cache/*.rpm
+            encoder-cache/*.tar
+            encoder-cache/*.tar.xz
+            encoder-cache/*.asc
+            encoder-cache/acquisition.json
+            encoder-cache/SHA256SUMS
+            encoder-setup/*.txt
+            encoder-setup/*.json
+            encoder-setup/host-install.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: failure()
+        with:
+          name: controlled-encoder-build-failure-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            encoder-setup/*.txt
+            encoder-setup/*.json
+            encoder-setup/host-install.log
+            encoder-work/target/release-encoder-experiment/candidate/build.log
+            encoder-work/target/release-encoder-experiment/candidate/inspect.log
+            encoder-work/target/release-encoder-experiment/candidate/receipts/*.json
+            encoder-work/target/release-encoder-experiment/candidate/receipts/*.txt
+            encoder-work/target/release-encoder-experiment/candidate/receipts/*.log
+  windows-consumers:
+    needs: controlled-build
+    runs-on: windows-2022
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12.10'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: controlled-encoder-${{ github.sha }}
+          path: encoder-handoff
+      - name: Verify owned handoff and pin independent decode tools
+        shell: pwsh
+        run: |
+          python encoder-handoff/recipe/artifact.py verify --artifact encoder-handoff
+          if ($LASTEXITCODE -ne 0) { throw 'Owned build artifact failed verification' }
+          New-Item -ItemType Directory -Force encoder-setup | Out-Null
+          $archive = Join-Path $env:RUNNER_TEMP 'focusflow-reference-ffmpeg-8.0.1.zip'
+          Invoke-WebRequest 'https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-essentials_build.zip' -OutFile $archive -TimeoutSec 120
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLower() -ne 'e2aaeaa0fdbc397d4794828086424d4aaa2102cef1fb6874f6ffd29c0b88b673') { throw 'Reference archive hash mismatch' }
+          $extract = Join-Path $env:RUNNER_TEMP 'focusflow-reference-ffmpeg'
+          Expand-Archive $archive -DestinationPath $extract
+          $bin = Join-Path $extract 'ffmpeg-8.0.1-essentials_build/bin'
+          $reference = Join-Path $bin 'ffmpeg.exe'
+          $probe = Join-Path $bin 'ffprobe.exe'
+          if ((Get-FileHash $reference -Algorithm SHA256).Hash.ToLower() -ne '5af82a0d4fe2b9eae211b967332ea97edfc51c6b328ca35b827e73eac560dc0d') { throw 'Reference ffmpeg mismatch' }
+          if ((Get-FileHash $probe -Algorithm SHA256).Hash.ToLower() -ne '192a1d6899059765ac8c39764fc3148d4e6049955956dc2029f81f4bd6a8972d') { throw 'Reference ffprobe mismatch' }
+          Get-FileHash $archive,$reference,$probe -Algorithm SHA256 | ConvertTo-Json | Out-File encoder-setup/reference-hashes.json
+          @{ ImageVersion=$env:ImageVersion; ImageOS=$env:ImageOS; OS=Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber,OSArchitecture; CPU=Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores } | ConvertTo-Json -Depth 4 | Out-File encoder-setup/runner.json
+          "ENCODER_REFERENCE=$reference" | Out-File -Append $env:GITHUB_ENV
+          "ENCODER_PROBE=$probe" | Out-File -Append $env:GITHUB_ENV
+      - name: Actual owned candidate startup and generated consumer commands
+        shell: pwsh
+        run: |
+          python encoder-handoff/recipe/windows-smoke.py --candidate encoder-handoff/candidate/ffmpeg.exe --ffmpeg-reference $env:ENCODER_REFERENCE --ffprobe-reference $env:ENCODER_PROBE --output encoder-evidence 2>&1 | Tee-Object encoder-setup/smoke.log
+          if ($LASTEXITCODE -ne 0) { throw 'Controlled candidate consumer qualification incomplete' }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: controlled-encoder-windows-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            encoder-setup/*.json
+            encoder-setup/*.log
+            encoder-evidence/smoke/*.json
+            encoder-evidence/smoke/*.stdout
+            encoder-evidence/smoke/*.stderr
+            encoder-evidence/smoke/*.mp4
+            encoder-evidence/smoke/*.png
+            encoder-evidence/smoke/*.txt

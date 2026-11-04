@@ -1,0 +1,59 @@
+FocusFlow experimental Windows encoder — third-party source and notice index
+Candidate SHA-256: b10d6e14f9f52ca7d87a5046ffc79ba5a8683fea2ed743fd0f1c267cd5204cdb
+Bundle revision: 2026-10-31. Local engineering delivery; not a public release.
+
+FFmpeg 8.0.3: GPL-enabled configuration, libx264, static libraries.
+Complete FFmpeg license texts: notices/ffmpeg/. Original full source archive
+and exact flags: source-index.json and recipe/build.sh. No local source patches.
+x264 b35605ace3ddf7c1a5d67a2eb553f034aef41d55: GPL, see notices/x264/COPYING.
+zlib 1.3.2: zlib license, see notices/zlib/LICENSE.
+
+MinGW-w64 13.0.0 CRT/header/winpthreads source package preparation is retained
+from exact Fedora 13.0.0-3.fc44 source RPMs, not inferred from a newer release.
+All 106 selected CRT implementations, 9 selected pthread implementations and
+CRT startup object have source entries in coverage-397.json. See source-units/
+for exact source bytes and notices/source-and-header-notices.txt for all comments
+from the selected source files and conservatively followed include alternatives.
+This includes member-specific public-domain, ZPL 2.1, Lucent/David M. Gay, and
+Softweyr/Berkeley notices, including wrappers' included implementation headers.
+The source corpus is deliberately a superset; it is not a preprocessor trace.
+
+winpthreads' ACTUAL COPYING is:
+notices/upstream/mingw-w64-v13.0.0/mingw-w64-libraries/winpthreads/COPYING
+It includes MIT permission and Lockless BSD terms. Intel copyright and MIT
+permission variants in mutex.c/spinlock.c are retained in the corpus and exact
+source units. clock.c/nanosleep.c public-domain statements and DISCLAIMER.PD
+are retained. cond.c's ACE derivation statement is retained verbatim; this bundle
+does not independently establish the history of that upstream derivation.
+The old candidate's generic ZPL winpthreads placeholder is not coverage evidence
+and has not been changed or substituted for these source-derived notices.
+
+GCC 16.2.1 20260819 / Fedora 16.2.1-1.fc44 contributes three libgcc members
+and crtbegin.o/crtend.o. libgcc2.c, i386/cygwin.S and cygming-crtbegin/end.c
+explicitly grant GCC Runtime Library Exception 3.1 in their own copyright/license
+headers. Full GPL and runtime exception texts are retained under:
+notices/upstream/gcc-16.2.1-20260819/COPYING3
+notices/upstream/gcc-16.2.1-20260819/COPYING.RUNTIME
+The source corpus retains their contributing headers' notices conservatively.
+Exception applicability is based on those source grants, not merely RPM License.
+
+276 additional selected archive members are generated MinGW import descriptors,
+terminators or symbol thunks. Their .def/.def.in source and the binutils 2.46.0
+DLLTOOL generator route are recorded individually in coverage-397.json.
+The implementations of GDI32.dll, KERNEL32.dll, SHELL32.dll, USER32.dll,
+bcrypt.dll and msvcrt.dll are Windows prerequisites and are not included in
+this PE or claimed as delivered third-party source here. libgcc_eh/libatomic
+and other archives merely mentioned by LOAD are not counted as selected code.
+
+Read receipts/include-closure.json and LIMITATIONS.md before claiming notice
+closure. Generated compiler config headers, conditional include branches and
+remaining include routes have not been reconstructed/preprocessed. Their exact
+source archives are delivered, but unresolved entries are not counted as
+complete notice/header coverage. Every one of the 397 entries explicitly carries
+that limitation. These notices do not certify legal compliance, native Windows
+qualification, installer inclusion, ABI compatibility or bit-identical rebuilding.
+
+A release must place this index and its complete notice corpus beside the exact
+binary and expose it through installed app documentation/About, then publish the
+versioned source archive at an accessible stable release link. This worker neither
+changes the installed product nor invents an unavailable public download link.

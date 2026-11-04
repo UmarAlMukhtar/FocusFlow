@@ -1,0 +1,580 @@
+{
+  "schema": 1,
+  "packages": [
+    {
+      "nvr": "mingw-winpthreads-13.0.0-3.fc44",
+      "spec": "package-inputs/mingw-winpthreads-13.0.0-3.fc44/mingw-winpthreads.spec",
+      "inputs": [
+        {
+          "path": "package-inputs/mingw-winpthreads-13.0.0-3.fc44/mingw-w64-v13.0.0.tar.bz2",
+          "sha256": "5afe822af5c4edbf67daaf45eec61d538f49eef6b19524de64897c6b95828caf",
+          "bytes": 10868704,
+          "retained_at": "upstream/mingw-w64-v13.0.0.tar.bz2"
+        },
+        {
+          "path": "package-inputs/mingw-winpthreads-13.0.0-3.fc44/mingw-winpthreads.spec",
+          "sha256": "cf4bcb33a94dd396482ef67396a85c94781b3ad4fb9d2c42c61eb4d5b2cfab5f",
+          "bytes": 17258,
+          "retained_at": "package-inputs/mingw-winpthreads-13.0.0-3.fc44/mingw-winpthreads.spec"
+        }
+      ],
+      "patch_order": [],
+      "prep_instructions": [
+        "%prep",
+        "%autosetup -p1 -n mingw-w64-v%{version}%{?pre:-%{pre}}"
+      ],
+      "prep_executed": false
+    },
+    {
+      "nvr": "mingw-crt-13.0.0-3.fc44",
+      "spec": "package-inputs/mingw-crt-13.0.0-3.fc44/mingw-crt.spec",
+      "inputs": [
+        {
+          "path": "package-inputs/mingw-crt-13.0.0-3.fc44/mingw-crt.spec",
+          "sha256": "e7f7f9c8dab26da5b99bb1bc56622a942534d1f8d9996f2a53feccda4a7cb024",
+          "bytes": 25725,
+          "retained_at": "package-inputs/mingw-crt-13.0.0-3.fc44/mingw-crt.spec"
+        },
+        {
+          "path": "package-inputs/mingw-crt-13.0.0-3.fc44/mingw-w64-v13.0.0.tar.bz2",
+          "sha256": "5afe822af5c4edbf67daaf45eec61d538f49eef6b19524de64897c6b95828caf",
+          "bytes": 10868704,
+          "retained_at": "upstream/mingw-w64-v13.0.0.tar.bz2"
+        },
+        {
+          "path": "package-inputs/mingw-crt-13.0.0-3.fc44/standard-dlls-mingw32",
+          "sha256": "89639a3b7a70bc83c535d92c7868f7e75e9d5d9a5e2ed135df4ec44d0cb3cc9f",
+          "bytes": 16546,
+          "retained_at": "package-inputs/mingw-crt-13.0.0-3.fc44/standard-dlls-mingw32"
+        },
+        {
+          "path": "package-inputs/mingw-crt-13.0.0-3.fc44/standard-dlls-mingw64",
+          "sha256": "9d79c09ce60a4b6a9f13cedc27d228a4c9707203b27f739b5bd5ef1d95efd0db",
+          "bytes": 22038,
+          "retained_at": "package-inputs/mingw-crt-13.0.0-3.fc44/standard-dlls-mingw64"
+        },
+        {
+          "path": "package-inputs/mingw-crt-13.0.0-3.fc44/standard-dlls-ucrt64",
+          "sha256": "9d79c09ce60a4b6a9f13cedc27d228a4c9707203b27f739b5bd5ef1d95efd0db",
+          "bytes": 22038,
+          "retained_at": "package-inputs/mingw-crt-13.0.0-3.fc44/standard-dlls-ucrt64"
+        }
+      ],
+      "patch_order": [],
+      "prep_instructions": [
+        "%prep",
+        "%autosetup -p1 -n mingw-w64-v%{version}"
+      ],
+      "prep_executed": false
+    },
+    {
+      "nvr": "mingw-headers-13.0.0-3.fc44",
+      "spec": "package-inputs/mingw-headers-13.0.0-3.fc44/mingw-headers.spec",
+      "inputs": [
+        {
+          "path": "package-inputs/mingw-headers-13.0.0-3.fc44/mingw-headers-no-widl.patch",
+          "sha256": "7100d3f440c3313cb76cd4a728a3196e71ff300a5064cbd9ea3a8d905f9ee1eb",
+          "bytes": 1165,
+          "retained_at": "package-inputs/mingw-headers-13.0.0-3.fc44/mingw-headers-no-widl.patch"
+        },
+        {
+          "path": "package-inputs/mingw-headers-13.0.0-3.fc44/mingw-headers.spec",
+          "sha256": "9b0b09f541f6e07ac37248fd781a0a5739650a960936f53b30f34fb68ed3a0c3",
+          "bytes": 26032,
+          "retained_at": "package-inputs/mingw-headers-13.0.0-3.fc44/mingw-headers.spec"
+        },
+        {
+          "path": "package-inputs/mingw-headers-13.0.0-3.fc44/mingw-w64-v13.0.0.tar.bz2",
+          "sha256": "5afe822af5c4edbf67daaf45eec61d538f49eef6b19524de64897c6b95828caf",
+          "bytes": 10868704,
+          "retained_at": "upstream/mingw-w64-v13.0.0.tar.bz2"
+        }
+      ],
+      "patch_order": [
+        "mingw-headers-no-widl.patch"
+      ],
+      "prep_instructions": [
+        "%prep",
+        "%autosetup -p1 -n mingw-w64-v%{version}%{?pre:-%{pre}}"
+      ],
+      "prep_executed": false
+    },
+    {
+      "nvr": "mingw-gcc-16.2.1-1.fc44",
+      "spec": "package-inputs/mingw-gcc-16.2.1-1.fc44/mingw-gcc.spec",
+      "inputs": [
+        {
+          "path": "package-inputs/mingw-gcc-16.2.1-1.fc44/0020-libgomp-Don-t-hard-code-MS-printf-attributes.patch",
+          "sha256": "0d6a1866e3e3cf2d736998245019f4c22de7b8063baa5d9dabed21bdd0ed1ff1",
+          "bytes": 1415,
+          "retained_at": "package-inputs/mingw-gcc-16.2.1-1.fc44/0020-libgomp-Don-t-hard-code-MS-printf-attributes.patch"
+        },
+        {
+          "path": "package-inputs/mingw-gcc-16.2.1-1.fc44/gcc-16.2.1-20260819.tar.xz",
+          "sha256": "662d388e328c7ce97733f086c4b22ef6647c2197179f3196bde3323e6c64ca47",
+          "bytes": 93765108,
+          "retained_at": "upstream/gcc-16.2.1-20260819.tar.xz"
+        },
+        {
+          "path": "package-inputs/mingw-gcc-16.2.1-1.fc44/mingw-gcc.spec",
+          "sha256": "a5f66aa26e748a30cb984778d0486706ee801055ecd283f3acf4686f65e5b28c",
+          "bytes": 61575,
+          "retained_at": "package-inputs/mingw-gcc-16.2.1-1.fc44/mingw-gcc.spec"
+        },
+        {
+          "path": "package-inputs/mingw-gcc-16.2.1-1.fc44/mingw-gcc_include-stdlib.patch",
+          "sha256": "897fca5087a7b6dfc864b089a61f6d1eea5fa1acc073c3d1e31570439272cdfd",
+          "bytes": 557,
+          "retained_at": "package-inputs/mingw-gcc-16.2.1-1.fc44/mingw-gcc_include-stdlib.patch"
+        }
+      ],
+      "patch_order": [
+        "0020-libgomp-Don-t-hard-code-MS-printf-attributes.patch",
+        "mingw-gcc_include-stdlib.patch"
+      ],
+      "prep_instructions": [
+        "%prep",
+        "%autosetup -p1 -n %{srcdir}"
+      ],
+      "prep_executed": false
+    },
+    {
+      "nvr": "mingw-filesystem-152-1.fc44",
+      "spec": "package-inputs/mingw-filesystem-152-1.fc44/mingw-filesystem.spec",
+      "inputs": [
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/COPYING",
+          "sha256": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643",
+          "bytes": 18092,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/COPYING"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/iso_3166.sed",
+          "sha256": "669556e70033fa2cf00de6ceb385446f59d6d91c14490cbb5c21095747bc11c0",
+          "bytes": 761,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/iso_3166.sed"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/iso_639.sed",
+          "sha256": "6410116395fa8716934ce174e8c61910340938ab1c72af6da773b465f9cd83df",
+          "bytes": 776,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/iso_639.sed"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/lang-exceptions",
+          "sha256": "29787d395c1e78fd53916090f71f695ca85353b32cc10a22fe548f54be92b19c",
+          "bytes": 1008,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/lang-exceptions"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/macros.mingw",
+          "sha256": "9c2434eb06393f71acc4e590392a2d8ce637ac787eb4d0cc622a91cd0c732b5d",
+          "bytes": 11201,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/macros.mingw"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/macros.mingw32",
+          "sha256": "e6b94f7d1de0c37152a1a15d3ddd6b26a107e673ddc2bf1c4e716a63bc635a5f",
+          "bytes": 8820,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/macros.mingw32"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/macros.mingw64",
+          "sha256": "bfb902989e1625a34b2ca5f6be4a50e077fba467f677c564d64eea87425a5189",
+          "bytes": 8822,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/macros.mingw64"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/macros.ucrt64",
+          "sha256": "871acbc4f93ee5f21d7e71e33f802b8191e0b968f23e47b12109626c7c50129d",
+          "bytes": 8220,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/macros.ucrt64"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/mingw-filesystem.spec",
+          "sha256": "ac4bbe98ec5e8b65218100a49d0d9ce0db9f82cc56de8fd16c26c9c641b3a631",
+          "bytes": 46737,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/mingw-filesystem.spec"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/mingw-find-debuginfo.sh",
+          "sha256": "b9da8b752c514824d2022af3e2a89c445926adb174b2aff7ba302d32ea93289e",
+          "bytes": 1606,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/mingw-find-debuginfo.sh"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/mingw-find-lang.sh",
+          "sha256": "7caf512396c536ab0746a9b278f3260560795456b3a3a821d6f25f45a01fa25d",
+          "bytes": 784,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/mingw-find-lang.sh"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/mingw-rpmlint.config",
+          "sha256": "807db2983e2b8fb4b6eff5ea6e1b7adc0eedb84a3dfac4e4b5b06ceb1914be61",
+          "bytes": 1123,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/mingw-rpmlint.config"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/mingw-scripts.sh",
+          "sha256": "790b1febc5f56afb7670f0f14b3d0ce8632d82cf229cbe4d7beea0e51f0bc11a",
+          "bytes": 2023,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/mingw-scripts.sh"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/mingw.prov",
+          "sha256": "593c00c67442fbad0cb68789c35dcf2f4e30339627ff0af6b5cf68745d383eea",
+          "bytes": 920,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/mingw.prov"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/mingw.req",
+          "sha256": "72289f265999f27d11cf3a8125e0ee54be0a12749c1fb8b3b72494d40a9f7347",
+          "bytes": 1330,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/mingw.req"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/mingw32-hostlib.conf",
+          "sha256": "3cc2feee654c7193027397a7f6ab41bd1c6db13fda295278205a050f870f3f3d",
+          "bytes": 27,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/mingw32-hostlib.conf"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/mingw32.attr",
+          "sha256": "55fc9ce8e314e2f6464ad504ac0a3192dfbcb4445abc7f02b31e4b5dfd694174",
+          "bytes": 211,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/mingw32.attr"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/mingw32.sh",
+          "sha256": "f18c43f4aae6723977f0534ffccc6253692f1c08c340b52f6aebd1691dc6abec",
+          "bytes": 99,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/mingw32.sh"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/mingw64-hostlib.conf",
+          "sha256": "df1b65371bead6dddc703346f56dde023e22d52d9f071a3b646beaaec75a53c9",
+          "bytes": 29,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/mingw64-hostlib.conf"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/mingw64.attr",
+          "sha256": "e32eb2dd0f64df12d5ddb3f73851ce15b2fb2019ba8286bc5c2152f316d56d29",
+          "bytes": 211,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/mingw64.attr"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/mingw64.sh",
+          "sha256": "45331b03772f7edfad1c7425ea2b65afaa35025e1f00221fb29c2831bb425a57",
+          "bytes": 99,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/mingw64.sh"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/pkgconf-personality-mingw32",
+          "sha256": "cc08734b5a03c298c0adb6ba0a7e68c2516f1e8fbebe4d616db8bdc891f31398",
+          "bytes": 359,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/pkgconf-personality-mingw32"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/pkgconf-personality-mingw64",
+          "sha256": "1e293378f9b81d5cb0739be2de29992131b8ab9cee9019cf6f7e3881407b4fe4",
+          "bytes": 371,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/pkgconf-personality-mingw64"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/pkgconf-personality-ucrt64",
+          "sha256": "4e47aea82a8ac7f19401fea3e76694bdd8ee56326defde8fcdcf90c8454963b0",
+          "bytes": 400,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/pkgconf-personality-ucrt64"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/toolchain-mingw32.cmake",
+          "sha256": "c3243e1a07d7d48fdf98a14a59375289e42eb25ab785d1da6628961e6b114428",
+          "bytes": 1220,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/toolchain-mingw32.cmake"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/toolchain-mingw32.meson",
+          "sha256": "f8fc79340ddda4b4880fdab958ae9bae65271babd6a6177dbdfb11ecf5c245ea",
+          "bytes": 745,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/toolchain-mingw32.meson"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/toolchain-mingw64.cmake",
+          "sha256": "43e1d57b8628c7b40f17a57c67c7a6d7bade4c1fda4018d79f65bbee61aea5c3",
+          "bytes": 1239,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/toolchain-mingw64.cmake"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/toolchain-mingw64.meson",
+          "sha256": "251ecabd02c6b2ca9a02be88d750c5dddc71ceb01ec6fe0b128f2386291e4bbd",
+          "bytes": 774,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/toolchain-mingw64.meson"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/toolchain-ucrt64.cmake",
+          "sha256": "e8e7c6c9ef5e4653a11a04cc97aef98f482cdaba00e486f1248d92d8a9c89226",
+          "bytes": 1217,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/toolchain-ucrt64.cmake"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/toolchain-ucrt64.meson",
+          "sha256": "770ca721142488eb41ac4e945eeabbae37d6598b692aca4591a4f0f36215503e",
+          "bytes": 855,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/toolchain-ucrt64.meson"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/ucrt64.attr",
+          "sha256": "4f417c0fa0925b4b6fa65c708575cf46893535c2425b7a0e62171ff830582db5",
+          "bytes": 205,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/ucrt64.attr"
+        },
+        {
+          "path": "package-inputs/mingw-filesystem-152-1.fc44/ucrt64.sh",
+          "sha256": "383c8fea65867647d2a016ae9886d3e850d86f8061819975a00020ff28234044",
+          "bytes": 97,
+          "retained_at": "package-inputs/mingw-filesystem-152-1.fc44/ucrt64.sh"
+        }
+      ],
+      "patch_order": [],
+      "prep_instructions": [
+        "%prep",
+        "%setup -q -c -T"
+      ],
+      "prep_executed": false
+    },
+    {
+      "nvr": "mingw-binutils-2.46.0-1.fc44",
+      "spec": "package-inputs/mingw-binutils-2.46.0-1.fc44/mingw-binutils.spec",
+      "inputs": [
+        {
+          "path": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-2.27-aarch64-ifunc.patch",
+          "sha256": "d0f35c8844b228e15ce4a0d07212aed34b09feed9420e4d1041946760032230b",
+          "bytes": 534,
+          "retained_at": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-2.27-aarch64-ifunc.patch"
+        },
+        {
+          "path": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-2.46.0.tar.xz",
+          "sha256": "d75a94f4d73e7a4086f7513e67e439e8fcdcbb726ffe63f4661744e6256b2cf2",
+          "bytes": 28548776,
+          "retained_at": "upstream/binutils-2.46.0.tar.xz"
+        },
+        {
+          "path": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-aarch64-small-plt0.patch",
+          "sha256": "e972ae2292ac97d80e9113e898642ff8149f6a87d7bc43fed60aee2deec43a9e",
+          "bytes": 804,
+          "retained_at": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-aarch64-small-plt0.patch"
+        },
+        {
+          "path": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-autoconf-version.patch",
+          "sha256": "f5a4849b2d6730c894df109f931741049881be63589486a2887fa99618c88a6b",
+          "bytes": 632,
+          "retained_at": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-autoconf-version.patch"
+        },
+        {
+          "path": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-do-not-link-with-static-libstdc++.patch",
+          "sha256": "c9730bd41255e348cdf436ba6537d82dfa35a2076869f25a31cbb153ecb86197",
+          "bytes": 2687,
+          "retained_at": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-do-not-link-with-static-libstdc++.patch"
+        },
+        {
+          "path": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-export-demangle.h.patch",
+          "sha256": "1a340c8ca7fe92f9a48bf50ca2854f204f4311fe6a204d7263f372f76998d49b",
+          "bytes": 1862,
+          "retained_at": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-export-demangle.h.patch"
+        },
+        {
+          "path": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-fix-ar-test.patch",
+          "sha256": "f571daac333adf48932ba9fce1ddbbf58f710bc9fcfc15ce7284a814faeadf6b",
+          "bytes": 590,
+          "retained_at": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-fix-ar-test.patch"
+        },
+        {
+          "path": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-ld-default-z-text.patch",
+          "sha256": "aa5386bd64d52dc29a4344865582e38da0c325159d3bc75eead93e58e3504aab",
+          "bytes": 2662,
+          "retained_at": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-ld-default-z-text.patch"
+        },
+        {
+          "path": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-libtool-no-rpath.patch",
+          "sha256": "6668cc02b1b3c33f94dce3d0631f89ae7c7d8268f3379c58ba5f14a9feac9bfc",
+          "bytes": 1294,
+          "retained_at": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-libtool-no-rpath.patch"
+        },
+        {
+          "path": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-no-config-h-check.patch",
+          "sha256": "bd24262f85e4dbd834a30670a8207da07d540c8d7a9f145ef466531c3cde5640",
+          "bytes": 1032,
+          "retained_at": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-no-config-h-check.patch"
+        },
+        {
+          "path": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-remove-ld-protected-func-2-test.patch",
+          "sha256": "91aee499073f8652b085ecfabf34498612c18dc7388d3429f0f91ec4fd75067f",
+          "bytes": 1336,
+          "retained_at": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-remove-ld-protected-func-2-test.patch"
+        },
+        {
+          "path": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-revert-PLT-elision.patch",
+          "sha256": "f26ba52fd52f98c19fea167f17d34e157674ca208071df92e7b75b120133723e",
+          "bytes": 7698,
+          "retained_at": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-revert-PLT-elision.patch"
+        },
+        {
+          "path": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-riscv-testsuite-fixes.patch",
+          "sha256": "8b72927fa1eac193480935f86f22177548ab48e05caa454314879b6e450a078a",
+          "bytes": 10356,
+          "retained_at": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-riscv-testsuite-fixes.patch"
+        },
+        {
+          "path": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-suppress-ld-align-tests.patch",
+          "sha256": "200d7a1e63eb0f5c98680a909b50e6cf56409f198a30a2169fc0a394571219d6",
+          "bytes": 841,
+          "retained_at": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-suppress-ld-align-tests.patch"
+        },
+        {
+          "path": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-testsuite-fixes.patch",
+          "sha256": "fc40e5d452fbb259ff1e4a1d88b2d82982350886adf0ba3e7850b0344abf4be6",
+          "bytes": 45318,
+          "retained_at": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-testsuite-fixes.patch"
+        },
+        {
+          "path": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-version.patch",
+          "sha256": "9839a15712c94e505e324f01d447e7ab2ad5e3a7a0fc35cbfe46ef8148e34560",
+          "bytes": 2642,
+          "retained_at": "package-inputs/mingw-binutils-2.46.0-1.fc44/binutils-version.patch"
+        },
+        {
+          "path": "package-inputs/mingw-binutils-2.46.0-1.fc44/mingw-binutils.spec",
+          "sha256": "6aaa50fab608abdabae1e177329fc2517eda6edd487c811e708868b5590ded24",
+          "bytes": 28802,
+          "retained_at": "package-inputs/mingw-binutils-2.46.0-1.fc44/mingw-binutils.spec"
+        }
+      ],
+      "patch_order": [
+        "binutils-version.patch",
+        "binutils-export-demangle.h.patch",
+        "binutils-no-config-h-check.patch",
+        "binutils-revert-PLT-elision.patch",
+        "binutils-2.27-aarch64-ifunc.patch",
+        "binutils-do-not-link-with-static-libstdc++.patch",
+        "binutils-autoconf-version.patch",
+        "binutils-libtool-no-rpath.patch",
+        "binutils-testsuite-fixes.patch",
+        "binutils-riscv-testsuite-fixes.patch",
+        "binutils-fix-ar-test.patch",
+        "binutils-aarch64-small-plt0.patch",
+        "binutils-ld-default-z-text.patch",
+        "binutils-remove-ld-protected-func-2-test.patch",
+        "binutils-suppress-ld-align-tests.patch"
+      ],
+      "prep_instructions": [
+        "%prep",
+        "%autosetup -p1 -n binutils-%{version}"
+      ],
+      "prep_executed": false
+    }
+  ],
+  "encoder_sources": [
+    {
+      "name": "ffmpeg",
+      "version": "8.0.3",
+      "canonical_archive_url": "https://ffmpeg.org/releases/ffmpeg-8.0.3.tar.xz",
+      "archive": "target/release-encoder-experiment/source-inputs/ffmpeg-8.0.3.tar.xz",
+      "bytes": 11407656,
+      "sha256": "6136812ea6d4e68bdba27e33c2a94382711cdf4f8602ffef056ff792bd6f9818",
+      "signature_url": "https://ffmpeg.org/releases/ffmpeg-8.0.3.tar.xz.asc",
+      "signature_valid": true,
+      "signature_hash_algorithm": "SHA256",
+      "signer_fingerprint": "FCF986EA15E6E293A5644F10B4322F04D67658D8",
+      "fingerprint_reference": "https://ffmpeg.org/download.html",
+      "key_url": "https://ffmpeg.org/ffmpeg-devel.asc",
+      "canonical_git_url": "https://git.ffmpeg.org/ffmpeg.git",
+      "observed_tag": "n8.0.3",
+      "observed_tag_object": "3b9813e76f3d2a6663de825ccebbef3968d7a576",
+      "observed_tag_commit": "8ae0b34901ba60a802f183ee75a250a9fc3e09a5",
+      "git_tag_signature_verified": false,
+      "git_tree_compared_with_archive": false,
+      "trust_boundary": "official HTTPS fingerprint/key + valid detached signature; GnuPG ownertrust remains undefined",
+      "retained_at": "upstream/ffmpeg-8.0.3.tar.xz"
+    },
+    {
+      "name": "x264",
+      "canonical_git_url": "https://code.videolan.org/videolan/x264.git",
+      "observed_ref": "refs/heads/stable",
+      "commit": "b35605ace3ddf7c1a5d67a2eb553f034aef41d55",
+      "tree": "0700538866963f968154ea768289bf100350e84e",
+      "x264_build_api": 165,
+      "archive": "target/release-encoder-experiment/source-inputs/x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar",
+      "bytes": 6133760,
+      "sha256": "df62afece4eecef8ddf196f115dfec6e936a21b04ec2117a0f4e412de29b20e5",
+      "archive_origin": "locally derived with recorded git archive command from fetched canonical commit, not an upstream-signed tarball",
+      "git_fetch_fsck_objects": true,
+      "git_fsck_full_strict_exit": 0,
+      "commit_signature_present": false,
+      "upstream_signature_verified": false,
+      "trust_boundary": "canonical upstream HTTPS transport/ref and Git object integrity; no maintainer signature authentication",
+      "retained_at": "upstream/x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar"
+    },
+    {
+      "name": "zlib",
+      "version": "1.3.2",
+      "canonical_archive_url": "https://zlib.net/zlib-1.3.2.tar.xz",
+      "archive": "target/release-encoder-experiment/source-inputs/zlib-1.3.2.tar.xz",
+      "bytes": 1320064,
+      "sha256": "d7a0654783a4da529d1bb793b7ad9c3318020af77667bcae35f95d0e42a792f3",
+      "published_sha256_reference": "https://zlib.net/",
+      "published_sha256_match": true,
+      "signature_url": "https://zlib.net/zlib-1.3.2.tar.xz.asc",
+      "signature_valid": true,
+      "signature_public_key_algorithm": "DSA 1024",
+      "signature_hash_algorithm": "SHA1",
+      "signer_fingerprint": "5ED46A6721D365587791E2AA783FCD8E58BCAFBA",
+      "key_reference": "https://madler.net/madler/pgp.html",
+      "key_reference_linked_by": "https://zlib.net/",
+      "trust_boundary": "upstream published SHA256 + key linked from upstream to author HTTPS page; older DSA/SHA1 signature accepted by current normal GnuPG policy; no ownertrust or policy override",
+      "retained_at": "upstream/zlib-1.3.2.tar.xz"
+    }
+  ],
+  "deduplicated_archives_by_sha256": {
+    "5afe822af5c4edbf67daaf45eec61d538f49eef6b19524de64897c6b95828caf": "upstream/mingw-w64-v13.0.0.tar.bz2",
+    "662d388e328c7ce97733f086c4b22ef6647c2197179f3196bde3323e6c64ca47": "upstream/gcc-16.2.1-20260819.tar.xz",
+    "d75a94f4d73e7a4086f7513e67e439e8fcdcbb726ffe63f4661744e6256b2cf2": "upstream/binutils-2.46.0.tar.xz"
+  },
+  "build_tool_source_packages": [
+    {
+      "nvr": "nasm-3.02-1.fc44",
+      "source_rpm": "downloads/nasm-3.02-1.fc44.src.rpm",
+      "source_rpm_sha256": "22f1a7d29984d509fd47c40210280d8cb810645480ab35e56c4eb7d5d924df0d",
+      "inputs": [
+        {
+          "path": "package-inputs/nasm-3.02-1.fc44/nasm-3.02-xdoc.tar.xz",
+          "retained_at": "package-inputs/nasm-3.02-1.fc44/nasm-3.02-xdoc.tar.xz",
+          "sha256": "7632368f9eea30bfd438f970e3a534796aecc3783b7b9c9b7a705b93dab0714f",
+          "bytes": 980024
+        },
+        {
+          "path": "package-inputs/nasm-3.02-1.fc44/nasm-3.02.tar.xz",
+          "retained_at": "package-inputs/nasm-3.02-1.fc44/nasm-3.02.tar.xz",
+          "sha256": "87336eba53b4acfe917424ab5d500d2b0054d9f5148d35c2273ccf2cfb712f0d",
+          "bytes": 1531636
+        },
+        {
+          "path": "package-inputs/nasm-3.02-1.fc44/nasm-CVE-2026-6067.patch",
+          "retained_at": "package-inputs/nasm-3.02-1.fc44/nasm-CVE-2026-6067.patch",
+          "sha256": "3c1f5ff0136bb7a093ba0c61974f0f93736122ae5f08eb68e0767aabc1391186",
+          "bytes": 731
+        },
+        {
+          "path": "package-inputs/nasm-3.02-1.fc44/nasm.spec",
+          "retained_at": "package-inputs/nasm-3.02-1.fc44/nasm.spec",
+          "sha256": "325a8a4874786ad6a3ff35c60574cab889e2e2c1ee7262f0ed03799ecc0d6972",
+          "bytes": 16924
+        }
+      ],
+      "patch_order": [
+        "nasm-CVE-2026-6067.patch"
+      ],
+      "prep_executed": false,
+      "role": "assembler build tool, not distributed runtime"
+    }
+  ]
+}

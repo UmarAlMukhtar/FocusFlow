@@ -1,0 +1,266 @@
+{
+  "schema": 1,
+  "files": [
+    {
+      "kind": "encoder",
+      "name": "ffmpeg-8.0.3.tar.xz",
+      "sha256": "6136812ea6d4e68bdba27e33c2a94382711cdf4f8602ffef056ff792bd6f9818",
+      "bytes": 11407656,
+      "receipt": "source-inputs/encoder-source-pins.json",
+      "url": "https://ffmpeg.org/releases/ffmpeg-8.0.3.tar.xz"
+    },
+    {
+      "kind": "encoder",
+      "name": "x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar",
+      "sha256": "df62afece4eecef8ddf196f115dfec6e936a21b04ec2117a0f4e412de29b20e5",
+      "bytes": 6133760,
+      "receipt": "source-inputs/encoder-source-pins.json",
+      "git_url": "https://code.videolan.org/videolan/x264.git",
+      "commit": "b35605ace3ddf7c1a5d67a2eb553f034aef41d55",
+      "tree": "0700538866963f968154ea768289bf100350e84e"
+    },
+    {
+      "kind": "encoder",
+      "name": "zlib-1.3.2.tar.xz",
+      "sha256": "d7a0654783a4da529d1bb793b7ad9c3318020af77667bcae35f95d0e42a792f3",
+      "bytes": 1320064,
+      "receipt": "source-inputs/encoder-source-pins.json",
+      "url": "https://zlib.net/zlib-1.3.2.tar.xz"
+    },
+    {
+      "kind": "mingw-rpm",
+      "name": "mingw64-cpp-16.2.1-1.fc44.x86_64.rpm",
+      "sha256": "222ed58f473716f8540ae2491b1cb1ce28d6732d5041d0011ffd4328e918a6f1",
+      "bytes": 14651354,
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-gcc/16.2.1/1.fc44/data/signed/6d9f90a6/x86_64/mingw64-cpp-16.2.1-1.fc44.x86_64.rpm",
+      "receipt": "source-inputs/reused-gnu-rpm-verification.json"
+    },
+    {
+      "kind": "mingw-rpm",
+      "name": "mingw64-gcc-16.2.1-1.fc44.x86_64.rpm",
+      "sha256": "5fe119311623ff268a4e9f793e4c5e1fc2a6983097102334969c643d260f0f0f",
+      "bytes": 34942780,
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-gcc/16.2.1/1.fc44/data/signed/6d9f90a6/x86_64/mingw64-gcc-16.2.1-1.fc44.x86_64.rpm",
+      "receipt": "source-inputs/reused-gnu-rpm-verification.json"
+    },
+    {
+      "kind": "mingw-rpm",
+      "name": "mingw64-libgcc-16.2.1-1.fc44.x86_64.rpm",
+      "sha256": "69a3208d88b2261d405b9d8d0020ba9fdea0f5de048409ce25053cdbf688188a",
+      "bytes": 349281,
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-gcc/16.2.1/1.fc44/data/signed/6d9f90a6/x86_64/mingw64-libgcc-16.2.1-1.fc44.x86_64.rpm",
+      "receipt": "source-inputs/reused-gnu-rpm-verification.json"
+    },
+    {
+      "kind": "mingw-rpm",
+      "name": "mingw64-binutils-2.46.0-1.fc44.x86_64.rpm",
+      "sha256": "8c4796f872345f0a708a24bfc4726afaf747de898c8398bf754348b43095d81b",
+      "bytes": 3120318,
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-binutils/2.46.0/1.fc44/data/signed/6d9f90a6/x86_64/mingw64-binutils-2.46.0-1.fc44.x86_64.rpm",
+      "receipt": "source-inputs/reused-gnu-rpm-verification.json"
+    },
+    {
+      "kind": "mingw-rpm",
+      "name": "mingw-binutils-generic-2.46.0-1.fc44.x86_64.rpm",
+      "sha256": "372356c349d9668e973486977a7a9e870f23aa3fb7f7575e357b3c5f95a39e96",
+      "bytes": 1147899,
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-binutils/2.46.0/1.fc44/data/signed/6d9f90a6/x86_64/mingw-binutils-generic-2.46.0-1.fc44.x86_64.rpm",
+      "receipt": "source-inputs/reused-gnu-rpm-verification.json"
+    },
+    {
+      "kind": "mingw-rpm",
+      "name": "mingw64-crt-13.0.0-3.fc44.noarch.rpm",
+      "sha256": "1e5bd24eccf601d9e3933b2c9f8aae4d336cdea20d11186edcf769e4794b00b1",
+      "bytes": 5344079,
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-crt/13.0.0/3.fc44/data/signed/6d9f90a6/noarch/mingw64-crt-13.0.0-3.fc44.noarch.rpm",
+      "receipt": "source-inputs/reused-gnu-rpm-verification.json"
+    },
+    {
+      "kind": "mingw-rpm",
+      "name": "mingw64-headers-13.0.0-3.fc44.noarch.rpm",
+      "sha256": "722b05ba8297fcb11344579eaefb9536069f9d1ef1fc25b0e19bf0bd262cb4ad",
+      "bytes": 7237497,
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-headers/13.0.0/3.fc44/data/signed/6d9f90a6/noarch/mingw64-headers-13.0.0-3.fc44.noarch.rpm",
+      "receipt": "source-inputs/reused-gnu-rpm-verification.json"
+    },
+    {
+      "kind": "mingw-rpm",
+      "name": "mingw64-winpthreads-13.0.0-3.fc44.noarch.rpm",
+      "sha256": "376a5b2831b3c67fe9da9bd7b360bf40c1530125f5f09c1f7f6628c0b93ef679",
+      "bytes": 52443,
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-winpthreads/13.0.0/3.fc44/data/signed/6d9f90a6/noarch/mingw64-winpthreads-13.0.0-3.fc44.noarch.rpm",
+      "receipt": "source-inputs/reused-gnu-rpm-verification.json"
+    },
+    {
+      "kind": "mingw-rpm",
+      "name": "mingw64-winpthreads-static-13.0.0-3.fc44.noarch.rpm",
+      "sha256": "9ab03461714854f78c46062face1b9ba2f17b6d5f34f61a2052ddf182a845774",
+      "bytes": 110528,
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-winpthreads/13.0.0/3.fc44/data/signed/6d9f90a6/noarch/mingw64-winpthreads-static-13.0.0-3.fc44.noarch.rpm",
+      "receipt": "source-inputs/reused-gnu-rpm-verification.json"
+    },
+    {
+      "kind": "mingw-rpm",
+      "name": "mingw-filesystem-base-152-1.fc44.noarch.rpm",
+      "sha256": "4f6342e7a7c75419b90f54687bac14f2f25c4716398a084dbb04d66f4270650b",
+      "bytes": 21254,
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-filesystem/152/1.fc44/data/signed/6d9f90a6/noarch/mingw-filesystem-base-152-1.fc44.noarch.rpm",
+      "receipt": "source-inputs/reused-gnu-rpm-verification.json"
+    },
+    {
+      "kind": "mingw-rpm",
+      "name": "mingw64-filesystem-152-1.fc44.noarch.rpm",
+      "sha256": "54b7ce32f019ed1a2eca212495e86e0ddca0b5e361786d03cf5f6830a80a34eb",
+      "bytes": 137782,
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-filesystem/152/1.fc44/data/signed/6d9f90a6/noarch/mingw64-filesystem-152-1.fc44.noarch.rpm",
+      "receipt": "source-inputs/reused-gnu-rpm-verification.json"
+    },
+    {
+      "kind": "nasm-rpm",
+      "name": "nasm-3.02-1.fc44.x86_64.rpm",
+      "sha256": "f0a4cbfbd91c9ba0b6eeb4d4bf8b6bf07b718eed29b7eb56e8aeeea86e072646",
+      "bytes": 453525,
+      "url": "https://kojipkgs.fedoraproject.org/packages/nasm/3.02/1.fc44/data/signed/6d9f90a6/x86_64/nasm-3.02-1.fc44.x86_64.rpm",
+      "receipt": "nasm-tool/nasm-inputs.json"
+    },
+    {
+      "kind": "source-rpm",
+      "name": "nasm-3.02-1.fc44.src.rpm",
+      "sha256": "22f1a7d29984d509fd47c40210280d8cb810645480ab35e56c4eb7d5d924df0d",
+      "bytes": 2548277,
+      "url": "https://kojipkgs.fedoraproject.org/packages/nasm/3.02/1.fc44/data/signed/6d9f90a6/src/nasm-3.02-1.fc44.src.rpm",
+      "receipt": "nasm-tool/nasm-inputs.json"
+    },
+    {
+      "kind": "source-rpm",
+      "name": "mingw-winpthreads-13.0.0-3.fc44.src.rpm",
+      "sha256": "3eafd5123217d319ea5883f4fabad7951e45f39c415a67605821f426030683d1",
+      "bytes": 10727035,
+      "url": "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Everything/source/tree/Packages/m/mingw-winpthreads-13.0.0-3.fc44.src.rpm",
+      "receipt": "source-bundle/receipts/acquisition.json"
+    },
+    {
+      "kind": "source-rpm",
+      "name": "mingw-crt-13.0.0-3.fc44.src.rpm",
+      "sha256": "0c52a5c6bcb1b0dca7ce03341f03612dfe8be36eb66a818c707571133f4ccceb",
+      "bytes": 10834297,
+      "url": "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Everything/source/tree/Packages/m/mingw-crt-13.0.0-3.fc44.src.rpm",
+      "receipt": "source-bundle/receipts/acquisition.json"
+    },
+    {
+      "kind": "source-rpm",
+      "name": "mingw-headers-13.0.0-3.fc44.src.rpm",
+      "sha256": "71a1e0a20d1b304c003c46348f1da8d39a63168bf3e27153f5eab304c117aaca",
+      "bytes": 10738260,
+      "url": "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Everything/source/tree/Packages/m/mingw-headers-13.0.0-3.fc44.src.rpm",
+      "receipt": "source-bundle/receipts/acquisition.json"
+    },
+    {
+      "kind": "source-rpm",
+      "name": "mingw-gcc-16.2.1-1.fc44.src.rpm",
+      "sha256": "7122e1b15d3691edd7e15f01de3cd8750a752a1bd8b6eca79428f4d60f8d3882",
+      "bytes": 93889339,
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-gcc/16.2.1/1.fc44/data/signed/6d9f90a6/src/mingw-gcc-16.2.1-1.fc44.src.rpm",
+      "receipt": "source-bundle/receipts/acquisition.json"
+    },
+    {
+      "kind": "source-rpm",
+      "name": "mingw-filesystem-152-1.fc44.src.rpm",
+      "sha256": "d23fc556540b42f027af86ccf2b2d80edb146e6ee9818474dd4f015c98783ea4",
+      "bytes": 91490,
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-filesystem/152/1.fc44/data/signed/6d9f90a6/src/mingw-filesystem-152-1.fc44.src.rpm",
+      "receipt": "source-bundle/receipts/acquisition.json"
+    },
+    {
+      "kind": "source-rpm",
+      "name": "mingw-binutils-2.46.0-1.fc44.src.rpm",
+      "sha256": "303cca49a3ca09a5cebae9c7ce05ffe7fff7d6bf7ccecc9b98e16eef4c49988b",
+      "bytes": 28629295,
+      "url": "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Everything/source/tree/Packages/m/mingw-binutils-2.46.0-1.fc44.src.rpm",
+      "receipt": "source-bundle/receipts/acquisition.json"
+    },
+    {
+      "kind": "signature",
+      "name": "ffmpeg-8.0.3.tar.xz.asc",
+      "sha256": "975f9512458fc39cacf35a9496f51c9d82e3a3b684a9db111bedcfa523f2b2b8",
+      "bytes": 520,
+      "url": "https://ffmpeg.org/releases/ffmpeg-8.0.3.tar.xz.asc",
+      "receipt": "source-inputs/downloads.json"
+    },
+    {
+      "kind": "signature",
+      "name": "zlib-1.3.2.tar.xz.asc",
+      "sha256": "03ce710347e2f84fa7ed0a6ae6a93467b08031a3022fc296da40220a83b96667",
+      "bytes": 235,
+      "url": "https://zlib.net/zlib-1.3.2.tar.xz.asc",
+      "receipt": "source-inputs/downloads.json"
+    }
+  ],
+  "rpm_signer": "36F612DCF27F7D1A48A835E4DBFCF71C6D9F90A6",
+  "keys": {
+    "RPM-GPG-KEY-fedora-44-primary": {
+      "sha256": "93642aec521a1e5e96dd715f7ae0ec0850ebc9de09a94ce03cae5263f26cc18a",
+      "fingerprint": "36F612DCF27F7D1A48A835E4DBFCF71C6D9F90A6"
+    },
+    "ffmpeg-devel.asc": {
+      "sha256": "397b3becedcd5a98769967ff1ff8501ddc89f8368b8f766e4701377d7dbaabe5",
+      "fingerprint": "FCF986EA15E6E293A5644F10B4322F04D67658D8"
+    },
+    "madler.asc": {
+      "sha256": "27f818fd93326e4531c6b094f0edc4c331a1c77ec6449675a3929ae3274d85ac",
+      "fingerprint": "5ED46A6721D365587791E2AA783FCD8E58BCAFBA"
+    }
+  },
+  "platform": {
+    "container_image": "registry.fedoraproject.org/fedora@sha256:5b3a1aeece15ae01e3d04541e9269226d40e832566f3ce183856a12951dddb1e",
+    "download_artifact_action_sha": "d3f86a106a0bac45b974a628896c90dbdf5c8093",
+    "download_artifact_action_verification": "Root live GitHub API refs/tags/v4 resolved to commit on 2026-11-04; no native execution",
+    "container_verification": "Root live official-registry AMD64 OCI manifest SHA256 recomputed on 2026-11-04, no layers downloaded or executed; see root verified-container.json",
+    "host_helper_policy": "Install from official Fedora44 fedora/updates only; record exact NVR/SRPM/header/payload SHA256 and cached RPM/executable SHA256 at job time. Host helper versions can drift; no bit-identical rebuild claim.",
+    "host_helper_packages": [
+      "python3",
+      "make",
+      "pkgconf-pkg-config",
+      "rpm-build",
+      "cpio",
+      "gnupg2",
+      "git",
+      "diffutils",
+      "findutils",
+      "tar",
+      "xz",
+      "gawk",
+      "sed",
+      "grep"
+    ],
+    "host_helper_capabilities": [
+      "libc.so.6()(64bit)",
+      "libgcc_s.so.1()(64bit)",
+      "libgmp.so.10()(64bit)",
+      "libm.so.6()(64bit)",
+      "libmpc.so.3()(64bit)",
+      "libmpfr.so.6()(64bit)",
+      "libstdc++.so.6()(64bit)",
+      "libz.so.1()(64bit)"
+    ]
+  },
+  "original_recipe_sha256": "c7401d5f944f3556a53f13c253c805474f7a3d71f8075f576aeb55ba227e5655",
+  "source_bundle": {
+    "archive": "target/windows-encoder-source-bundle-20261031/focusflow-windows-encoder-source-candidate-b10d6e14-20261031.tar.gz",
+    "bytes": 312162339,
+    "sha256": "88cf9fe526eb90a744a8a36172ecc2d69d06c53375b4b6802cbc8980319d0b28",
+    "files": 850
+  },
+  "reference_candidate": {
+    "sha256": "b10d6e14f9f52ca7d87a5046ffc79ba5a8683fea2ed743fd0f1c267cd5204cdb",
+    "manifest_sha256": "f0e84ed8801e62d5813d8fb2ebe174156f0d9f1791b4154406cdf629feaca0fe",
+    "runtime_qualified": false
+  },
+  "authentication_limits": [
+    "x264 commit is unsigned; canonical HTTPS plus Git object integrity",
+    "zlib historical signature uses DSA1024/SHA1; no crypto policy override permitted",
+    "signature ownertrust is undefined",
+    "Host helper versions are selected by official Fedora44 repos at job time and recorded, unlike exact pinned target RPMs; no historical PE hash reproduction claim."
+  ],
+  "adapted_recipe_sha256": "873753e1fe4dadbbe102e30af3757f325746d2fd3bacbb992a63509e81817a82"
+}

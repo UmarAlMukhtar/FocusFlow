@@ -1,0 +1,95 @@
+{
+  "key": "target/release-encoder-experiment/source-inputs/RPM-GPG-KEY-fedora-44-primary",
+  "key_sha256": "93642aec521a1e5e96dd715f7ae0ec0850ebc9de09a94ce03cae5263f26cc18a",
+  "fingerprint": "36F612DCF27F7D1A48A835E4DBFCF71C6D9F90A6",
+  "packages": [
+    {
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-gcc/16.2.1/1.fc44/data/signed/6d9f90a6/x86_64/mingw64-cpp-16.2.1-1.fc44.x86_64.rpm",
+      "path": "target/windows-verification/gnu-route/downloads/mingw64-cpp-16.2.1-1.fc44.x86_64.rpm",
+      "bytes": 14651354,
+      "sha256": "222ed58f473716f8540ae2491b1cb1ce28d6732d5041d0011ffd4328e918a6f1",
+      "signature_output": "target/windows-verification/gnu-route/downloads/mingw64-cpp-16.2.1-1.fc44.x86_64.rpm:\n    Header OpenPGP V4 RSA/SHA256 signature, key fingerprint: 36f612dcf27f7d1a48a835e4dbfcf71c6d9f90a6: OK\n    Header SHA256 digest: OK\n    Payload SHA256 digest: OK\n",
+      "signature_exit": 0
+    },
+    {
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-gcc/16.2.1/1.fc44/data/signed/6d9f90a6/x86_64/mingw64-gcc-16.2.1-1.fc44.x86_64.rpm",
+      "path": "target/windows-verification/gnu-route/downloads/mingw64-gcc-16.2.1-1.fc44.x86_64.rpm",
+      "bytes": 34942780,
+      "sha256": "5fe119311623ff268a4e9f793e4c5e1fc2a6983097102334969c643d260f0f0f",
+      "signature_output": "target/windows-verification/gnu-route/downloads/mingw64-gcc-16.2.1-1.fc44.x86_64.rpm:\n    Header OpenPGP V4 RSA/SHA256 signature, key fingerprint: 36f612dcf27f7d1a48a835e4dbfcf71c6d9f90a6: OK\n    Header SHA256 digest: OK\n    Payload SHA256 digest: OK\n",
+      "signature_exit": 0
+    },
+    {
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-gcc/16.2.1/1.fc44/data/signed/6d9f90a6/x86_64/mingw64-libgcc-16.2.1-1.fc44.x86_64.rpm",
+      "path": "target/windows-verification/gnu-route/downloads/mingw64-libgcc-16.2.1-1.fc44.x86_64.rpm",
+      "bytes": 349281,
+      "sha256": "69a3208d88b2261d405b9d8d0020ba9fdea0f5de048409ce25053cdbf688188a",
+      "signature_output": "target/windows-verification/gnu-route/downloads/mingw64-libgcc-16.2.1-1.fc44.x86_64.rpm:\n    Header OpenPGP V4 RSA/SHA256 signature, key fingerprint: 36f612dcf27f7d1a48a835e4dbfcf71c6d9f90a6: OK\n    Header SHA256 digest: OK\n    Payload SHA256 digest: OK\n",
+      "signature_exit": 0
+    },
+    {
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-binutils/2.46.0/1.fc44/data/signed/6d9f90a6/x86_64/mingw64-binutils-2.46.0-1.fc44.x86_64.rpm",
+      "path": "target/windows-verification/gnu-route/downloads/mingw64-binutils-2.46.0-1.fc44.x86_64.rpm",
+      "bytes": 3120318,
+      "sha256": "8c4796f872345f0a708a24bfc4726afaf747de898c8398bf754348b43095d81b",
+      "signature_output": "target/windows-verification/gnu-route/downloads/mingw64-binutils-2.46.0-1.fc44.x86_64.rpm:\n    Header OpenPGP V4 RSA/SHA256 signature, key fingerprint: 36f612dcf27f7d1a48a835e4dbfcf71c6d9f90a6: OK\n    Header SHA256 digest: OK\n    Payload SHA256 digest: OK\n",
+      "signature_exit": 0
+    },
+    {
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-binutils/2.46.0/1.fc44/data/signed/6d9f90a6/x86_64/mingw-binutils-generic-2.46.0-1.fc44.x86_64.rpm",
+      "path": "target/windows-verification/gnu-route/downloads/mingw-binutils-generic-2.46.0-1.fc44.x86_64.rpm",
+      "bytes": 1147899,
+      "sha256": "372356c349d9668e973486977a7a9e870f23aa3fb7f7575e357b3c5f95a39e96",
+      "signature_output": "target/windows-verification/gnu-route/downloads/mingw-binutils-generic-2.46.0-1.fc44.x86_64.rpm:\n    Header OpenPGP V4 RSA/SHA256 signature, key fingerprint: 36f612dcf27f7d1a48a835e4dbfcf71c6d9f90a6: OK\n    Header SHA256 digest: OK\n    Payload SHA256 digest: OK\n",
+      "signature_exit": 0
+    },
+    {
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-crt/13.0.0/3.fc44/data/signed/6d9f90a6/noarch/mingw64-crt-13.0.0-3.fc44.noarch.rpm",
+      "path": "target/windows-verification/gnu-route/downloads/mingw64-crt-13.0.0-3.fc44.noarch.rpm",
+      "bytes": 5344079,
+      "sha256": "1e5bd24eccf601d9e3933b2c9f8aae4d336cdea20d11186edcf769e4794b00b1",
+      "signature_output": "target/windows-verification/gnu-route/downloads/mingw64-crt-13.0.0-3.fc44.noarch.rpm:\n    Header OpenPGP V4 RSA/SHA256 signature, key fingerprint: 36f612dcf27f7d1a48a835e4dbfcf71c6d9f90a6: OK\n    Header SHA256 digest: OK\n    Payload SHA256 digest: OK\n",
+      "signature_exit": 0
+    },
+    {
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-headers/13.0.0/3.fc44/data/signed/6d9f90a6/noarch/mingw64-headers-13.0.0-3.fc44.noarch.rpm",
+      "path": "target/windows-verification/gnu-route/downloads/mingw64-headers-13.0.0-3.fc44.noarch.rpm",
+      "bytes": 7237497,
+      "sha256": "722b05ba8297fcb11344579eaefb9536069f9d1ef1fc25b0e19bf0bd262cb4ad",
+      "signature_output": "target/windows-verification/gnu-route/downloads/mingw64-headers-13.0.0-3.fc44.noarch.rpm:\n    Header OpenPGP V4 RSA/SHA256 signature, key fingerprint: 36f612dcf27f7d1a48a835e4dbfcf71c6d9f90a6: OK\n    Header SHA256 digest: OK\n    Payload SHA256 digest: OK\n",
+      "signature_exit": 0
+    },
+    {
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-winpthreads/13.0.0/3.fc44/data/signed/6d9f90a6/noarch/mingw64-winpthreads-13.0.0-3.fc44.noarch.rpm",
+      "path": "target/windows-verification/gnu-route/downloads/mingw64-winpthreads-13.0.0-3.fc44.noarch.rpm",
+      "bytes": 52443,
+      "sha256": "376a5b2831b3c67fe9da9bd7b360bf40c1530125f5f09c1f7f6628c0b93ef679",
+      "signature_output": "target/windows-verification/gnu-route/downloads/mingw64-winpthreads-13.0.0-3.fc44.noarch.rpm:\n    Header OpenPGP V4 RSA/SHA256 signature, key fingerprint: 36f612dcf27f7d1a48a835e4dbfcf71c6d9f90a6: OK\n    Header SHA256 digest: OK\n    Payload SHA256 digest: OK\n",
+      "signature_exit": 0
+    },
+    {
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-winpthreads/13.0.0/3.fc44/data/signed/6d9f90a6/noarch/mingw64-winpthreads-static-13.0.0-3.fc44.noarch.rpm",
+      "path": "target/windows-verification/gnu-route/downloads/mingw64-winpthreads-static-13.0.0-3.fc44.noarch.rpm",
+      "bytes": 110528,
+      "sha256": "9ab03461714854f78c46062face1b9ba2f17b6d5f34f61a2052ddf182a845774",
+      "signature_output": "target/windows-verification/gnu-route/downloads/mingw64-winpthreads-static-13.0.0-3.fc44.noarch.rpm:\n    Header OpenPGP V4 RSA/SHA256 signature, key fingerprint: 36f612dcf27f7d1a48a835e4dbfcf71c6d9f90a6: OK\n    Header SHA256 digest: OK\n    Payload SHA256 digest: OK\n",
+      "signature_exit": 0
+    },
+    {
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-filesystem/152/1.fc44/data/signed/6d9f90a6/noarch/mingw-filesystem-base-152-1.fc44.noarch.rpm",
+      "path": "target/windows-verification/gnu-route/downloads/mingw-filesystem-base-152-1.fc44.noarch.rpm",
+      "bytes": 21254,
+      "sha256": "4f6342e7a7c75419b90f54687bac14f2f25c4716398a084dbb04d66f4270650b",
+      "signature_output": "target/windows-verification/gnu-route/downloads/mingw-filesystem-base-152-1.fc44.noarch.rpm:\n    Header OpenPGP V4 RSA/SHA256 signature, key fingerprint: 36f612dcf27f7d1a48a835e4dbfcf71c6d9f90a6: OK\n    Header SHA256 digest: OK\n    Payload SHA256 digest: OK\n",
+      "signature_exit": 0
+    },
+    {
+      "url": "https://kojipkgs.fedoraproject.org/packages/mingw-filesystem/152/1.fc44/data/signed/6d9f90a6/noarch/mingw64-filesystem-152-1.fc44.noarch.rpm",
+      "path": "target/windows-verification/gnu-route/downloads/mingw64-filesystem-152-1.fc44.noarch.rpm",
+      "bytes": 137782,
+      "sha256": "54b7ce32f019ed1a2eca212495e86e0ddca0b5e361786d03cf5f6830a80a34eb",
+      "signature_output": "target/windows-verification/gnu-route/downloads/mingw64-filesystem-152-1.fc44.noarch.rpm:\n    Header OpenPGP V4 RSA/SHA256 signature, key fingerprint: 36f612dcf27f7d1a48a835e4dbfcf71c6d9f90a6: OK\n    Header SHA256 digest: OK\n    Payload SHA256 digest: OK\n",
+      "signature_exit": 0
+    }
+  ]
+}
