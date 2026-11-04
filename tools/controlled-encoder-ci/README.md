@@ -45,8 +45,10 @@ the recipe is invoked under `env -i`. The inspector reuses the existing config,
 PE, imports, symbol, static-link and notice checks. Its baseline config is a
 small staged receipt instead of a frozen sibling candidate directory. A new
 required gate compares the final selected external members against all 394
-retained source mappings and three hash-pinned startup objects. Any changed
-selection fails before handoff. This preserves the original bundle's 34 pending
+retained source mappings plus one explicitly closed audio-profile cbrt member,
+and three hash-pinned startup objects. Unknown or missing contributions fail
+before handoff. The singleton additionally verifies its pinned archive/member
+hashes and complete retained source/header/generated-route/notice file set. This preserves the original bundle's 34 pending
 header-closure entries and legal/distribution limitations; it does not promote
 them to complete. Complete exact source RPMs and encoder archives are retained
 as CI inputs. The historical source-index's `upstream/` and `source-units/` paths
@@ -55,7 +57,7 @@ this CI input artifact is not a repack of the older full source bundle.
 
 ## Flow and artifact boundaries
 
-1. Ubuntu runs 15 offline controls and checks pinned metadata.
+1. Ubuntu runs 19 offline controls and checks pinned metadata.
 2. The pinned disposable Fedora44 container installs/records official host
    helpers, downloads exact inputs, validates hashes/signatures, and extracts
    target RPM payloads into a new owned root without running RPM scriptlets.
@@ -126,8 +128,38 @@ No independent tool encodes fixtures. The new script is not the fixed-Q mapper
 and does not qualify mapper context/seek/short-segment policy or native capture.
 
 This is a preparation candidate. The script has not run on Windows here; no
-new binary has been built. The unchanged selected-member gate may reject a
-new build if additional filters/PCM support change the 394 external members.
+new binary has been built. The exact selected-member gate requires the
+historical 394 members plus the reviewed cbrt singleton (395 total).
 Resolve such a failure by separately reviewing exact new contributions, never
 by weakening/removing that gate. Historical pending header/legal/source-delivery
 limits remain open. Root review precedes publication on the separate branch.
+
+
+## Explicit cbrt contribution closure
+
+Run 41773701812 attempt2 stopped after a successful build and static PE checks:
+it selected one additional member, `libmsvcrt.a(lib64_libmsvcrt_common_a-cbrt.o)`.
+`provenance/audio-profile-extra/coverage.json` explicitly closes only that member;
+the historical coverage-397.json is unchanged. The new gate requires exactly
+395 external members, the existing three startup hashes, the pinned archive and
+member hashes, and every retained source/notice file. Additional unknown or
+missing members still fail; the receipt is not a generic exception list.
+
+The small retained tree contains full cbrt.c, its 13 conservative reachable
+headers, exact generated _mingw.h and _mingw_ddk.h plus their templates/rules,
+Fedora CRT/header package recipes, upstream notices and all source/header text.
+The source tar/member route comes from the already verified pinned source RPM;
+package-provenance.json binds fresh local hashes/header queries to those retained
+verification receipts and the failed CI target payload. The separate installed
+SDK header uses the actual generated `#if 1` route rather than the source-tree
+fallback `#if 0`. This narrow closure does not repair or promote historical
+header unions, legal completeness, source delivery, native tests or releases.
+
+prepare.py carries the helper and closure into the isolated candidate. The
+inspector retains its unchanged startup checks, copies additional notices, and
+records the explicit +1 result. artifact.py recursively carries the extra source
+receipt tree and notices into the hash-verified handoff. New tests exercise exact
+acceptance, unknown/missing contributions, source/archive/member/base/extra-entry
+tampering, and actual source/notice retention through packing. These are offline
+gate/handoff checks; no new controlled build or Windows execution follows from
+them. Root fresh review and a new controlled run are still required.

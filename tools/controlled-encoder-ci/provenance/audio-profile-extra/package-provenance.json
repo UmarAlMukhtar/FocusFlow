@@ -1,0 +1,110 @@
+{
+  "target": {
+    "rpm": "mingw64-crt-13.0.0-3.fc44.noarch.rpm",
+    "sha256": "1e5bd24eccf601d9e3933b2c9f8aae4d336cdea20d11186edcf769e4794b00b1",
+    "bytes": 5344079,
+    "metadata": "mingw64-crt|13.0.0-3.fc44|mingw-crt-13.0.0-3.fc44.src.rpm|LicenseRef-Fedora-Public-Domain AND ZPL-2.1",
+    "header_payload_row": "/usr/x86_64-w64-mingw32/sys-root/mingw/lib/libmsvcrt.a 2190734 1768521600 872315d15d6a8603dae66b389094871fb65517ee4c26a460360e5295c1e31c16 0100644 root root 0 0 0 X"
+  },
+  "source": {
+    "rpm": "mingw-crt-13.0.0-3.fc44.src.rpm",
+    "sha256": "0c52a5c6bcb1b0dca7ce03341f03612dfe8be36eb66a818c707571133f4ccceb",
+    "bytes": 10834297,
+    "metadata": "mingw-crt|13.0.0-3.fc44|(none)|LicenseRef-Fedora-Public-Domain AND ZPL-2.1",
+    "header_payload_row": "mingw-w64-v13.0.0.tar.bz2 10868704 1752706593 5afe822af5c4edbf67daaf45eec61d538f49eef6b19524de64897c6b95828caf 0100644 root root 0 0 0 X"
+  },
+  "headers_compared_to_pinned_target_and_CI_payload": [
+    {
+      "source": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/_cygwin.h",
+      "installed": "usr/x86_64-w64-mingw32/sys-root/mingw/include/_cygwin.h",
+      "sha256": "36ad12e27a7b78c5198aabec90e5291a86dc6db83bd8f65302cbc0bd918abfe5",
+      "target_rpm": "mingw64-headers-13.0.0-3.fc44.noarch.rpm"
+    },
+    {
+      "source": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/_mingw.h.in",
+      "installed": "usr/x86_64-w64-mingw32/sys-root/mingw/include/_mingw.h",
+      "sha256": "ed7f244333c5e72a9fff45e7210313ca3afd57d3d47e555d4cdda29f5810397d",
+      "target_rpm": "mingw64-headers-13.0.0-3.fc44.noarch.rpm"
+    },
+    {
+      "source": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/_mingw_mac.h",
+      "installed": "usr/x86_64-w64-mingw32/sys-root/mingw/include/_mingw_mac.h",
+      "sha256": "125f71cfa3aba72e86c882b2cc4d0d9f595e9a71370e4a4ad9fbc67352181d6c",
+      "target_rpm": "mingw64-headers-13.0.0-3.fc44.noarch.rpm"
+    },
+    {
+      "source": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/_mingw_secapi.h",
+      "installed": "usr/x86_64-w64-mingw32/sys-root/mingw/include/_mingw_secapi.h",
+      "sha256": "f7c73504b479a86e9323056d7785d7ebfdd224f2136a18c5388b100daa6484e9",
+      "target_rpm": "mingw64-headers-13.0.0-3.fc44.noarch.rpm"
+    },
+    {
+      "source": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/corecrt.h",
+      "installed": "usr/x86_64-w64-mingw32/sys-root/mingw/include/corecrt.h",
+      "sha256": "154517b9e9780eaa02f8708c43806446202f1c36124ee65050627199832b46c1",
+      "target_rpm": "mingw64-headers-13.0.0-3.fc44.noarch.rpm"
+    },
+    {
+      "source": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/crtdefs.h",
+      "installed": "usr/x86_64-w64-mingw32/sys-root/mingw/include/crtdefs.h",
+      "sha256": "c42926e8ce132a3152121c0cf1a379e0053c18ae8d6b13f9471134c63abd76ed",
+      "target_rpm": "mingw64-headers-13.0.0-3.fc44.noarch.rpm"
+    },
+    {
+      "source": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/errno.h",
+      "installed": "usr/x86_64-w64-mingw32/sys-root/mingw/include/errno.h",
+      "sha256": "85bb8bccd9322b2db53a7cc9ee3ebc89951f671f8180a56eac02b9b3bf97f1a5",
+      "target_rpm": "mingw64-headers-13.0.0-3.fc44.noarch.rpm"
+    },
+    {
+      "source": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/math.h",
+      "installed": "usr/x86_64-w64-mingw32/sys-root/mingw/include/math.h",
+      "sha256": "f17a7f284474143715b314e5ed4be8563f221825def61a48d3926a403cdc0479",
+      "target_rpm": "mingw64-headers-13.0.0-3.fc44.noarch.rpm"
+    },
+    {
+      "source": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/sdks/_mingw_ddk.h.in",
+      "installed": "usr/x86_64-w64-mingw32/sys-root/mingw/include/sdks/_mingw_ddk.h",
+      "sha256": "f3365feacebf2edb0d3b023b3ad2db1d2a16cba1cb650f5cfca69a7411b3ce50",
+      "target_rpm": "mingw64-headers-13.0.0-3.fc44.noarch.rpm"
+    },
+    {
+      "source": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/stddef.h",
+      "installed": "usr/x86_64-w64-mingw32/sys-root/mingw/include/stddef.h",
+      "sha256": "db7737b5d6349b1d070de9d78faf71ee77a542910e96014c1331ee87e391b1d9",
+      "target_rpm": "mingw64-headers-13.0.0-3.fc44.noarch.rpm"
+    },
+    {
+      "source": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/vadefs.h",
+      "installed": "usr/x86_64-w64-mingw32/sys-root/mingw/include/vadefs.h",
+      "sha256": "abbcc279d0a64730caa533f2df975f4fa10ce9768783b6d98c420e48d8820458",
+      "target_rpm": "mingw64-headers-13.0.0-3.fc44.noarch.rpm"
+    },
+    {
+      "source": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/include/winapifamily.h",
+      "installed": "usr/x86_64-w64-mingw32/sys-root/mingw/include/winapifamily.h",
+      "sha256": "032684bb38042587a5aa9c4748b33475ee7e7ff90b7b95661e7d92ef441c34b2",
+      "target_rpm": "mingw64-headers-13.0.0-3.fc44.noarch.rpm"
+    }
+  ],
+  "target_signature_receipt": "mingw64-crt-13.0.0-3.fc44.noarch.rpm:\n    Header OpenPGP V4 RSA/SHA256 signature, key fingerprint: 36f612dcf27f7d1a48a835e4dbfcf71c6d9f90a6: OK\n    Header SHA256 digest: OK\n    Payload SHA256 digest: OK",
+  "source_authentication_receipt": {
+    "original_receipt_sha256": "acf721ac26b340e5ba0a99f8b844b76661dde53cb2d1d454f1ac966e8ad542c7",
+    "path_normalization": "only signature_output first-line basename replaces original private prefix",
+    "package": {
+      "nvr": "mingw-crt-13.0.0-3.fc44",
+      "source_rpm": "mingw-crt-13.0.0-3.fc44.src.rpm",
+      "bytes": 10834297,
+      "url": "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Everything/source/tree/Packages/m/mingw-crt-13.0.0-3.fc44.src.rpm",
+      "sha256": "0c52a5c6bcb1b0dca7ce03341f03612dfe8be36eb66a818c707571133f4ccceb",
+      "signature_exit": 0,
+      "signature_fingerprint": "36f612dcf27f7d1a48a835e4dbfcf71c6d9f90a6",
+      "signature_output": "mingw-crt-13.0.0-3.fc44.src.rpm:\n    Header OpenPGP V4 RSA/SHA256 signature, key fingerprint: 36f612dcf27f7d1a48a835e4dbfcf71c6d9f90a6: OK\n    Header SHA256 digest: OK\n    Payload SHA256 digest: OK",
+      "verification_receipt": "receipts/final-source-rpm-verification.json"
+    }
+  },
+  "generated_header_routes": [
+    "Fedora mingw-headers.spec --with-default-msvcrt=msvcrt; configure.ac msvcrt*=0x600 and default-win32-winnt=0xa00; AC_CONFIG_FILES crt/_mingw.h; exact two-token substitution reproduces installed bytes",
+    "Fedora --enable-sdk=all; configure.ac MINGW_HAS_DDK=1; Makefile.am uses crt/sdks/_mingw_ddk.h.in and sed end-of-line MINGW_HAS_DDK replacement; exact generated bytes match installed header"
+  ]
+}

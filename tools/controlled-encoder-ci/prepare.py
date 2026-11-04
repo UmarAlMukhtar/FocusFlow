@@ -150,11 +150,12 @@ def main():
                 row['path'] = str(args.cache / pathlib.Path(row['path']).name)
         (sources / name).write_text(json.dumps(data, indent=2) + '\n')
     shutil.copy2(BASE / 'provenance/nasm-inputs.json', nasm / 'nasm-inputs.json')
-    for name in ['build.sh', 'inspect-candidate.py']:
+    for name in ['build.sh', 'inspect-candidate.py', 'source_coverage.py']:
         shutil.copy2(BASE / name, candidate / name)
     shutil.copy2(BASE / 'provenance/linux-config_components.h', receipts / 'linux-config_components.h')
     for name in ['coverage-397.json', 'source-index.json', 'include-closure.json']:
         shutil.copy2(BASE / 'provenance' / name, receipts / name)
+    shutil.copytree(BASE / 'provenance/audio-profile-extra', receipts / 'audio-profile-extra')
     (receipts / 'rpm-payload-verification.json').write_text(json.dumps(payloads, indent=2) + '\n')
     shutil.copy2(BASE / 'inputs.lock.json', receipts / 'inputs.lock.json')
     print(candidate)

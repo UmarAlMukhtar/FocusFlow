@@ -1,0 +1,191 @@
+{
+  "schema": 1,
+  "scope": "Only one explicit audio-profile contribution; original394 and3 startup objects unchanged",
+  "base_coverage_sha256": "b734df6a280f997866c38699ed8d8bca3786eb559912852cd9633f59eec98a07",
+  "entries": [
+    {
+      "archive": "libmsvcrt.a",
+      "member": "lib64_libmsvcrt_common_a-cbrt.o",
+      "member_sha256": "352604f57a332e43594ccff26d0b9d436cb3a4d84489a805f6dc2f6e322bc6c2",
+      "member_bytes": 5364,
+      "archive_sha256": "872315d15d6a8603dae66b389094871fb65517ee4c26a460360e5295c1e31c16",
+      "archive_bytes": 2190734,
+      "defined_symbols": [
+        "cbrt"
+      ],
+      "undefined_symbols": [
+        "frexp",
+        "ldexp"
+      ],
+      "coff_source_filename": "cbrt.c",
+      "source": "source-units/mingw-w64-v13.0.0/mingw-w64-crt/math/cbrt.c",
+      "source_sha256": "9838a2299a495c6d9a41942c38ac34f0730458e3f2f41bd6d82f53c49ca269d0",
+      "source_archive": "mingw-w64-v13.0.0.tar.bz2",
+      "source_archive_sha256": "5afe822af5c4edbf67daaf45eec61d538f49eef6b19524de64897c6b95828caf",
+      "target_rpm": "mingw64-crt-13.0.0-3.fc44.noarch.rpm",
+      "target_rpm_sha256": "1e5bd24eccf601d9e3933b2c9f8aae4d336cdea20d11186edcf769e4794b00b1",
+      "source_rpm": "mingw-crt-13.0.0-3.fc44.src.rpm",
+      "source_rpm_sha256": "0c52a5c6bcb1b0dca7ce03341f03612dfe8be36eb66a818c707571133f4ccceb",
+      "source_selection": "math/cbrt.c in src_msvcrt_common -> src_msvcrt_common64 -> lib64_libmsvcrt_common_a_SOURCES; msvcrt-os.mri merges common archive; Fedora --with-default-msvcrt=msvcrt selects msvcrt-os and copies to libmsvcrt.a",
+      "notice": "cbrt.c public-domain statement and DISCLAIMER.PD; full source/header units, upstream COPYING/DISCLAIMER/DISCLAIMER.PD retained; no legal-completeness conclusion",
+      "covered_header_units": 13,
+      "generated_routes": [
+        "generated/_mingw.h",
+        "generated/_mingw_ddk.h"
+      ],
+      "header_closure_method": "conservative literal include closure; no preprocessor or native/build execution"
+    }
+  ],
+  "files": [
+    {
+      "path": "build-rules/mingw-w64-v13.0.0/mingw-w64-crt/Makefile.am",
+      "bytes": 171872,
+      "sha256": "ee189a000283dabb5c089dd0c26db836fe1968777b8fb6674e0baeba6424a6bf"
+    },
+    {
+      "path": "build-rules/mingw-w64-v13.0.0/mingw-w64-crt/configure.ac",
+      "bytes": 17848,
+      "sha256": "8128074e99e4bb61d91f9b1d82cf4ece031b8d892a09442e9a390695c1cf3143"
+    },
+    {
+      "path": "build-rules/mingw-w64-v13.0.0/mingw-w64-crt/lib-common/msvcrt-os.mri",
+      "bytes": 105,
+      "sha256": "27123d828ca7e9d1b087a13e69e06b50d029c6dd6990da59c8939316f9417683"
+    },
+    {
+      "path": "build-rules/mingw-w64-v13.0.0/mingw-w64-headers/Makefile.am",
+      "bytes": 11844,
+      "sha256": "6c68d82111b5f10703156c9c5e9a469afa527982528be2a4b2d02f428cfddfa7"
+    },
+    {
+      "path": "build-rules/mingw-w64-v13.0.0/mingw-w64-headers/configure.ac",
+      "bytes": 6198,
+      "sha256": "580b9892b6523a67eea3e322aa3d303ad25ec1010c059a175546ef1ca33b651e"
+    },
+    {
+      "path": "generated/_mingw.h",
+      "bytes": 19371,
+      "sha256": "ed7f244333c5e72a9fff45e7210313ca3afd57d3d47e555d4cdda29f5810397d"
+    },
+    {
+      "path": "generated/_mingw_ddk.h",
+      "bytes": 86,
+      "sha256": "f3365feacebf2edb0d3b023b3ad2db1d2a16cba1cb650f5cfca69a7411b3ce50"
+    },
+    {
+      "path": "include-closure.json",
+      "bytes": 3947,
+      "sha256": "2b302036f700b6152bf64686dd7c196ab6ba20057fd928d42a6d0a9d660641c7"
+    },
+    {
+      "path": "notices/mingw-w64-v13.0.0/COPYING",
+      "bytes": 2326,
+      "sha256": "99a69660981156c21336fdb5661f89341b013c94e4bf9e1c7467b4745718397f"
+    },
+    {
+      "path": "notices/mingw-w64-v13.0.0/DISCLAIMER",
+      "bytes": 2245,
+      "sha256": "039ed6b4f31bb7fb97e733170b58cc435335352e4745734fcfd113877fdaf340"
+    },
+    {
+      "path": "notices/mingw-w64-v13.0.0/DISCLAIMER.PD",
+      "bytes": 454,
+      "sha256": "87f33608570312a0f2a9745edcb2527275df813b13982e8c3b3f893d88a4141a"
+    },
+    {
+      "path": "notices/source-and-header-notices.txt",
+      "bytes": 138882,
+      "sha256": "940f61f730abc2b39341dd9ecab38a792654d49610c2f616726f0ff77b006a23"
+    },
+    {
+      "path": "package-inputs/mingw-crt.spec",
+      "bytes": 25725,
+      "sha256": "e7f7f9c8dab26da5b99bb1bc56622a942534d1f8d9996f2a53feccda4a7cb024"
+    },
+    {
+      "path": "package-inputs/mingw-headers.spec",
+      "bytes": 26032,
+      "sha256": "9b0b09f541f6e07ac37248fd781a0a5739650a960936f53b30f34fb68ed3a0c3"
+    },
+    {
+      "path": "package-provenance.json",
+      "bytes": 6555,
+      "sha256": "19a0bb5b64ed9f361df5c03a751030fb0b3be71d9e9371c7e44388b5bc5be2e7"
+    },
+    {
+      "path": "source-units/mingw-w64-v13.0.0/mingw-w64-crt/math/cbrt.c",
+      "bytes": 1959,
+      "sha256": "9838a2299a495c6d9a41942c38ac34f0730458e3f2f41bd6d82f53c49ca269d0"
+    },
+    {
+      "path": "source-units/mingw-w64-v13.0.0/mingw-w64-crt/math/cephes_mconf.h",
+      "bytes": 8501,
+      "sha256": "3b8bebd3f273b0ffc2cc77d5ffab8508f6648c8ee0a244105b31b843c5ee2148"
+    },
+    {
+      "path": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/_cygwin.h",
+      "bytes": 1152,
+      "sha256": "36ad12e27a7b78c5198aabec90e5291a86dc6db83bd8f65302cbc0bd918abfe5"
+    },
+    {
+      "path": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/_mingw.h.in",
+      "bytes": 19406,
+      "sha256": "592dc828a136da5b0ef33e1b8bc2a8514650bfd6f53b623646e81ab9188bd2a7"
+    },
+    {
+      "path": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/_mingw_mac.h",
+      "bytes": 12934,
+      "sha256": "125f71cfa3aba72e86c882b2cc4d0d9f595e9a71370e4a4ad9fbc67352181d6c"
+    },
+    {
+      "path": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/_mingw_secapi.h",
+      "bytes": 3466,
+      "sha256": "f7c73504b479a86e9323056d7785d7ebfdd224f2136a18c5388b100daa6484e9"
+    },
+    {
+      "path": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/corecrt.h",
+      "bytes": 21179,
+      "sha256": "154517b9e9780eaa02f8708c43806446202f1c36124ee65050627199832b46c1"
+    },
+    {
+      "path": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/crtdefs.h",
+      "bytes": 308,
+      "sha256": "c42926e8ce132a3152121c0cf1a379e0053c18ae8d6b13f9471134c63abd76ed"
+    },
+    {
+      "path": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/errno.h",
+      "bytes": 3518,
+      "sha256": "85bb8bccd9322b2db53a7cc9ee3ebc89951f671f8180a56eac02b9b3bf97f1a5"
+    },
+    {
+      "path": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/math.h",
+      "bytes": 49309,
+      "sha256": "f17a7f284474143715b314e5ed4be8563f221825def61a48d3926a403cdc0479"
+    },
+    {
+      "path": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/sdks/_mingw_ddk.h.in",
+      "bytes": 98,
+      "sha256": "1a4c25335c5828f51ffca8c526b00da1e9493bb85985123f32e312f909e9f687"
+    },
+    {
+      "path": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/stddef.h",
+      "bytes": 12558,
+      "sha256": "db7737b5d6349b1d070de9d78faf71ee77a542910e96014c1331ee87e391b1d9"
+    },
+    {
+      "path": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/vadefs.h",
+      "bytes": 2768,
+      "sha256": "abbcc279d0a64730caa533f2df975f4fa10ce9768783b6d98c420e48d8820458"
+    },
+    {
+      "path": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/include/winapifamily.h",
+      "bytes": 698,
+      "sha256": "032684bb38042587a5aa9c4748b33475ee7e7ff90b7b95661e7d92ef441c34b2"
+    }
+  ],
+  "limits": [
+    "Original394-member historical header/legal/source-delivery limitations remain unchanged",
+    "No recompiled source/object equivalence or bit-identical rebuild claim",
+    "No native Windows or audio runtime evidence added"
+  ]
+}

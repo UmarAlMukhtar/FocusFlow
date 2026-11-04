@@ -1,0 +1,111 @@
+{
+  "method": "literal include closure with both installed generated routes resolved by exact primary templates/rules; conservative conditional includes; no preprocessing or compilation",
+  "edges": [
+    {
+      "from": "mingw-w64-v13.0.0/mingw-w64-crt/math/cbrt.c",
+      "include": "math.h",
+      "to": "mingw-w64-v13.0.0/mingw-w64-headers/crt/math.h"
+    },
+    {
+      "from": "mingw-w64-v13.0.0/mingw-w64-crt/math/cbrt.c",
+      "include": "cephes_mconf.h",
+      "to": "mingw-w64-v13.0.0/mingw-w64-crt/math/cephes_mconf.h"
+    },
+    {
+      "from": "mingw-w64-v13.0.0/mingw-w64-crt/math/cephes_mconf.h",
+      "include": "math.h",
+      "to": "mingw-w64-v13.0.0/mingw-w64-headers/crt/math.h"
+    },
+    {
+      "from": "mingw-w64-v13.0.0/mingw-w64-crt/math/cephes_mconf.h",
+      "include": "errno.h",
+      "to": "mingw-w64-v13.0.0/mingw-w64-headers/crt/errno.h"
+    },
+    {
+      "from": "mingw-w64-v13.0.0/mingw-w64-headers/crt/errno.h",
+      "include": "crtdefs.h",
+      "to": "mingw-w64-v13.0.0/mingw-w64-headers/crt/crtdefs.h"
+    },
+    {
+      "from": "mingw-w64-v13.0.0/mingw-w64-headers/crt/crtdefs.h",
+      "include": "corecrt.h",
+      "to": "mingw-w64-v13.0.0/mingw-w64-headers/crt/corecrt.h"
+    },
+    {
+      "from": "mingw-w64-v13.0.0/mingw-w64-headers/crt/corecrt.h",
+      "include": "_mingw.h",
+      "to": "mingw-w64-v13.0.0/mingw-w64-headers/crt/_mingw.h.in"
+    },
+    {
+      "from": "mingw-w64-v13.0.0/mingw-w64-headers/crt/corecrt.h",
+      "include": "winapifamily.h",
+      "to": "mingw-w64-v13.0.0/mingw-w64-headers/include/winapifamily.h"
+    },
+    {
+      "from": "mingw-w64-v13.0.0/mingw-w64-headers/crt/_mingw.h.in",
+      "include": "_mingw_mac.h",
+      "to": "mingw-w64-v13.0.0/mingw-w64-headers/crt/_mingw_mac.h"
+    },
+    {
+      "from": "mingw-w64-v13.0.0/mingw-w64-headers/crt/_mingw.h.in",
+      "include": "_mingw_secapi.h",
+      "to": "mingw-w64-v13.0.0/mingw-w64-headers/crt/_mingw_secapi.h"
+    },
+    {
+      "from": "mingw-w64-v13.0.0/mingw-w64-headers/crt/_mingw.h.in",
+      "include": "_cygwin.h",
+      "to": "mingw-w64-v13.0.0/mingw-w64-headers/crt/_cygwin.h"
+    },
+    {
+      "from": "mingw-w64-v13.0.0/mingw-w64-headers/crt/_mingw.h.in",
+      "include": "vadefs.h",
+      "to": "mingw-w64-v13.0.0/mingw-w64-headers/crt/vadefs.h"
+    },
+    {
+      "from": "mingw-w64-v13.0.0/mingw-w64-headers/crt/_mingw.h.in",
+      "include": "sdks/_mingw_ddk.h",
+      "to": "mingw-w64-v13.0.0/mingw-w64-headers/crt/sdks/_mingw_ddk.h.in"
+    },
+    {
+      "from": "mingw-w64-v13.0.0/mingw-w64-headers/crt/vadefs.h",
+      "include": "_mingw.h",
+      "to": "mingw-w64-v13.0.0/mingw-w64-headers/crt/_mingw.h.in"
+    },
+    {
+      "from": "mingw-w64-v13.0.0/mingw-w64-headers/crt/_cygwin.h",
+      "include": "stddef.h",
+      "to": "mingw-w64-v13.0.0/mingw-w64-headers/crt/stddef.h"
+    },
+    {
+      "from": "mingw-w64-v13.0.0/mingw-w64-headers/crt/stddef.h",
+      "include": "crtdefs.h",
+      "to": "mingw-w64-v13.0.0/mingw-w64-headers/crt/crtdefs.h"
+    },
+    {
+      "from": "mingw-w64-v13.0.0/mingw-w64-headers/crt/math.h",
+      "include": "crtdefs.h",
+      "to": "mingw-w64-v13.0.0/mingw-w64-headers/crt/crtdefs.h"
+    }
+  ],
+  "unresolved": [],
+  "generated": [
+    {
+      "template": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/_mingw.h.in",
+      "installed": "generated/_mingw.h",
+      "substitutions": {
+        "DEFAULT_MSVCRT_VERSION": "0x600",
+        "DEFAULT_WIN32_WINNT": "0xa00"
+      },
+      "exact_installed_header_compared": true
+    },
+    {
+      "template": "source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/sdks/_mingw_ddk.h.in",
+      "installed": "generated/_mingw_ddk.h",
+      "substitutions": {
+        "MINGW_HAS_DDK": "1"
+      },
+      "selection": "mingw-headers.spec --enable-sdk=all; configure.ac MINGW_HAS_DDK=1; Makefile.am sed end-of-line MINGW_HAS_DDK replacement",
+      "exact_installed_header_compared": true
+    }
+  ]
+}

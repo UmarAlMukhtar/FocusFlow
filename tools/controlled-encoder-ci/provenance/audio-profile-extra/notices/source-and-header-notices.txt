@@ -1,0 +1,4502 @@
+=== source-units/mingw-w64-v13.0.0/mingw-w64-crt/math/cbrt.c ===
+/**
+ * This file has no copyright assigned and is placed in the Public Domain.
+ * This file is part of the mingw-w64 runtime package.
+ * No warranty is given; refer to the file DISCLAIMER.PD within this package.
+ */
+#include <math.h>
+#include "cephes_mconf.h"
+
+static const double CBRT2  = 1.2599210498948731647672;
+static const double CBRT4  = 1.5874010519681994747517;
+static const double CBRT2I = 0.79370052598409973737585;
+static const double CBRT4I = 0.62996052494743658238361;
+
+#ifndef __MINGW32__
+extern double frexp ( double, int * );
+extern double ldexp ( double, int );
+extern int isnan ( double );
+extern int isfinite ( double );
+#endif
+
+double cbrt(double x)
+{
+	int e, rem, sign;
+	double z;
+
+#ifdef __MINGW32__
+	if (!isfinite (x) || x == 0)
+		return x;
+#else
+#ifdef NANS
+	if (isnan(x))
+		return x;
+#endif
+#ifdef INFINITIES
+	if (!isfinite(x))
+		return x;
+#endif
+	if (x == 0)
+		return (x);
+#endif /* __MINGW32__ */
+
+	if (x > 0)
+		sign = 1;
+	else
+	{
+		sign = -1;
+		x = -x;
+	}
+
+	z = x;
+	/* extract power of 2, leaving
+	 * mantissa between 0.5 and 1
+	 */
+	x = frexp(x, &e);
+
+	/* Approximate cube root of number between .5 and 1,
+	 * peak relative error = 9.2e-6
+	 */
+	x = (((-1.3466110473359520655053e-1  * x
+	      + 5.4664601366395524503440e-1) * x
+	      - 9.5438224771509446525043e-1) * x
+	      + 1.1399983354717293273738e0 ) * x
+	      + 4.0238979564544752126924e-1;
+
+	/* exponent divided by 3 */
+	if (e >= 0)
+	{
+		rem = e;
+		e /= 3;
+		rem -= 3*e;
+		if (rem == 1)
+			x *= CBRT2;
+		else if (rem == 2)
+			x *= CBRT4;
+	}
+	/* argument less than 1 */
+	else
+	{
+		e = -e;
+		rem = e;
+		e /= 3;
+		rem -= 3*e;
+		if (rem == 1)
+			x *= CBRT2I;
+		else if (rem == 2)
+			x *= CBRT4I;
+		e = -e;
+	}
+
+	/* multiply by power of 2 */
+	x = ldexp(x, e);
+
+	/* Newton iteration */
+	x -= ( x - (z/(x*x)) )*0.33333333333333333333;
+#ifdef DEC
+	x -= ( x - (z/(x*x)) )/3.0;
+#else
+	x -= ( x - (z/(x*x)) )*0.33333333333333333333;
+#endif
+
+	if (sign < 0)
+		x = -x;
+	return (x);
+}
+
+=== source-units/mingw-w64-v13.0.0/mingw-w64-crt/math/cephes_mconf.h ===
+#include <math.h>
+#include <errno.h>
+
+
+#define IBMPC 1
+#define ANSIPROT 1
+#define MINUSZERO 1
+#define INFINITIES 1
+#define NANS 1
+#define DENORMAL 1
+#define VOLATILE
+#define mtherr(fname, code)
+#define XPD 0,
+#ifdef __x86_64__
+#define XPD_SHORT 0, 0,
+#define XPD_LONG 0,
+#else
+#define XPD_SHORT
+#define XPD_LONG
+#endif
+
+#if UNK
+typedef union uLD { long double ld; unsigned short sh[8]; long lo[4]; } uLD;
+typedef union uD { double d; unsigned short sh[4]; } uD;
+#elif IBMPC
+typedef union uLD { unsigned short sh[8]; long double ld; long lo[4]; } uLD;
+typedef union uD { unsigned short sh[4]; double d; } uD;
+#elif MIEEE
+typedef union uLD { long lo[4]; long double ld; unsigned short sh[8]; } uLD;
+typedef union uD { unsigned short sh[4]; double d; } uD;
+#else
+#error Unknown uLD/uD type definition
+#endif
+
+#define _CEPHES_USE_ERRNO
+
+#ifdef _CEPHES_USE_ERRNO
+#define _SET_ERRNO(x) errno = (x)
+#else
+#define _SET_ERRNO(x)
+#endif
+
+/* constants used by cephes functions */
+
+/* double */
+#define MAXNUM	1.7976931348623158E308
+#define MAXLOG	7.09782712893383996843E2
+#define MINLOG	-7.08396418532264106224E2
+#define LOGE2	6.93147180559945309417E-1
+#define LOG2E	1.44269504088896340736
+#define PI	3.14159265358979323846
+#define PIO2	1.57079632679489661923
+#define PIO4	7.85398163397448309616E-1
+
+#define NEGZERO (-0.0)
+#undef NAN
+#undef INFINITY
+#if (__GNUC__ > 3 || (__GNUC__ == 3 && __GNUC_MINOR__ > 2))
+#define INFINITY __builtin_huge_val()
+#define NAN __builtin_nan("")
+#else
+extern double __INF;
+#define INFINITY (__INF)
+extern double __QNAN;
+#define NAN (__QNAN)
+#endif
+
+/*long double*/
+#if __SIZEOF_LONG_DOUBLE__ == __SIZEOF_DOUBLE__
+#define MAXNUML	1.7976931348623158E308
+#define MAXLOGL	7.09782712893383996843E2
+#define MINLOGL	-7.08396418532264106224E2
+#define LOGE2L	6.93147180559945309417E-1
+#define LOG2EL	1.44269504088896340736
+#define PIL	3.14159265358979323846
+#define PIO2L	1.57079632679489661923
+#define PIO4L	7.85398163397448309616E-1
+#else
+#define MAXNUML 1.189731495357231765021263853E4932L
+#define MAXLOGL	1.1356523406294143949492E4L
+#define MINLOGL	-1.13994985314888605586758E4L
+#define LOGE2L	6.9314718055994530941723E-1L
+#define LOG2EL	1.4426950408889634073599E0L
+#define PIL	3.1415926535897932384626L
+#define PIO2L	1.5707963267948966192313L
+#define PIO4L	7.8539816339744830961566E-1L
+#endif /* __SIZEOF_LONG_DOUBLE__ == __SIZEOF_DOUBLE__ */
+
+#define isfinitel isfinite
+#define isinfl isinf
+#define isnanl isnan
+#define signbitl signbit
+
+#define NEGZEROL (-0.0L)
+
+#undef NANL
+#undef INFINITYL
+#if (__GNUC__ > 3 || (__GNUC__ == 3 && __GNUC_MINOR__ > 2))
+#define INFINITYL __builtin_huge_vall()
+#define NANL __builtin_nanl("")
+#else
+extern long double __INFL;
+#define INFINITYL (__INFL)
+extern long double __QNANL;
+#define NANL (__QNANL)
+#endif
+
+/* float */
+
+#define MAXNUMF	3.4028234663852885981170418348451692544e38F
+#define MAXLOGF	88.72283905206835F
+#define MINLOGF	-103.278929903431851103F /* log(2^-149) */
+#define LOG2EF	1.44269504088896341F
+#define LOGE2F	0.693147180559945309F
+#define PIF	3.141592653589793238F
+#define PIO2F	1.5707963267948966192F
+#define PIO4F	0.7853981633974483096F
+
+#define isfinitef isfinite
+#define isinff isinf
+#define isnanf isnan
+#define signbitf signbit
+
+#define NEGZEROF (-0.0F)
+
+#undef NANF
+#undef INFINITYF
+#if (__GNUC__ > 3 || (__GNUC__ == 3 && __GNUC_MINOR__ > 2))
+#define INFINITYF __builtin_huge_valf()
+#define NANF __builtin_nanf("")
+#else
+extern float __INFF;
+#define INFINITYF (__INFF)
+extern float __QNANF;
+#define NANF (__QNANF)
+#endif
+
+
+/* double */
+
+/*
+Cephes Math Library Release 2.2:  July, 1992
+Copyright 1984, 1987, 1988, 1992 by Stephen L. Moshier
+Direct inquiries to 30 Frost Street, Cambridge, MA 02140
+*/
+
+
+/*							polevl.c
+ *							p1evl.c
+ *
+ *	Evaluate polynomial
+ *
+ *
+ *
+ * SYNOPSIS:
+ *
+ * int N;
+ * double x, y, coef[N+1], polevl[];
+ *
+ * y = polevl( x, coef, N );
+ *
+ *
+ *
+ * DESCRIPTION:
+ *
+ * Evaluates polynomial of degree N:
+ *
+ *                     2          N
+ * y  =  C  + C x + C x  +...+ C x
+ *        0    1     2          N
+ *
+ * Coefficients are stored in reverse order:
+ *
+ * coef[0] = C  , ..., coef[N] = C  .
+ *            N                   0
+ *
+ *  The function p1evl() assumes that coef[N] = 1.0 and is
+ * omitted from the array.  Its calling arguments are
+ * otherwise the same as polevl().
+ *
+ *
+ * SPEED:
+ *
+ * In the interest of speed, there are no checks for out
+ * of bounds arithmetic.  This routine is used by most of
+ * the functions in the library.  Depending on available
+ * equipment features, the user may wish to rewrite the
+ * program in microcode or assembly language.
+ *
+ */
+
+/* Polynomial evaluator:
+ *  P[0] x^n  +  P[1] x^(n-1)  +  ...  +  P[n]
+ */
+static __inline__ double polevl(double x, const uD *p, int n)
+{
+	register double y;
+
+	y = p->d;
+	p++;
+	do
+	{
+		y = y * x + p->d;
+		p++;
+	}
+	while (--n);
+	return (y);
+}
+
+
+/* Polynomial evaluator:
+ *  x^n  +  P[0] x^(n-1)  +  P[1] x^(n-2)  +  ...  +  P[n]
+ */
+static __inline__  double p1evl(double x, const uD *p, int n)
+{
+	register double y;
+
+	n -= 1;
+	y = x + p->d; p++;
+	do
+	{
+		y = y * x + p->d; p++;
+	}
+	while (--n);
+	return (y);
+}
+
+
+/* long double */
+/*
+Cephes Math Library Release 2.2:  July, 1992
+Copyright 1984, 1987, 1988, 1992 by Stephen L. Moshier
+Direct inquiries to 30 Frost Street, Cambridge, MA 02140
+*/
+
+
+/*							polevll.c
+ *							p1evll.c
+ *
+ *	Evaluate polynomial
+ *
+ *
+ *
+ * SYNOPSIS:
+ *
+ * int N;
+ * long double x, y, coef[N+1], polevl[];
+ *
+ * y = polevll( x, coef, N );
+ *
+ *
+ *
+ * DESCRIPTION:
+ *
+ * Evaluates polynomial of degree N:
+ *
+ *                     2          N
+ * y  =  C  + C x + C x  +...+ C x
+ *        0    1     2          N
+ *
+ * Coefficients are stored in reverse order:
+ *
+ * coef[0] = C  , ..., coef[N] = C  .
+ *            N                   0
+ *
+ *  The function p1evll() assumes that coef[N] = 1.0 and is
+ * omitted from the array.  Its calling arguments are
+ * otherwise the same as polevll().
+ *
+ *
+ * SPEED:
+ *
+ * In the interest of speed, there are no checks for out
+ * of bounds arithmetic.  This routine is used by most of
+ * the functions in the library.  Depending on available
+ * equipment features, the user may wish to rewrite the
+ * program in microcode or assembly language.
+ *
+ */
+
+/* Polynomial evaluator:
+ *  P[0] x^n  +  P[1] x^(n-1)  +  ...  +  P[n]
+ */
+static __inline__ long double polevll(long double x, const uLD *p, int n)
+{
+	register long double y;
+
+	y = p->ld;
+	p++;
+	do
+	{
+		y = y * x + p->ld;
+		p++;
+	}
+	while (--n);
+	return y;
+}
+
+
+
+/* Polynomial evaluator:
+ *  x^n  +  P[0] x^(n-1)  +  P[1] x^(n-2)  +  ...  +  P[n]
+ */
+static __inline__ long double p1evll(long double x, const uLD *p, int n)
+{
+	register long double y;
+
+	n -= 1;
+	y = x + p->ld;
+	p++;
+
+	do
+	{
+		y = y * x + p->ld;
+		p++;
+	}
+	while (--n);
+	return (y);
+}
+
+/* Float version */
+
+/*							polevlf.c
+ *							p1evlf.c
+ *
+ *	Evaluate polynomial
+ *
+ *
+ *
+ * SYNOPSIS:
+ *
+ * int N;
+ * float x, y, coef[N+1], polevlf[];
+ *
+ * y = polevlf( x, coef, N );
+ *
+ *
+ *
+ * DESCRIPTION:
+ *
+ * Evaluates polynomial of degree N:
+ *
+ *                     2          N
+ * y  =  C  + C x + C x  +...+ C x
+ *        0    1     2          N
+ *
+ * Coefficients are stored in reverse order:
+ *
+ * coef[0] = C  , ..., coef[N] = C  .
+ *            N                   0
+ *
+ *  The function p1evl() assumes that coef[N] = 1.0 and is
+ * omitted from the array.  Its calling arguments are
+ * otherwise the same as polevl().
+ *
+ *
+ * SPEED:
+ *
+ * In the interest of speed, there are no checks for out
+ * of bounds arithmetic.  This routine is used by most of
+ * the functions in the library.  Depending on available
+ * equipment features, the user may wish to rewrite the
+ * program in microcode or assembly language.
+ *
+ */
+
+/*
+Cephes Math Library Release 2.1:  December, 1988
+Copyright 1984, 1987, 1988 by Stephen L. Moshier
+Direct inquiries to 30 Frost Street, Cambridge, MA 02140
+*/
+
+static __inline__ float polevlf(float x, const float* coef, int N)
+{
+	float ans;
+	float *p;
+	int i;
+
+	p = (float*)coef;
+	ans = *p++;
+
+	/*
+	for (i = 0; i < N; i++)
+		ans = ans * x  +  *p++;
+	*/
+
+	i = N;
+	do
+		ans = ans * x  +  *p++;
+	while (--i);
+
+	return (ans);
+}
+
+/*							p1evl()	*/
+/*                                          N
+ * Evaluate polynomial when coefficient of x  is 1.0.
+ * Otherwise same as polevl.
+ */
+
+static __inline__ float p1evlf(float x, const float *coef, int N)
+{
+	float ans;
+	float *p;
+	int i;
+
+	p = (float*)coef;
+	ans = x + *p++;
+	i = N - 1;
+
+	do
+		ans = ans * x  + *p++;
+	while (--i);
+
+	return (ans);
+}
+
+
+=== source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/_cygwin.h ===
+/**
+ * This file has no copyright assigned and is placed in the Public Domain.
+ * This file is part of the mingw-w64 runtime package.
+ * No warranty is given; refer to the file DISCLAIMER.PD within this package.
+ */
+#ifndef _INC_CYGWIN
+#define _INC_CYGWIN
+
+#ifndef __CYGWIN__
+#error Only Cygwin target is supported!
+#endif
+
+/* This includes the Cygwin gcc definitions for types like wchar_t or size_t. */
+#include <stddef.h>
+
+/* Make sure that POSIX types are not defined by _mingw.h if we're building
+   for a Cygwin target.  In this case we have to make sure to use the types
+   defined by the Cygwin/newlib headers. */
+#define _SIZE_T_DEFINED
+#define _SSIZE_T_DEFINED
+#define _INTPTR_T_DEFINED
+#define _UINTPTR_T_DEFINED
+#define _PTRDIFF_T_DEFINED
+#define _WCHAR_T_DEFINED
+#define _WCTYPE_T_DEFINED
+#define _TIME_T_DEFINED
+
+/* _WIN64 is defined by the compiler specs when targeting Windows.
+   The Cygwin-targeting gcc does not define it by default, same as
+   with _WIN32.  Therefore we set it here.  The result is that _WIN64
+   is only defined if Windows headers are included. */
+#ifdef __x86_64__
+#define _WIN64
+#endif
+
+#endif /* _INC_CYGWIN */
+
+=== source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/_mingw.h.in ===
+/**
+ * This file has no copyright assigned and is placed in the Public Domain.
+ * This file is part of the mingw-w64 runtime package.
+ * No warranty is given; refer to the file DISCLAIMER.PD within this package.
+ */
+
+#ifndef _INC__MINGW_H
+#define _INC__MINGW_H
+
+#include "_mingw_mac.h"
+#include "_mingw_secapi.h"
+
+/* Include _cygwin.h if we're building a Cygwin application. */
+#ifdef __CYGWIN__
+#include "_cygwin.h"
+#endif
+
+/* Target specific macro replacement for type "long".  In the Windows API,
+   the type long is always 32 bit, even if the target is 64 bit (LLP64).
+   On 64 bit Cygwin, the type long is 64 bit (LP64).  So, to get the right
+   sized definitions and declarations, all usage of type long in the Windows
+   headers have to be replaced by the below defined macro __LONG32. */
+#ifndef __LP64__	/* 32 bit target, 64 bit Mingw target */
+#define __LONG32 long
+#else			/* 64 bit Cygwin target */
+#define __LONG32 int
+#endif
+
+/* C/C++ specific language defines.  */
+#ifndef __GNUC__
+# ifndef __MINGW_IMPORT
+#  define __MINGW_IMPORT  __declspec(dllimport)
+# endif
+# ifndef _CRTIMP
+#  define _CRTIMP  __declspec(dllimport)
+# endif
+# define __DECLSPEC_SUPPORTED
+# define __attribute__(x) /* nothing */
+#else /* __GNUC__ */
+# ifdef __declspec
+#  ifndef __MINGW_IMPORT
+/* Note the extern. This is needed to work around GCC's
+limitations in handling dllimport attribute.  */
+#   define __MINGW_IMPORT  extern __attribute__ ((__dllimport__))
+#  endif
+#  ifndef _CRTIMP
+#    undef __USE_CRTIMP
+#    if !defined (_CRTBLD) && !defined (_SYSCRT)
+#      define __USE_CRTIMP 1
+#    endif
+#    ifdef __USE_CRTIMP
+#      define _CRTIMP  __attribute__ ((__dllimport__))
+#    else
+#      define _CRTIMP
+#    endif
+#  endif
+#  define __DECLSPEC_SUPPORTED
+# else /* __declspec */
+#  undef __DECLSPEC_SUPPORTED
+#  undef __MINGW_IMPORT
+#  ifndef _CRTIMP
+#   define _CRTIMP
+#  endif
+# endif /* __declspec */
+#endif /* __GNUC__ */
+
+#ifdef _MSC_VER
+#define USE___UUIDOF	1
+#else
+#define USE___UUIDOF	0
+#endif
+
+#if !defined(_MSC_VER) && !defined(_inline)
+#define _inline __inline
+#endif
+
+#ifdef __cplusplus
+# define __CRT_INLINE inline
+#elif defined(_MSC_VER)
+# define __CRT_INLINE __inline
+#else
+# if ((__MINGW_GNUC_PREREQ(4, 3) || defined(__clang__)) && __STDC_VERSION__ >= 199901L)
+#  define __CRT_INLINE extern inline __attribute__((__gnu_inline__))
+# else
+#  define __CRT_INLINE extern __inline__
+# endif
+#endif
+
+#if !defined(__MINGW_INTRIN_INLINE) && defined(__GNUC__)
+#define __MINGW_INTRIN_INLINE extern __inline__ __attribute__((__always_inline__,__gnu_inline__))
+#endif
+
+#ifndef __CYGWIN__
+#ifdef __NO_INLINE__
+#undef __CRT__NO_INLINE
+#define __CRT__NO_INLINE 1
+#endif
+#endif
+
+/* Recent MSVC supports C++14 but it doesn't define __cplusplus accordingly.  */
+#define __MINGW_CXX11_CONSTEXPR
+#define __MINGW_CXX14_CONSTEXPR
+#ifdef __cplusplus
+# if __cplusplus >= 201103L || defined(_MSC_VER)
+#  undef __MINGW_CXX11_CONSTEXPR
+#  define __MINGW_CXX11_CONSTEXPR  constexpr
+# endif
+# if __cplusplus >= 201402L || defined(_MSC_VER)
+#  undef __MINGW_CXX14_CONSTEXPR
+#  define __MINGW_CXX14_CONSTEXPR  constexpr
+# endif
+#endif
+
+#ifdef __cplusplus
+# define __UNUSED_PARAM(x)
+#else
+# ifdef __GNUC__
+#  define __UNUSED_PARAM(x) x __attribute__ ((__unused__))
+# else
+#  define __UNUSED_PARAM(x) x
+# endif
+#endif
+
+#ifndef __GNUC__
+# ifdef _MSC_VER
+#  define __restrict__  __restrict
+# else
+#  define __restrict__	/* nothing */
+# endif
+#endif /* !__GNUC__ */
+
+#if __MINGW_GNUC_PREREQ (3,1) && !defined __GNUG__
+# define __restrict_arr __restrict
+#elif defined(_MSC_VER)
+# define __restrict_arr __restrict
+#else
+# ifdef __GNUC__
+#  define __restrict_arr        /* Not supported in old GCC.  */
+# else
+#  if defined __STDC_VERSION__ && __STDC_VERSION__ >= 199901L
+#   define __restrict_arr       restrict
+#  else
+#   define __restrict_arr       /* Not supported.  */
+#  endif
+# endif
+#endif
+
+#ifdef __GNUC__
+#define __MINGW_ATTRIB_NORETURN __attribute__ ((__noreturn__))
+#define __MINGW_ATTRIB_CONST __attribute__ ((__const__))
+#elif __MINGW_MSC_PREREQ(12, 0)
+#define __MINGW_ATTRIB_NORETURN __declspec(noreturn)
+#define __MINGW_ATTRIB_CONST
+#else
+#define __MINGW_ATTRIB_NORETURN
+#define __MINGW_ATTRIB_CONST
+#endif
+
+#if __MINGW_GNUC_PREREQ (3, 0)
+#define __MINGW_ATTRIB_MALLOC __attribute__ ((__malloc__))
+#define __MINGW_ATTRIB_PURE __attribute__ ((__pure__))
+#elif __MINGW_MSC_PREREQ(14, 0)
+#define __MINGW_ATTRIB_MALLOC __declspec(noalias) __declspec(restrict)
+#define __MINGW_ATTRIB_PURE
+#else
+#define __MINGW_ATTRIB_MALLOC
+#define __MINGW_ATTRIB_PURE
+#endif
+
+/* Attribute `nonnull' was valid as of gcc 3.3.  We don't use GCC's
+   variadiac macro facility, because variadic macros cause syntax
+   errors with  --traditional-cpp.  */
+#if  __MINGW_GNUC_PREREQ (3, 3)
+#define __MINGW_ATTRIB_NONNULL(arg) __attribute__ ((__nonnull__ (arg)))
+#else
+#define __MINGW_ATTRIB_NONNULL(arg)
+#endif /* GNUC >= 3.3 */
+
+#ifdef __GNUC__
+#define __MINGW_ATTRIB_UNUSED __attribute__ ((__unused__))
+#else
+#define __MINGW_ATTRIB_UNUSED
+#endif /* ATTRIBUTE_UNUSED */
+
+#if  __MINGW_GNUC_PREREQ (3, 1)
+#define __MINGW_ATTRIB_USED __attribute__ ((__used__))
+#define __MINGW_ATTRIB_DEPRECATED __attribute__ ((__deprecated__))
+#if __MINGW_GNUC_PREREQ (4, 5) || defined (__clang__)
+#define __MINGW_ATTRIB_DEPRECATED_MSG(x) __attribute__ ((__deprecated__(x)))
+#endif
+#elif __MINGW_MSC_PREREQ(12, 0)
+#define __MINGW_ATTRIB_USED
+#define __MINGW_ATTRIB_DEPRECATED __declspec(deprecated)
+#else
+#define __MINGW_ATTRIB_USED __MINGW_ATTRIB_UNUSED
+#define __MINGW_ATTRIB_DEPRECATED
+#endif /* GNUC >= 3.1 */
+
+#ifndef __MINGW_ATTRIB_DEPRECATED_MSG
+#define __MINGW_ATTRIB_DEPRECATED_MSG(x) __MINGW_ATTRIB_DEPRECATED
+#endif
+
+#if  __MINGW_GNUC_PREREQ (3, 3)
+#define __MINGW_NOTHROW __attribute__ ((__nothrow__))
+#elif __MINGW_MSC_PREREQ(12, 0) && defined (__cplusplus)
+#define __MINGW_NOTHROW __declspec(nothrow)
+#else
+#define __MINGW_NOTHROW
+#endif
+
+#if __MINGW_GNUC_PREREQ (4, 4)
+#define __MINGW_ATTRIB_NO_OPTIMIZE __attribute__((__optimize__ ("0")))
+#else
+#define __MINGW_ATTRIB_NO_OPTIMIZE
+#endif
+
+#if __MINGW_GNUC_PREREQ (4, 4)
+#define __MINGW_PRAGMA_PARAM(x) _Pragma (#x)
+#elif __MINGW_MSC_PREREQ (13, 1)
+#define __MINGW_PRAGMA_PARAM(x) __pragma (x)
+#else
+#define __MINGW_PRAGMA_PARAM(x)
+#endif
+
+#define __MINGW_BROKEN_INTERFACE(x) \
+  __MINGW_PRAGMA_PARAM(message ("Interface " _CRT_STRINGIZE(x) \
+  " has unverified layout."))
+
+#ifndef __MSVCRT_VERSION__
+/*  High byte is the major version, low byte is the minor. */
+# if defined(__CRTDLL__)
+#  define __MSVCRT_VERSION__ 0x00
+# elif defined(_UCRT)
+#  define __MSVCRT_VERSION__ 0xE00
+# else
+#  define __MSVCRT_VERSION__ @DEFAULT_MSVCRT_VERSION@
+# endif
+#endif
+
+#if !defined(__CRTDLL__) && __MSVCRT_VERSION__ == 0x00
+#define __CRTDLL__
+#endif
+
+#if !defined(_UCRT) && ((__MSVCRT_VERSION__ >= 0x1400) || (__MSVCRT_VERSION__ >= 0xE00 && __MSVCRT_VERSION__ < 0x1000))
+/* Allow both 0x1400 and 0xE00 to identify UCRT */
+#define _UCRT
+#endif
+
+#ifdef _UCRT
+#  define __MINGW_UCRT_ASM_CALL(func) __MINGW_ASM_CALL(func)
+#else
+#  define __MINGW_UCRT_ASM_CALL(func)
+#endif
+
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT @DEFAULT_WIN32_WINNT@
+#endif
+
+#ifndef _INT128_DEFINED
+#define _INT128_DEFINED
+#ifdef __GNUC__
+#define __int8 char
+#define __int16 short
+#define __int32 int
+#define __int64 long long
+#ifdef _WIN64
+#if (__clang_major__ > 3 || (__clang_major__ == 3 && __clang_minor__ >= 1)) && \
+    !defined(__SIZEOF_INT128__) /* clang >= 3.1 has __int128 but no size macro */
+#define __SIZEOF_INT128__ 16
+#endif
+#ifndef __SIZEOF_INT128__
+typedef int __int128 __attribute__ ((__mode__ (TI)));
+#endif
+#endif
+#endif /* __GNUC__ */
+#endif /* _INT128_DEFINED */
+
+#ifdef __GNUC__
+#define __ptr32
+#define __ptr64
+#ifndef __unaligned
+#define __unaligned
+#endif
+#ifndef __w64
+#define __w64
+#endif
+#ifdef __cplusplus
+#define __forceinline inline __attribute__((__always_inline__))
+#else
+#define __forceinline extern __inline__ __attribute__((__always_inline__,__gnu_inline__))
+#endif /* __cplusplus */
+#endif /* __GNUC__ */
+
+#if !defined(_WIN32) && !defined(__CYGWIN__)
+#error Only Win32 target is supported!
+#endif
+
+#ifndef __nothrow
+#ifdef __cplusplus
+#define __nothrow __MINGW_NOTHROW
+#else
+#define __nothrow
+#endif
+#endif /* __nothrow */
+
+#include <vadefs.h>	/* other headers depend on this include */
+
+#ifndef _CRT_STRINGIZE
+#define __CRT_STRINGIZE(_Value) #_Value
+#define _CRT_STRINGIZE(_Value) __CRT_STRINGIZE(_Value)
+#endif /* _CRT_STRINGIZE */
+
+#ifndef _CRT_WIDE
+#define __CRT_WIDE(_String) L ## _String
+#define _CRT_WIDE(_String) __CRT_WIDE(_String)
+#endif /* _CRT_WIDE */
+
+#ifndef _W64
+#define _W64
+#endif
+
+#ifndef _CRTIMP_NOIA64
+#ifdef __ia64__
+#define _CRTIMP_NOIA64
+#else
+#define _CRTIMP_NOIA64 _CRTIMP
+#endif
+#endif /* _CRTIMP_NOIA64 */
+
+#ifndef _CRTIMP2
+#define _CRTIMP2 _CRTIMP
+#endif
+
+#ifndef _CRTIMP_ALTERNATIVE
+#define _CRTIMP_ALTERNATIVE _CRTIMP
+#define _CRT_ALTERNATIVE_IMPORTED
+#endif /* _CRTIMP_ALTERNATIVE */
+
+#ifndef _MRTIMP2
+#define _MRTIMP2  _CRTIMP
+#endif
+
+/* We have to define _DLL for gcc based mingw version. This define is set
+   by VC, when DLL-based runtime is used. So, gcc based runtime just have
+   DLL-base runtime, therefore this define has to be set.
+   As our headers are possibly used by windows compiler having a static
+   C-runtime, we make this definition gnu compiler specific here.  */
+#if !defined (_DLL) && defined (__GNUC__)
+#define _DLL
+#endif
+
+#ifndef _MT
+#define _MT
+#endif
+
+#ifndef _MCRTIMP
+#define _MCRTIMP _CRTIMP
+#endif
+
+#ifndef _CRTIMP_PURE
+#define _CRTIMP_PURE _CRTIMP
+#endif
+
+#ifndef _PGLOBAL
+#define _PGLOBAL
+#endif
+
+#ifndef _AGLOBAL
+#define _AGLOBAL
+#endif
+
+#define _SECURECRT_FILL_BUFFER_PATTERN 0xFD
+#define _CRT_DEPRECATE_TEXT(_Text) __declspec(deprecated)
+
+#ifndef _CRT_INSECURE_DEPRECATE_MEMORY
+#define _CRT_INSECURE_DEPRECATE_MEMORY(_Replacement)
+#endif
+
+#ifndef _CRT_INSECURE_DEPRECATE_GLOBALS
+#define _CRT_INSECURE_DEPRECATE_GLOBALS(_Replacement)
+#endif
+
+#ifndef _CRT_MANAGED_HEAP_DEPRECATE
+#define _CRT_MANAGED_HEAP_DEPRECATE
+#endif
+
+#ifndef _CRT_OBSOLETE
+#define _CRT_OBSOLETE(_NewItem)
+#endif
+
+#ifndef __WIDL__
+
+#if defined (_WIN32) && !defined (_WIN64) && !defined (__MINGW_USE_VC2005_COMPAT) && !defined (_UCRT) && !(defined (_TIME_BITS) && _TIME_BITS == 64)
+#ifndef _USE_32BIT_TIME_T
+#define _USE_32BIT_TIME_T
+#endif
+#endif
+
+#ifndef _CONST_RETURN
+#define _CONST_RETURN
+#endif
+
+#ifndef UNALIGNED
+#if defined(__ia64__) || defined(__x86_64__)
+#define UNALIGNED __unaligned
+#else
+#define UNALIGNED
+#endif
+#endif /* UNALIGNED */
+
+#ifndef _CRT_ALIGN
+#ifdef  _MSC_VER
+#define _CRT_ALIGN(x) __declspec(align(x))
+#else /* __GNUC__ */
+#define _CRT_ALIGN(x) __attribute__ ((__aligned__ (x)))
+#endif
+#endif /* _CRT_ALIGN */
+
+#endif /* __WIDL__ */
+
+#ifndef __CRTDECL
+#define __CRTDECL __cdecl
+#endif
+
+#define _ARGMAX 100
+
+#ifndef _TRUNCATE
+#define _TRUNCATE ((size_t)-1)
+#endif
+
+#ifndef _CRT_UNUSED
+#define _CRT_UNUSED(x) (void)x
+#endif
+
+/* MSVC defines _NATIVE_NULLPTR_SUPPORTED when nullptr is supported. We emulate it here for GCC. */
+#if __MINGW_GNUC_PREREQ(4, 6)
+#if defined(__GNUC__) && (defined(__GXX_EXPERIMENTAL_CXX0X__) || __cplusplus >= 201103L)
+#define _NATIVE_NULLPTR_SUPPORTED
+#endif
+#endif
+
+/* We are activating __USE_MINGW_ANSI_STDIO for various define indicators.
+ * printf ll modifier (unsupported by msvcrt.dll) is required by C99 and C++11 standards. */
+#if (defined (_POSIX) || defined (_POSIX_SOURCE) || defined (_POSIX_C_SOURCE) \
+     || defined (_ISOC99_SOURCE) \
+     || (defined (__STDC_VERSION__) && __STDC_VERSION__ >= 199901L && __MSVCRT_VERSION__ < 0xE00) \
+     || (defined (__cplusplus) && __cplusplus >= 201103L && __MSVCRT_VERSION__ < 0xE00) \
+     || defined (_XOPEN_SOURCE) || defined (_XOPEN_SOURCE_EXTENDED) \
+     || defined (_GNU_SOURCE) \
+     || defined (_SVID_SOURCE)) \
+    && !defined(__USE_MINGW_ANSI_STDIO)
+/* Enable __USE_MINGW_ANSI_STDIO if user did _not_ specify it explicitly... */
+#  define __USE_MINGW_ANSI_STDIO			1
+#endif
+
+/* We are defining __USE_MINGW_ANSI_STDIO as 0 or 1 */
+#if !defined(__USE_MINGW_ANSI_STDIO)
+#define __USE_MINGW_ANSI_STDIO 0      /* was not defined so it should be 0 */
+#elif (__USE_MINGW_ANSI_STDIO + 0) != 0 || (1 - __USE_MINGW_ANSI_STDIO - 1) == 2
+#define __USE_MINGW_ANSI_STDIO 1      /* was defined as nonzero or empty so it should be 1 */
+#else
+#define __USE_MINGW_ANSI_STDIO 0      /* was defined as (int)zero and non-empty so it should be 0 */
+#endif
+
+/* _dowildcard is an int that controls the globbing of the command line.
+ * The MinGW32 (mingw.org) runtime calls it _CRT_glob, so we are adding
+ * a compatibility definition here:  you can use either of _CRT_glob or
+ * _dowildcard .
+ * If _dowildcard is non-zero, the command line will be globbed:  *.*
+ * will be expanded to be all files in the startup directory.
+ * In the mingw-w64 library a _dowildcard variable is defined as being
+ * 0, therefore command line globbing is DISABLED by default. To turn it
+ * on and to leave wildcard command line processing MS's globbing code,
+ * include a line in one of your source modules defining _dowildcard and
+ * setting it to -1, like so:
+ * int _dowildcard = -1;
+ */
+#undef  _CRT_glob
+#define _CRT_glob _dowildcard
+
+
+#if defined(_MSC_VER) && !defined(_MSC_EXTENSIONS)
+#define NONAMELESSUNION		1
+#endif
+#if defined(NONAMELESSSTRUCT) && \
+   !defined(NONAMELESSUNION)
+#define NONAMELESSUNION		1
+#endif
+#if defined(NONAMELESSUNION)  && \
+   !defined(NONAMELESSSTRUCT)
+#define NONAMELESSSTRUCT	1
+#endif
+
+#ifndef __ANONYMOUS_DEFINED
+#define __ANONYMOUS_DEFINED
+#define _ANONYMOUS_UNION  __MINGW_EXTENSION
+#define _ANONYMOUS_STRUCT __MINGW_EXTENSION
+#ifndef NONAMELESSUNION
+#define _UNION_NAME(x)
+#define _STRUCT_NAME(x)
+#else /* NONAMELESSUNION */
+#define _UNION_NAME(x)  x
+#define _STRUCT_NAME(x) x
+#endif
+#endif	/* __ANONYMOUS_DEFINED */
+
+#ifndef DUMMYUNIONNAME
+# ifdef NONAMELESSUNION
+#  define DUMMYUNIONNAME  u
+#  define DUMMYUNIONNAME1 u1	/* Wine uses this variant */
+#  define DUMMYUNIONNAME2 u2
+#  define DUMMYUNIONNAME3 u3
+#  define DUMMYUNIONNAME4 u4
+#  define DUMMYUNIONNAME5 u5
+#  define DUMMYUNIONNAME6 u6
+#  define DUMMYUNIONNAME7 u7
+#  define DUMMYUNIONNAME8 u8
+#  define DUMMYUNIONNAME9 u9
+# else /* NONAMELESSUNION */
+#  define DUMMYUNIONNAME
+#  define DUMMYUNIONNAME1	/* Wine uses this variant */
+#  define DUMMYUNIONNAME2
+#  define DUMMYUNIONNAME3
+#  define DUMMYUNIONNAME4
+#  define DUMMYUNIONNAME5
+#  define DUMMYUNIONNAME6
+#  define DUMMYUNIONNAME7
+#  define DUMMYUNIONNAME8
+#  define DUMMYUNIONNAME9
+# endif
+#endif	/* DUMMYUNIONNAME */
+
+#ifndef DUMMYSTRUCTNAME
+# ifdef NONAMELESSUNION
+#  define DUMMYSTRUCTNAME  s
+#  define DUMMYSTRUCTNAME1 s1	/* Wine uses this variant */
+#  define DUMMYSTRUCTNAME2 s2
+#  define DUMMYSTRUCTNAME3 s3
+#  define DUMMYSTRUCTNAME4 s4
+#  define DUMMYSTRUCTNAME5 s5
+# else
+#  define DUMMYSTRUCTNAME
+#  define DUMMYSTRUCTNAME1	/* Wine uses this variant */
+#  define DUMMYSTRUCTNAME2
+#  define DUMMYSTRUCTNAME3
+#  define DUMMYSTRUCTNAME4
+#  define DUMMYSTRUCTNAME5
+# endif
+#endif /* DUMMYSTRUCTNAME */
+
+
+/* Macros for __uuidof template-based emulation */
+#if defined(__cplusplus) && (USE___UUIDOF == 0)
+
+#if __cpp_constexpr >= 200704l && __cpp_inline_variables >= 201606L
+#define __CRT_UUID_DECL(type,l,w1,w2,b1,b2,b3,b4,b5,b6,b7,b8)    \
+    extern "C++" {                                               \
+    template<> struct __mingw_uuidof_s<type> {                   \
+        static constexpr IID __uuid_inst = {                     \
+            l,w1,w2, {b1,b2,b3,b4,b5,b6,b7,b8}                   \
+        };                                                       \
+    };                                                           \
+    template<> constexpr const GUID &__mingw_uuidof<type>() {    \
+        return __mingw_uuidof_s<type>::__uuid_inst;              \
+    }                                                            \
+    template<> constexpr const GUID &__mingw_uuidof<type*>() {   \
+        return  __mingw_uuidof_s<type>::__uuid_inst;             \
+    }                                                            \
+    }
+#else
+#define __CRT_UUID_DECL(type,l,w1,w2,b1,b2,b3,b4,b5,b6,b7,b8)           \
+    extern "C++" {                                                      \
+    template<> inline const GUID &__mingw_uuidof<type>() {              \
+        static const IID __uuid_inst = {l,w1,w2, {b1,b2,b3,b4,b5,b6,b7,b8}}; \
+        return __uuid_inst;                                             \
+    }                                                                   \
+    template<> inline const GUID &__mingw_uuidof<type*>() {             \
+        return __mingw_uuidof<type>();                                  \
+    }                                                                   \
+    }
+#endif
+
+#define __uuidof(type) __mingw_uuidof<__typeof(type)>()
+
+#else
+
+#define __CRT_UUID_DECL(type,l,w1,w2,b1,b2,b3,b4,b5,b6,b7,b8)
+
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+
+#ifdef __MINGW_INTRIN_INLINE
+
+#ifdef __has_builtin
+#define __MINGW_DEBUGBREAK_IMPL !__has_builtin(__debugbreak)
+#else
+#define __MINGW_DEBUGBREAK_IMPL 1
+#endif
+#if __MINGW_DEBUGBREAK_IMPL == 1
+void __cdecl __debugbreak(void);
+__MINGW_INTRIN_INLINE void __cdecl __debugbreak(void)
+{
+#if defined(__aarch64__) || defined(__arm64ec__)
+  __asm__ __volatile__("brk #0xf000");
+#elif defined(__i386__) || defined(__x86_64__)
+  __asm__ __volatile__("int {$}3":);
+#elif defined(__arm__)
+  __asm__ __volatile__("udf #0xfe");
+#else
+  __asm__ __volatile__("unimplemented");
+#endif
+}
+#endif /* __MINGW_DEBUGBREAK_IMPL == 1 */
+
+#ifdef __has_builtin
+#define __MINGW_FASTFAIL_IMPL !__has_builtin(__fastfail)
+#else
+#define __MINGW_FASTFAIL_IMPL 1
+#endif
+#if __MINGW_FASTFAIL_IMPL == 1
+void __cdecl __MINGW_ATTRIB_NORETURN __fastfail(unsigned int code);
+__MINGW_INTRIN_INLINE void __cdecl __MINGW_ATTRIB_NORETURN __fastfail(unsigned int code)
+{
+#if defined(__aarch64__) || defined(__arm64ec__)
+  register unsigned int w0 __asm__("w0") = code;
+  __asm__ __volatile__("brk #0xf003"::"r"(w0));
+#elif defined(__i386__) || defined(__x86_64__)
+  __asm__ __volatile__("int {$}0x29"::"c"(code));
+#elif defined(__arm__)
+  register unsigned int r0 __asm__("r0") = code;
+  __asm__ __volatile__("udf #0xfb"::"r"(r0));
+#else
+  __asm__ __volatile__("unimplemented");
+#endif
+  __builtin_unreachable();
+}
+#endif /* __MINGW_FASTFAIL_IMPL == 1 */
+
+#ifdef __has_builtin
+#define __MINGW_PREFETCH_IMPL !__has_builtin(__prefetch)
+#else
+#define __MINGW_PREFETCH_IMPL 1
+#endif
+#if __MINGW_PREFETCH_IMPL == 1
+#if defined(__arm__) || defined(__aarch64__) || defined(__arm64ec__)
+void __cdecl __prefetch(const void *addr);
+__MINGW_INTRIN_INLINE void __cdecl __prefetch(const void *addr)
+{
+#if defined(__arm__)
+  __asm__ __volatile__("pld [%0]"::"r"(addr));
+#elif defined(__aarch64__) || defined(__arm64ec__)
+  __asm__ __volatile__("prfm pldl1keep, [%0]"::"r"(addr));
+#endif
+}
+#endif /* defined(__arm__) || defined(__aarch64__) */
+#endif /* __MINGW_PREFETCH_IMPL == 1 */
+
+#endif /* defined(__MINGW_INTRIN_INLINE) */
+
+/* mingw-w64 specific functions: */
+const char *__mingw_get_crt_info (void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* _INC__MINGW_H */
+
+#ifndef MINGW_SDK_INIT
+#define MINGW_SDK_INIT
+
+/* for backward compatibility */
+#ifndef MINGW_HAS_SECURE_API
+#define MINGW_HAS_SECURE_API 1
+#endif
+
+#define __STDC_SECURE_LIB__ 200411L
+#define __GOT_SECURE_LIB__ __STDC_SECURE_LIB__
+
+#ifndef __WIDL__
+#include "sdks/_mingw_ddk.h"
+#endif
+
+#endif /* MINGW_SDK_INIT */
+
+=== source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/_mingw_mac.h ===
+/**
+ * This file has no copyright assigned and is placed in the Public Domain.
+ * This file is part of the mingw-w64 runtime package.
+ * No warranty is given; refer to the file DISCLAIMER.PD within this package.
+ */
+
+#ifndef _INC_CRTDEFS_MACRO
+#define _INC_CRTDEFS_MACRO
+
+#define __MINGW64_PASTE2(x, y) x ## y
+#define __MINGW64_PASTE(x, y) __MINGW64_PASTE2(x, y)
+
+#define __STRINGIFY(x) #x
+#define __MINGW64_STRINGIFY(x) \
+  __STRINGIFY(x)
+
+#define __MINGW64_VERSION_MAJOR 13
+#define __MINGW64_VERSION_MINOR 0
+#define __MINGW64_VERSION_BUGFIX 0
+
+/* This macro holds an monotonic increasing value, which indicates
+   a specific fix/patch is present on trunk.  This value isn't related to
+   minor/major version-macros.  It is increased on demand, if a big
+   fix was applied to trunk.  This macro gets just increased on trunk.  For
+   other branches its value won't be modified.  */
+
+#define __MINGW64_VERSION_RC 0
+
+#define __MINGW64_VERSION_STR	\
+  __MINGW64_STRINGIFY(__MINGW64_VERSION_MAJOR) \
+  "." \
+  __MINGW64_STRINGIFY(__MINGW64_VERSION_MINOR) \
+  "." \
+  __MINGW64_STRINGIFY(__MINGW64_VERSION_BUGFIX)
+
+#define __MINGW64_VERSION_STATE "alpha"
+
+/* mingw.org's version macros: these make gcc to define
+   MINGW32_SUPPORTS_MT_EH and to use the _CRT_MT global
+   and the __mingwthr_key_dtor() function from the MinGW
+   CRT in its private gthr-win32.h header. */
+#define __MINGW32_MAJOR_VERSION 3
+#define __MINGW32_MINOR_VERSION 11
+
+/* Set VC specific compiler target macros.  */
+#if defined(__x86_64) && defined(_X86_)
+#  undef _X86_  /* _X86_ is not for __x86_64 */
+#endif
+
+#if defined(_X86_) && !defined(_M_IX86) && !defined(_M_IA64) \
+   && !defined(_M_AMD64) && !defined(__x86_64)
+#  if defined(__i486__)
+#    define _M_IX86 400
+#  elif defined(__i586__)
+#    define _M_IX86 500
+#  elif defined(__i686__)
+#    define _M_IX86 600
+#  else
+#    define _M_IX86 300
+#  endif
+#endif /* if defined(_X86_) && !defined(_M_IX86) && !defined(_M_IA64) ... */
+
+#if defined(__x86_64) && !defined(_M_IX86) && !defined(_M_IA64) \
+   && !defined(_M_AMD64)
+#  define _M_AMD64 100
+#  define _M_X64 100
+#endif
+
+#if defined(__ia64__) && !defined(_M_IX86) && !defined(_M_IA64) \
+   && !defined(_M_AMD64) && !defined(_X86_) && !defined(__x86_64)
+#  define _M_IA64 100
+#endif
+
+#if defined(__arm__) && !defined(_M_ARM) && !defined(_M_ARMT) \
+   && !defined(_M_THUMB)
+#  define _M_ARM 100
+#  define _M_ARMT 100
+#  define _M_THUMB 100
+#  ifndef _ARM_
+#    define _ARM_ 1
+#  endif
+#  ifndef _M_ARM_NT
+#    define _M_ARM_NT 1
+#  endif
+#endif
+
+#if defined(__aarch64__) && !defined(_M_ARM64)
+#  define _M_ARM64 1
+#  ifndef _ARM64_
+#    define _ARM64_ 1
+#  endif
+#endif
+
+#if defined(__arm64ec__) && !defined(_M_ARM64EC)
+#  define _M_ARM64EC 1
+#  ifndef _ARM64EC_
+#    define _ARM64EC_ 1
+#  endif
+#endif
+
+#ifndef _X86_
+   /* MS does not prefix symbols by underscores for 64-bit.  */
+#  ifndef __MINGW_USE_UNDERSCORE_PREFIX
+     /* As we have to support older gcc version, which are using underscores
+      as symbol prefix for x64, we have to check here for the user label
+      prefix defined by gcc. */
+#    ifdef __USER_LABEL_PREFIX__
+#      pragma push_macro ("_")
+#      undef _
+#      define _ 1
+#      if (__USER_LABEL_PREFIX__ + 0) != 0
+#        define __MINGW_USE_UNDERSCORE_PREFIX 1
+#      else
+#        define __MINGW_USE_UNDERSCORE_PREFIX 0
+#      endif
+#      undef _
+#      pragma pop_macro ("_")
+#    else /* ! __USER_LABEL_PREFIX__ */
+#      define __MINGW_USE_UNDERSCORE_PREFIX 0
+#    endif /* __USER_LABEL_PREFIX__ */
+#  endif
+#else /* ! ifndef _X86_ */
+   /* For x86 we have always to prefix by underscore.  */
+#  undef __MINGW_USE_UNDERSCORE_PREFIX
+#  define __MINGW_USE_UNDERSCORE_PREFIX 1
+#endif /* ifndef _X86_ */
+
+#if __MINGW_USE_UNDERSCORE_PREFIX == 0
+#  define __MINGW_IMP_SYMBOL(sym) __MINGW64_PASTE(__imp_,sym)
+#  define __MINGW_IMP_LSYMBOL(sym) __MINGW64_PASTE(__imp_,sym)
+#  define __MINGW_USYMBOL(sym) sym
+#  define __MINGW_LSYMBOL(sym) __MINGW64_PASTE(_,sym)
+#else /* ! if __MINGW_USE_UNDERSCORE_PREFIX == 0 */
+#  define __MINGW_IMP_SYMBOL(sym) __MINGW64_PASTE(_imp__,sym)
+#  define __MINGW_IMP_LSYMBOL(sym) __MINGW64_PASTE(__imp__,sym)
+#  define __MINGW_USYMBOL(sym) __MINGW64_PASTE(_,sym)
+#  define __MINGW_LSYMBOL(sym) sym
+#endif /* if __MINGW_USE_UNDERSCORE_PREFIX == 0 */
+
+#define __MINGW_ASM_CALL(func) __asm__(__MINGW64_STRINGIFY(__MINGW_USYMBOL(func)))
+#define __MINGW_ASM_CRT_CALL(func) __asm__(__STRINGIFY(func))
+
+#ifndef __PTRDIFF_TYPE__
+#  ifdef _WIN64
+#    define __PTRDIFF_TYPE__ long long int
+#  else
+#    define __PTRDIFF_TYPE__ long int
+#  endif
+#endif
+
+#ifndef __SIZE_TYPE__
+#  ifdef _WIN64
+#    define __SIZE_TYPE__ long long unsigned int
+#  else
+#    define __SIZE_TYPE__ long unsigned int
+#  endif
+#endif
+
+#ifndef __WCHAR_TYPE__
+#  define __WCHAR_TYPE__ unsigned short
+#endif
+
+#ifndef __WINT_TYPE__
+#  define __WINT_TYPE__ unsigned short
+#endif
+
+#undef __MINGW_EXTENSION
+
+#ifdef __WIDL__
+#  define __MINGW_EXTENSION
+#else
+#  if defined(__GNUC__) || defined(__GNUG__)
+#    define __MINGW_EXTENSION __extension__
+#  else
+#    define __MINGW_EXTENSION
+#  endif
+#endif /* __WIDL__ */
+
+/* Special case nameless struct/union.  */
+#ifndef __C89_NAMELESS
+#  define __C89_NAMELESS __MINGW_EXTENSION
+#  define __C89_NAMELESSSTRUCTNAME
+#  define __C89_NAMELESSSTRUCTNAME1
+#  define __C89_NAMELESSSTRUCTNAME2
+#  define __C89_NAMELESSSTRUCTNAME3
+#  define __C89_NAMELESSSTRUCTNAME4
+#  define __C89_NAMELESSSTRUCTNAME5
+#  define __C89_NAMELESSUNIONNAME
+#  define __C89_NAMELESSUNIONNAME1
+#  define __C89_NAMELESSUNIONNAME2
+#  define __C89_NAMELESSUNIONNAME3
+#  define __C89_NAMELESSUNIONNAME4
+#  define __C89_NAMELESSUNIONNAME5
+#  define __C89_NAMELESSUNIONNAME6
+#  define __C89_NAMELESSUNIONNAME7
+#  define __C89_NAMELESSUNIONNAME8
+#endif
+
+#ifndef __GNU_EXTENSION
+#  define __GNU_EXTENSION __MINGW_EXTENSION
+#endif
+
+/* MinGW-w64 has some additional C99 printf/scanf feature support.
+   So we add some helper macros to ease recognition of them.  */
+#define __MINGW_HAVE_ANSI_C99_PRINTF 1
+#define __MINGW_HAVE_WIDE_C99_PRINTF 1
+#define __MINGW_HAVE_ANSI_C99_SCANF 1
+#define __MINGW_HAVE_WIDE_C99_SCANF 1
+
+#ifdef __MINGW_USE_BROKEN_INTERFACE
+#  define __MINGW_POISON_NAME(__IFACE) __IFACE
+#else
+#  define __MINGW_POISON_NAME(__IFACE) \
+     __IFACE##_layout_has_not_been_verified_and_its_declaration_is_most_likely_incorrect
+#endif
+
+#ifndef __MSABI_LONG
+#  ifndef __LP64__
+#    define __MSABI_LONG(x) x ## l
+#  else
+#    define __MSABI_LONG(x) x
+#  endif
+#endif
+
+#if __GNUC__
+#  define __MINGW_GCC_VERSION	(__GNUC__ * 10000 + \
+      __GNUC_MINOR__	* 100	+ \
+      __GNUC_PATCHLEVEL__)
+#else
+#  define __MINGW_GCC_VERSION 0
+#endif
+
+#if defined (__GNUC__) && defined (__GNUC_MINOR__)
+#  define __MINGW_GNUC_PREREQ(major, minor) \
+      (__GNUC__ > (major) \
+      || (__GNUC__ == (major) && __GNUC_MINOR__ >= (minor)))
+#else
+#  define __MINGW_GNUC_PREREQ(major, minor) 0
+#endif
+
+#if defined (_MSC_VER)
+#  define __MINGW_MSC_PREREQ(major, minor) \
+      (_MSC_VER >= (major * 100 + minor * 10))
+#else
+#  define __MINGW_MSC_PREREQ(major, minor) 0
+#endif
+
+#ifdef __MINGW_MSVC_COMPAT_WARNINGS
+#  if __MINGW_GNUC_PREREQ (4, 5)
+#    define __MINGW_ATTRIB_DEPRECATED_STR(X) \
+       __attribute__ ((__deprecated__ (X)))
+#  else
+#    define __MINGW_ATTRIB_DEPRECATED_STR(X) \
+       __MINGW_ATTRIB_DEPRECATED
+#  endif
+#else
+#  define __MINGW_ATTRIB_DEPRECATED_STR(X)
+#endif /* ifdef __MINGW_MSVC_COMPAT_WARNINGS */
+
+#define __MINGW_SEC_WARN_STR \
+  "This function or variable may be unsafe, use _CRT_SECURE_NO_WARNINGS to disable deprecation"
+
+#define __MINGW_MSVC2005_DEPREC_STR \
+  "This POSIX function is deprecated beginning in Visual C++ 2005, use _CRT_NONSTDC_NO_DEPRECATE to disable deprecation"
+
+#if !defined (_CRT_NONSTDC_NO_DEPRECATE)
+#  define __MINGW_ATTRIB_DEPRECATED_MSVC2005 \
+      __MINGW_ATTRIB_DEPRECATED_STR(__MINGW_MSVC2005_DEPREC_STR)
+#else
+#  define __MINGW_ATTRIB_DEPRECATED_MSVC2005
+#endif
+
+#if !defined (_CRT_SECURE_NO_WARNINGS)
+#  define __MINGW_ATTRIB_DEPRECATED_SEC_WARN \
+      __MINGW_ATTRIB_DEPRECATED_STR(__MINGW_SEC_WARN_STR)
+#else
+#  define __MINGW_ATTRIB_DEPRECATED_SEC_WARN
+#endif
+
+#ifdef __clang__
+#define __MINGW_MS_PRINTF(__format,__args) \
+  __attribute__((__format__(__printf__, __format,__args)))
+
+#define __MINGW_MS_SCANF(__format,__args) \
+  __attribute__((__format__(__scanf__,  __format,__args)))
+
+#define __MINGW_GNU_PRINTF(__format,__args) \
+  __attribute__((__format__(__printf__,__format,__args)))
+
+#define __MINGW_GNU_SCANF(__format,__args) \
+  __attribute__((__format__(__scanf__, __format,__args)))
+#else
+#define __MINGW_MS_PRINTF(__format,__args) \
+  __attribute__((__format__(__ms_printf__, __format,__args)))
+
+#define __MINGW_MS_SCANF(__format,__args) \
+  __attribute__((__format__(__ms_scanf__,  __format,__args)))
+
+#define __MINGW_GNU_PRINTF(__format,__args) \
+  __attribute__((__format__(__gnu_printf__,__format,__args)))
+
+#define __MINGW_GNU_SCANF(__format,__args) \
+  __attribute__((__format__(__gnu_scanf__, __format,__args)))
+#endif /* !__clang__ */
+
+#undef __mingw_ovr
+
+#ifdef __cplusplus
+#  define __mingw_ovr  inline __cdecl
+#elif defined (__GNUC__)
+#  define __mingw_ovr static \
+      __attribute__ ((__unused__)) __inline__ __cdecl
+#else
+#  define __mingw_ovr static __cdecl
+#endif /* __cplusplus */
+
+#if __MINGW_GNUC_PREREQ(4, 3) || defined(__clang__)
+#  define __mingw_attribute_artificial \
+     __attribute__((__artificial__))
+#else
+#  define __mingw_attribute_artificial
+#endif
+
+#define __MINGW_SELECTANY  __attribute__((__selectany__))
+
+#pragma push_macro("__has_builtin")
+#ifndef __has_builtin
+#  define __has_builtin(x) 0
+#endif
+
+#if defined(__MINGW32__) && _FORTIFY_SOURCE > 0 && __OPTIMIZE__ > 0 \
+    && __MINGW_GNUC_PREREQ(4, 1)
+#  if _FORTIFY_SOURCE > 3
+#    warning Using _FORTIFY_SOURCE=3 (levels > 3 are not supported)
+#  endif
+#  if _FORTIFY_SOURCE > 2
+#    if __has_builtin(__builtin_dynamic_object_size)
+#      define __MINGW_FORTIFY_LEVEL 3
+#    else
+#      warning Using _FORTIFY_SOURCE=2 (level 3 requires __builtin_dynamic_object_size support)
+#      define __MINGW_FORTIFY_LEVEL 2
+#    endif
+#  elif _FORTIFY_SOURCE > 1
+#    define __MINGW_FORTIFY_LEVEL 2
+#  else
+#    define __MINGW_FORTIFY_LEVEL 1
+#  endif
+#else
+#  define __MINGW_FORTIFY_LEVEL 0
+#endif
+
+#if __MINGW_FORTIFY_LEVEL > 0
+   /* Calling an function with __attribute__((__warning__("...")))
+      from a system include __inline__ function does not print
+      a warning unless caller has __attribute__((__artificial__)). */
+#  define __mingw_bos_declare \
+     void __cdecl __chk_fail(void) __attribute__((__noreturn__)); \
+     void __cdecl __mingw_chk_fail_warn(void) __MINGW_ASM_CALL(__chk_fail) \
+     __attribute__((__noreturn__)) \
+     __attribute__((__warning__("Buffer overflow detected")))
+#  if __MINGW_FORTIFY_LEVEL > 2
+#    define __mingw_bos(p, maxtype) \
+       __builtin_dynamic_object_size((p), (maxtype) > 0)
+#    define __mingw_bos_known(p) \
+       (__builtin_object_size(p, 0) != (size_t)-1 \
+       || !__builtin_constant_p(__mingw_bos(p, 0)))
+#  else
+#    define __mingw_bos(p, maxtype) \
+       __builtin_object_size((p), ((maxtype) > 0) && (__MINGW_FORTIFY_LEVEL > 1))
+#    define __mingw_bos_known(p) \
+       (__mingw_bos(p, 0) != (size_t)-1)
+#  endif
+#  define __mingw_bos_cond_chk(c) \
+     (__builtin_expect((c), 1) ? (void)0 : __chk_fail())
+#  define __mingw_bos_ptr_chk(p, n, maxtype) \
+     __mingw_bos_cond_chk(!__mingw_bos_known(p) || __mingw_bos(p, maxtype) >= (size_t)(n))
+#  define __mingw_bos_ptr_chk_warn(p, n, maxtype) \
+     ((__mingw_bos_known(p) \
+     && __builtin_constant_p(__mingw_bos(p, maxtype) < (size_t)(n)) \
+     && __mingw_bos(p, maxtype) < (size_t)(n)) \
+     ? __mingw_chk_fail_warn() : __mingw_bos_ptr_chk(p, n, maxtype))
+#  define __mingw_bos_ovr __mingw_ovr \
+     __attribute__((__always_inline__)) \
+     __mingw_attribute_artificial
+#  define __mingw_bos_extern_ovr extern __inline__ __cdecl \
+     __attribute__((__always_inline__, __gnu_inline__)) \
+     __mingw_attribute_artificial
+#else
+#  define __mingw_bos_ovr __mingw_ovr
+#endif /* __MINGW_FORTIFY_LEVEL > 0 */
+
+/* If _FORTIFY_SOURCE is enabled, some inline functions may use
+   __builtin_va_arg_pack().  GCC may report an error if the address
+   of such a function is used.  Set _FORTIFY_VA_ARG=0 in this case.
+   Clang doesn't, as of version 15, yet implement __builtin_va_arg_pack().  */
+#if __MINGW_FORTIFY_LEVEL > 0 \
+    && ((__MINGW_GNUC_PREREQ(4, 3) && !defined(__clang__)) \
+    || __has_builtin(__builtin_va_arg_pack)) \
+    && (!defined(_FORTIFY_VA_ARG) || _FORTIFY_VA_ARG > 0)
+#  define __MINGW_FORTIFY_VA_ARG 1
+#else
+#  define __MINGW_FORTIFY_VA_ARG 0
+#endif
+
+#pragma pop_macro("__has_builtin")
+
+/* Enable workaround for ABI incompatibility on affected platforms */
+#ifndef WIDL_EXPLICIT_AGGREGATE_RETURNS
+#if defined(__GNUC__) && defined(__cplusplus)
+#define  WIDL_EXPLICIT_AGGREGATE_RETURNS
+#endif
+#endif
+
+#endif	/* _INC_CRTDEFS_MACRO */
+
+=== source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/_mingw_secapi.h ===
+/**
+ * This file has no copyright assigned and is placed in the Public Domain.
+ * This file is part of the mingw-w64 runtime package.
+ * No warranty is given; refer to the file DISCLAIMER.PD within this package.
+ */
+ 
+#ifndef _INC_MINGW_SECAPI
+#define _INC_MINGW_SECAPI
+
+/* http://msdn.microsoft.com/en-us/library/ms175759%28v=VS.100%29.aspx */
+#if defined(__cplusplus)
+#ifndef _CRT_SECURE_CPP_OVERLOAD_SECURE_NAMES
+#define _CRT_SECURE_CPP_OVERLOAD_SECURE_NAMES 1         /* default to 1 */
+#endif /*_CRT_SECURE_CPP_OVERLOAD_SECURE_NAMES*/
+#ifndef _CRT_SECURE_CPP_OVERLOAD_SECURE_NAMES_MEMORY
+#define _CRT_SECURE_CPP_OVERLOAD_SECURE_NAMES_MEMORY 0  /* default to 0 */
+#endif /*_CRT_SECURE_CPP_OVERLOAD_SECURE_NAMES_MEMORY*/
+#ifndef _CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES
+#define _CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES 0       /* default to 0 */
+#endif /* _CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES */
+#ifndef _CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES_COUNT
+#define _CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES_COUNT 0 /* default to 0 */
+#endif /* _CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES_COUNT */
+#ifndef _CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES_MEMORY
+#define _CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES_MEMORY 0 /* default to 0 */
+#endif /* _CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES_MEMORY */
+#else
+/* Templates won't work in C, will break if secure API is not enabled, disabled */
+#undef _CRT_SECURE_CPP_OVERLOAD_SECURE_NAMES
+#undef _CRT_SECURE_CPP_OVERLOAD_SECURE_NAMES_MEMORY
+#undef _CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES
+#undef _CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES_COUNT
+#undef _CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES_MEMORY
+#define _CRT_SECURE_CPP_OVERLOAD_SECURE_NAMES 0
+#define _CRT_SECURE_CPP_OVERLOAD_SECURE_NAMES_MEMORY 0
+#define _CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES 0
+#define _CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES_COUNT 0
+#define _CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES_MEMORY 0
+#endif /*defined(__cplusplus)*/
+
+#define __MINGW_CRT_NAME_CONCAT2(sym) ::sym##_s
+
+#ifdef __cplusplus
+extern "C++" {
+template <bool __test, typename __dsttype>
+  struct __if_array;
+template <typename __dsttype>
+  struct __if_array <true, __dsttype> {
+    typedef __dsttype __type;
+};
+}
+#endif /*__cplusplus*/
+
+/* https://blogs.msdn.com/b/sdl/archive/2010/02/16/vc-2010-and-memcpy.aspx?Redirected=true */
+/* fallback on default implementation if we can't know the size of the destination */
+#if (_CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES_MEMORY == 1)
+#define __CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES_MEMORY_0_3_(__ret,__func,__type1,__attrib1,__arg1,__type2,__attrib2,__arg2,__type3,__attrib3,__arg3)\
+  extern "C" {_CRTIMP __ret __cdecl __func(__type1 * __attrib1 __arg1, __type2 __attrib2 __arg2, __type3 __attrib3 __arg3) __MINGW_ATTRIB_DEPRECATED_SEC_WARN;}\
+  extern "C++" {\
+    template <size_t __size, typename __dsttype> inline\
+    typename __if_array < (__size > 1), void * >::__type __cdecl __func(\
+    __dsttype (&__arg1)[__size],\
+    __type2 __attrib2 (__arg2),\
+    __type3 __attrib3 (__arg3)) {\
+      return __MINGW_CRT_NAME_CONCAT2(__func) (__arg1,__size * sizeof(__dsttype),__arg2,__arg3) == 0 ? __arg1 : NULL;\
+    }\
+  }
+#else
+#define __CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES_MEMORY_0_3_(__ret,__func,__type1,__attrib1,__arg1,__type2,__attrib2,__arg2,__type3,__attrib3,__arg3)\
+  _CRTIMP __ret __cdecl __func(__type1 * __attrib1 __arg1, __type2 __attrib2 __arg2, __type3 __attrib3 __arg3) __MINGW_ATTRIB_DEPRECATED_SEC_WARN;
+#endif
+
+#endif /*_INC_MINGW_SECAPI*/
+
+=== source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/corecrt.h ===
+/**
+ * This file has no copyright assigned and is placed in the Public Domain.
+ * This file is part of the mingw-w64 runtime package.
+ * No warranty is given; refer to the file DISCLAIMER.PD within this package.
+ */
+
+#ifndef _INC_CORECRT
+#define _INC_CORECRT
+
+#include <_mingw.h>
+
+#ifndef __WIDL__
+#undef _CRT_PACKING
+#define _CRT_PACKING 8
+#pragma pack(push,_CRT_PACKING)
+#endif
+
+#ifdef __ERRCODE_DEFINED_MS
+/* #define __ERRCODE_DEFINED_MS */
+typedef int errcode;
+#endif
+
+#ifndef _CRTNOALIAS
+#define _CRTNOALIAS
+#endif
+
+#ifndef _CRTRESTRICT
+#define _CRTRESTRICT
+#endif
+
+#ifndef _SIZE_T_DEFINED
+#define _SIZE_T_DEFINED
+#undef size_t
+#ifdef _WIN64
+__MINGW_EXTENSION typedef unsigned __int64 size_t;
+#else
+typedef unsigned int size_t;
+#endif /* _WIN64 */
+#endif /* _SIZE_T_DEFINED */
+
+#ifndef _SSIZE_T_DEFINED
+#define _SSIZE_T_DEFINED
+#undef ssize_t
+#ifdef _WIN64
+__MINGW_EXTENSION typedef __int64 ssize_t;
+#else
+typedef int ssize_t;
+#endif /* _WIN64 */
+#endif /* _SSIZE_T_DEFINED */
+
+#ifndef _RSIZE_T_DEFINED
+typedef size_t rsize_t;
+#define _RSIZE_T_DEFINED
+#endif
+
+#ifndef _INTPTR_T_DEFINED
+#define _INTPTR_T_DEFINED
+#ifndef __intptr_t_defined
+#define __intptr_t_defined
+#undef intptr_t
+#ifdef _WIN64
+__MINGW_EXTENSION typedef __int64 intptr_t;
+#else
+typedef int intptr_t;
+#endif /* _WIN64 */
+#endif /* __intptr_t_defined */
+#endif /* _INTPTR_T_DEFINED */
+
+#ifndef _UINTPTR_T_DEFINED
+#define _UINTPTR_T_DEFINED
+#ifndef __uintptr_t_defined
+#define __uintptr_t_defined
+#undef uintptr_t
+#ifdef _WIN64
+__MINGW_EXTENSION typedef unsigned __int64 uintptr_t;
+#else
+typedef unsigned int uintptr_t;
+#endif /* _WIN64 */
+#endif /* __uintptr_t_defined */
+#endif /* _UINTPTR_T_DEFINED */
+
+#ifndef _PTRDIFF_T_DEFINED
+#define _PTRDIFF_T_DEFINED
+#ifndef _PTRDIFF_T_
+#define _PTRDIFF_T_
+#undef ptrdiff_t
+#ifdef _WIN64
+__MINGW_EXTENSION typedef __int64 ptrdiff_t;
+#else
+typedef int ptrdiff_t;
+#endif /* _WIN64 */
+#endif /* _PTRDIFF_T_ */
+#endif /* _PTRDIFF_T_DEFINED */
+
+#ifndef _WCHAR_T_DEFINED
+#define _WCHAR_T_DEFINED
+#if !defined(__cplusplus) && !defined(__WIDL__)
+typedef unsigned short wchar_t;
+#endif /* C++ */
+#endif /* _WCHAR_T_DEFINED */
+
+#ifndef _WCTYPE_T_DEFINED
+#define _WCTYPE_T_DEFINED
+#ifndef _WINT_T
+#define _WINT_T
+typedef unsigned short wint_t;
+typedef unsigned short wctype_t;
+#endif /* _WINT_T */
+#endif /* _WCTYPE_T_DEFINED */
+
+#ifndef _ERRCODE_DEFINED
+#define _ERRCODE_DEFINED
+typedef int errno_t;
+#endif
+
+#ifndef _TIME32_T_DEFINED
+#define _TIME32_T_DEFINED
+typedef long __time32_t;
+#endif
+
+#ifndef _TIME64_T_DEFINED
+#define _TIME64_T_DEFINED
+__MINGW_EXTENSION typedef __int64 __time64_t;
+#endif /* _TIME64_T_DEFINED */
+
+#ifdef _USE_32BIT_TIME_T
+#ifdef _WIN64
+#error You cannot use 32-bit time_t (_USE_32BIT_TIME_T) with _WIN64
+#undef _USE_32BIT_TIME_T
+#endif
+#endif /* _USE_32BIT_TIME_T */
+
+#ifndef _TIME_T_DEFINED
+#define _TIME_T_DEFINED
+#ifdef _USE_32BIT_TIME_T
+typedef __time32_t time_t;
+#else
+typedef __time64_t time_t;
+#endif
+#endif /* _TIME_T_DEFINED */
+
+#ifndef _CRT_SECURE_CPP_NOTHROW
+#define _CRT_SECURE_CPP_NOTHROW throw()
+#endif
+
+#ifndef __CRTDECL
+#if !defined(__cplusplus) && defined(__GNUC__)
+#define __CRTDECL __cdecl __attribute__ ((__unused__))
+#else
+#define __CRTDECL __cdecl
+#endif
+#endif
+
+#if defined(__cplusplus) && _CRT_SECURE_CPP_OVERLOAD_SECURE_NAMES
+
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_0_0(__ret,__func,__dsttype,__dst) \
+  extern "C++" { \
+    template <size_t __size> \
+    inline __ret __cdecl __func(__dsttype (&__dst)[__size]) { \
+        return __func(__dst,__size); \
+    } \
+  }
+
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_0_1(__ret,__func,__dsttype,__dst,__type1,__arg1) \
+  extern "C++" {\
+    template <size_t __size> \
+    inline __ret __cdecl __func(__dsttype (&__dst)[__size], __type1 __arg1) { \
+        return __func(__dst,__size,__arg1);  \
+    }\
+  }
+
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_0_2(__ret,__func,__dsttype,__dst,__type1,__arg1,__type2,__arg2)\
+  extern "C++" {\
+    template <size_t __size> inline\
+    __ret __cdecl __func(__dsttype (&__dst)[__size], __type1 __arg1, __type2 __arg2) { \
+        return __func(__dst,__size,__arg1,__arg2);  \
+    }\
+  }
+
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_0_3(__ret,__func,__dsttype,__dst,__type1,__arg1,__type2,__arg2,__type3,__arg3) \
+  extern "C++" { \
+    template <size_t __size> inline \
+    __ret __cdecl __func(__dsttype (&__dst)[__size], __type1 __arg1, __type2 __arg2, __type3 __arg3) { \
+        return __func(__dst,__size,__arg1,__arg2,__arg3); \
+    }\
+  }
+
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_0_4(__ret,__func,__dsttype,__dst,__type1,__arg1,__type2,__arg2,__type3,__arg3,__type4,__arg4) \
+  extern "C++" { \
+    template <size_t __size> inline \
+    __ret __cdecl __func(__dsttype (&__dst)[__size], __type1 __arg1, __type2 __arg2, __type3 __arg3, __type4 __arg4) { \
+        return __func(__dst,__size,__arg1,__arg2,__arg3,__arg4); \
+    }\
+  }
+
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_1_1(__ret,__func,__type0,__arg0,__dsttype,__dst,__type1,__arg1) \
+  extern "C++" { \
+    template <size_t __size> inline \
+      __ret __cdecl __func(__type0 __arg0, __dsttype (&__dst)[__size], __type1 __arg1) { \
+      return __func(__arg0, __dst, __size, __arg1); \
+    } \
+  }
+
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_1_2(__ret,__func,__type0,__arg0,__dsttype,__dst,__type1,__arg1,__type2,__arg2) \
+  extern "C++" { \
+    template <size_t __size> inline \
+    __ret __cdecl __func(__type0 __arg0, __dsttype (&__dst)[__size], __type1 __arg1, __type2 __arg2) { \
+      return __func(__arg0, __dst, __size, __arg1, __arg2); \
+    } \
+  }
+
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_1_3(__ret,__func,__type0,__arg0,__dsttype,__dst,__type1,__arg1,__type2,__arg2,__type3,__arg3) \
+  extern "C++" { \
+    template <size_t __size> inline \
+      __ret __cdecl __func(__type0 __arg0, __dsttype (&__dst)[__size], __type1 __arg1, __type2 __arg2, __type3 __arg3) { \
+      return __func(__arg0, __dst, __size, __arg1, __arg2, __arg3); \
+    } \
+  }
+
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_2_0(__ret,__func,__type1,__arg1,__type2,__arg2,__dsttype,__dst) \
+  extern "C++" { \
+    template <size_t __size> inline \
+    __ret __cdecl __func(__type1 __arg1, __type2 __arg2, __dsttype (&__dst)[__size]) { \
+      return __func(__arg1, __arg2, __dst, __size); \
+    } \
+  }
+
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_0_1_ARGLIST(__ret,__func,__vfunc,__dsttype,__dst,__type1,__arg1) \
+  extern "C++" {\
+    template <size_t __size> \
+    inline __ret __cdecl __func(__dsttype (&__dst)[__size], __type1 __arg1, ...) { \
+      va_list __vaargs; \
+      _crt_va_start(__vaargs, __arg1); \
+      __ret __retval = __vfunc(__dst,__size,__arg1,__vaargs); \
+      _crt_va_end(__vaargs); \
+      return __retval; \
+    }\
+  }
+
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_0_2_ARGLIST(__ret,__func,__vfunc,__dsttype,__dst,__type1,__arg1,__type2,__arg2) \
+  extern "C++" {\
+    template <size_t __size> \
+    inline __ret __cdecl __func(__dsttype (&__dst)[__size], __type1 __arg1, __type2 __arg2, ...) { \
+      va_list __vaargs; \
+      _crt_va_start(__vaargs, __arg2); \
+      __ret __retval = __vfunc(__dst,__size,__arg1,__arg2,__vaargs); \
+      _crt_va_end(__vaargs); \
+      return __retval; \
+    }\
+  }
+
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_SPLITPATH(__ret,__func,__dsttype,__src) \
+  extern "C++" { \
+    template <size_t __drive_size, size_t __dir_size, size_t __name_size, size_t __ext_size> inline \
+    __ret __cdecl __func(const __dsttype *__src, __dsttype (&__drive)[__drive_size], __dsttype (&__dir)[__dir_size], __dsttype (&__name)[__name_size], __dsttype (&__ext)[__ext_size]) { \
+        return __func(__src, __drive, __drive_size, __dir, __dir_size, __name, __name_size, __ext, __ext_size); \
+    } \
+  }
+
+#else
+
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_0_0(__ret,__func,__dsttype,__dst)
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_0_1(__ret,__func,__dsttype,__dst,__type1,__arg1)
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_0_2(__ret,__func,__dsttype,__dst,__type1,__arg1,__type2,__arg2)
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_0_3(__ret,__func,__dsttype,__dst,__type1,__arg1,__type2,__arg2,__type3,__arg3)
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_0_4(__ret,__func,__dsttype,__dst,__type1,__arg1,__type2,__arg2,__type3,__arg3,__type4,__arg4)
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_1_1(__ret,__func,__type0,__arg0,__dsttype,__dst,__type1,__arg1)
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_1_2(__ret,__func,__type0,__arg0,__dsttype,__dst,__type1,__arg1,__type2,__arg2)
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_1_3(__ret,__func,__type0,__arg0,__dsttype,__dst,__type1,__arg1,__type2,__arg2,__type3,__arg3)
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_2_0(__ret,__func,__type1,__arg1,__type2,__arg2,__dsttype,__dst)
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_0_1_ARGLIST(__ret,__func,__vfunc,__dsttype,__dst,__type1,__arg1)
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_0_2_ARGLIST(__ret,__func,__vfunc,__dsttype,__dst,__type1,__arg1,__type2,__arg2)
+#define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_SPLITPATH(__ret,__func,__dsttype,__src)
+
+#endif
+
+#define __DEFINE_CPP_OVERLOAD_STANDARD_FUNC_0_0(__ret_type, __ret_policy, __decl_spec, __name, __dst_attr, __dst_type, __dst) \
+    __DEFINE_CPP_OVERLOAD_STANDARD_FUNC_0_0_EX(__ret_type, __ret_policy, __decl_spec, __func_name, __func_name##_s, __dst_attr, __dst_type, __dst)
+#define __DEFINE_CPP_OVERLOAD_STANDARD_FUNC_0_1(__ret_type, __ret_policy, __decl_spec, __name, __dst_attr, __dst_type, __dst, __arg1_type, __arg1) \
+    __DEFINE_CPP_OVERLOAD_STANDARD_FUNC_0_2_EX(__ret_type, __ret_policy, __decl_spec, __func_name, __func_name##_s, __dst_attr, __dst_type, __dst, __arg1_type, __arg1, __arg2_type, __arg2)
+#define __DEFINE_CPP_OVERLOAD_STANDARD_FUNC_0_2(__ret_type, __ret_policy, __decl_spec, __name, __dst_attr, __dst_type, __dst, __arg1_type, __arg1, __arg2_type, __arg2) \
+    __DEFINE_CPP_OVERLOAD_STANDARD_FUNC_0_2_EX(__ret_type, __ret_policy, __decl_spec, __func_name, __func_name##_s, __dst_attr, __dst_type, __dst, __arg1_type, __arg1, __arg2_type, __arg2)
+#define __DEFINE_CPP_OVERLOAD_STANDARD_FUNC_0_3(__ret_type, __ret_policy, __decl_spec, __name, __dst_attr, __dst_type, __dst, __arg1_type, __arg1, __arg2_type, __arg2, __arg3_type, __arg3) \
+    __DEFINE_CPP_OVERLOAD_STANDARD_FUNC_0_3_EX(__ret_type, __ret_policy, __decl_spec, __func_name, __func_name##_s, __dst_attr, __dst_type, __dst, __arg1_type, __arg1, __arg2_type, __arg2, __arg3_type, __arg3)
+#define __DEFINE_CPP_OVERLOAD_STANDARD_FUNC_0_4(__ret_type, __ret_policy, __decl_spec, __name, __dst_attr, __dst_type, __dst, __arg1_type, __arg1, __arg2_type, __arg2, __arg3_type, __arg3, __arg4_type, __arg4) \
+    __DEFINE_CPP_OVERLOAD_STANDARD_FUNC_0_4_EX(__ret_type, __ret_policy, __decl_spec, __func_name, __func_name##_s, __dst_attr, __dst_type, __dst, __arg1_type, __arg1, __arg2_type, __arg2, __arg3_type, __arg3, __arg4_type, __arg4)
+
+#if defined(__cplusplus) && _CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES
+
+#define __RETURN_POLICY_SAME(__func_call, __dst) return (__func_call)
+#define __RETURN_POLICY_DST(__func_call, __dst) return ((__func_call) == 0 ? __dst : 0)
+#define __RETURN_POLICY_VOID(__func_call, __dst) (__func_call); return
+#define __EMPTY_DECLSPEC
+
+#define __DEFINE_CPP_OVERLOAD_STANDARD_FUNC_0_0_EX(__ret_type, __ret_policy, __decl_spec, __name, __sec_name, __dst_attr, __dst_type, __dst) \
+    __inline __ret_type __CRTDECL __insecure_##__name(__dst_attr __dst_type *__dst) \
+    { \
+        __decl_spec __ret_type __cdecl __name(__dst_type *__dst); \
+        return __name(__dst); \
+    } \
+    extern "C++" { \
+    template <typename _T> \
+    inline __ret_type __CRTDECL __name(_T &__dst) _CRT_SECURE_CPP_NOTHROW { \
+        return __insecure_##__name(static_cast<__dst_type*>(__dst)); \
+    } \
+    template <typename _T> \
+    inline __ret_type __CRTDECL __name(const _T &__dst) _CRT_SECURE_CPP_NOTHROW { \
+        return __insecure_##__name(static_cast<__dst_type *>(__dst)); \
+    } \
+    template <> \
+    inline __ret_type __CRTDECL __name(__dst_type *&__dst) _CRT_SECURE_CPP_NOTHROW { \
+        return __insecure_##__name(__dst); \
+    } \
+    template <size_t __size> \
+    inline __ret_type __CRTDECL __name(__dst_type (&__dst)[__size]) _CRT_SECURE_CPP_NOTHROW { \
+        __ret_policy(__sec_name(__dst, __size), __dst); \
+    } \
+    }
+
+#define __DEFINE_CPP_OVERLOAD_STANDARD_FUNC_0_2_EX(__ret_type, __ret_policy, __decl_spec, __name, __sec_name, __sec_dst_type, __dst_attr, __dst_type, __dst, __arg1_type, __arg1, __arg2_type, __arg2) \
+    __inline __ret_type __CRTDECL __insecure_##__name(__dst_attr __dst_type *__dst, __arg1_type __arg1, __arg2_type __arg2) \
+    { \
+        __decl_spec __ret_type __cdecl __name(__dst_type *__dst, __arg1_type, __arg2_type); \
+        return __name(__dst, __arg1, __arg2); \
+    } \
+    extern "C++" { \
+    template <typename _T> \
+    inline __ret_type __CRTDECL __name(_T &__dst, __arg1_type __arg1, __arg2_type __arg2) _CRT_SECURE_CPP_NOTHROW { \
+        return __insecure_##__name(static_cast<__dst_type*>(__dst), __arg1, __arg2); \
+    } \
+    template <typename _T> \
+    inline __ret_type __CRTDECL __name(const _T &__dst, __arg1_type __arg1, __arg2_type __arg2) _CRT_SECURE_CPP_NOTHROW { \
+        return __insecure_##__name(static_cast<__dst_type *>(__dst), __arg1, __arg2); \
+    } \
+    template <> \
+    inline __ret_type __CRTDECL __name(__dst_type *&__dst, __arg1_type __arg1, __arg2_type __arg2) _CRT_SECURE_CPP_NOTHROW { \
+        return __insecure_##__name(__dst, __arg1, __arg2); \
+    } \
+    template <size_t __size> \
+    inline __ret_type __CRTDECL __name(__sec_dst_type (&__dst)[__size], __arg1_type __arg1, __arg2_type __arg2) _CRT_SECURE_CPP_NOTHROW { \
+        __ret_policy(__sec_name(__dst, __size), __dst); \
+    } \
+    }
+
+#define __DEFINE_CPP_OVERLOAD_STANDARD_FUNC_0_1_EX(__ret_type, __ret_policy, __decl_spec, __name, __sec_name, __sec_dst_type, __dst_attr, __dst_type, __dst, __arg1_type, __arg1) \
+    __inline __ret_type __CRTDECL __insecure_##__name(__dst_attr __dst_type *__dst, __arg1_type __arg1) \
+    { \
+        __decl_spec __ret_type __cdecl __name(__dst_type *__dst, __arg1_type); \
+        return __name(__dst, __arg1); \
+    } \
+    extern "C++" { \
+    template <typename _T> \
+    inline __ret_type __CRTDECL __name(_T &__dst, __arg1_type __arg1) _CRT_SECURE_CPP_NOTHROW { \
+        return __insecure_##__name(static_cast<__dst_type*>(__dst), __arg1); \
+    } \
+    template <typename _T> \
+    inline __ret_type __CRTDECL __name(const _T &__dst, __arg1_type __arg1) _CRT_SECURE_CPP_NOTHROW { \
+        return __insecure_##__name(static_cast<__dst_type *>(__dst), __arg1); \
+    } \
+    template <> \
+    inline __ret_type __CRTDECL __name(__dst_type *&__dst, __arg1_type __arg1) _CRT_SECURE_CPP_NOTHROW { \
+        return __insecure_##__name(__dst, __arg1); \
+    } \
+    template <size_t __size> \
+    inline __ret_type __CRTDECL __name(__sec_dst_type (&__dst)[__size], __arg1_type __arg1) _CRT_SECURE_CPP_NOTHROW { \
+        __ret_policy(__sec_name(__dst, __size), __dst); \
+    } \
+    }
+
+#define __DEFINE_CPP_OVERLOAD_STANDARD_FUNC_0_3_EX(__ret_type, __ret_policy, __decl_spec, __name, __sec_name, __sec_dst_type, __dst_attr, __dst_type, __dst, __arg1_type, __arg1, __arg2_type, __arg2, __arg3_type, __arg3) \
+    __inline __ret_type __CRTDECL __insecure_##__name(__dst_attr __dst_type *__dst, __arg1_type __arg1, __arg2_type __arg2, __arg3_type __arg3) \
+    { \
+        __decl_spec __ret_type __cdecl __name(__dst_type *__dst, __arg1_type, __arg2_type, __arg3_type); \
+        return __name(__dst, __arg1, __arg2, __arg3); \
+    } \
+    extern "C++" { \
+    template <typename _T> \
+    inline __ret_type __CRTDECL __name(_T &__dst, __arg1_type __arg1, __arg2_type __arg2, __arg3_type __arg3) _CRT_SECURE_CPP_NOTHROW { \
+        return __insecure_##__name(static_cast<__dst_type*>(__dst), __arg1, __arg2, __arg3); \
+    } \
+    template <typename _T> \
+    inline __ret_type __CRTDECL __name(const _T &__dst, __arg1_type __arg1, __arg2_type __arg2, __arg3_type __arg3) _CRT_SECURE_CPP_NOTHROW { \
+        return __insecure_##__name(static_cast<__dst_type *>(__dst), __arg1, __arg2, __arg3); \
+    } \
+    template <> \
+    inline __ret_type __CRTDECL __name(__dst_type *&__dst, __arg1_type __arg1, __arg2_type __arg2, __arg3_type __arg3) _CRT_SECURE_CPP_NOTHROW { \
+        return __insecure_##__name(__dst, __arg1, __arg2, __arg3); \
+    } \
+    template <size_t __size> \
+    inline __ret_type __CRTDECL __name(__sec_dst_type (&__dst)[__size], __arg1_type __arg1, __arg2_type __arg2, __arg3_type __arg3) _CRT_SECURE_CPP_NOTHROW { \
+        __ret_policy(__sec_name(__dst, __size), __dst); \
+    } \
+    }
+
+#define __DEFINE_CPP_OVERLOAD_STANDARD_FUNC_0_4_EX(__ret_type, __ret_policy, __decl_spec, __name, __sec_name, __sec_dst_type, __dst_attr, __dst_type, __dst, __arg1_type, __arg1, __arg2_type, __arg2, __arg3_type, __arg3, __arg4_type, __arg4) \
+    __inline __ret_type __CRTDECL __insecure_##__name(__dst_attr __dst_type *__dst, __arg1_type __arg1, __arg2_type __arg2, __arg3_type __arg3, __arg4_type __arg4) \
+    { \
+        __decl_spec __ret_type __cdecl __name(__dst_type *__dst, __arg1_type, __arg2_type, __arg3_type, __arg4_type); \
+        return __name(__dst, __arg1, __arg2, __arg3, __arg4); \
+    } \
+    extern "C++" { \
+    template <typename _T> \
+    inline __ret_type __CRTDECL __name(_T &__dst, __arg1_type __arg1, __arg2_type __arg2, __arg3_type __arg3, __arg4_type __arg4) _CRT_SECURE_CPP_NOTHROW { \
+        return __insecure_##__name(static_cast<__dst_type*>(__dst), __arg1, __arg2, __arg3, __arg4); \
+    } \
+    template <typename _T> \
+    inline __ret_type __CRTDECL __name(const _T &__dst, __arg1_type __arg1, __arg2_type __arg2, __arg3_type __arg3, __arg4_type __arg4) _CRT_SECURE_CPP_NOTHROW { \
+        return __insecure_##__name(static_cast<__dst_type *>(__dst), __arg1, __arg2, __arg3, __arg4); \
+    } \
+    template <> \
+    inline __ret_type __CRTDECL __name(__dst_type *&__dst, __arg1_type __arg1, __arg2_type __arg2, __arg3_type __arg3, __arg4_type __arg4) _CRT_SECURE_CPP_NOTHROW { \
+        return __insecure_##__name(__dst, __arg1, __arg2, __arg3, __arg4); \
+    } \
+    template <size_t __size> \
+    inline __ret_type __CRTDECL __name(__sec_dst_type (&__dst)[__size], __arg1_type __arg1, __arg2_type __arg2, __arg3_type __arg3, __arg4_type __arg4) _CRT_SECURE_CPP_NOTHROW { \
+        __ret_policy(__sec_name(__dst, __size)); \
+    } \
+    }
+
+#else
+
+#define __DEFINE_CPP_OVERLOAD_STANDARD_FUNC_0_0_EX(__ret_type, __ret_policy, __decl_spec, __name, __sec_name, __dst_attr, __dst_type, __dst)
+#define __DEFINE_CPP_OVERLOAD_STANDARD_FUNC_0_1_EX(__ret_type, __ret_policy, __decl_spec, __name, __sec_name, __dst_attr, __dst_type, __dst, __arg1_type, __arg1)
+#define __DEFINE_CPP_OVERLOAD_STANDARD_FUNC_0_2_EX(__ret_type, __ret_policy, __decl_spec, __name, __sec_name, __dst_attr, __dst_type, __dst, __arg1_type, __arg1, __arg2_type, __arg2)
+#define __DEFINE_CPP_OVERLOAD_STANDARD_FUNC_0_3_EX(__ret_type, __ret_policy, __decl_spec, __name, __sec_name, __dst_attr, __dst_type, __dst, __arg1_type, __arg1, __arg2_type, __arg2, __arg3_type, __arg3)
+#define __DEFINE_CPP_OVERLOAD_STANDARD_FUNC_0_4_EX(__ret_type, __ret_policy, __decl_spec, __name, __sec_name, __dst_attr, __dst_type, __dst, __arg1_type, __arg1, __arg2_type, __arg2, __arg3_type, __arg3, __arg4_type, __arg4)
+
+#endif
+
+struct threadlocaleinfostruct;
+struct threadmbcinfostruct;
+typedef struct threadlocaleinfostruct *pthreadlocinfo;
+typedef struct threadmbcinfostruct *pthreadmbcinfo;
+struct __lc_time_data;
+
+typedef struct localeinfo_struct {
+  pthreadlocinfo locinfo;
+  pthreadmbcinfo mbcinfo;
+} _locale_tstruct,*_locale_t;
+
+#ifndef _TAGLC_ID_DEFINED
+#define _TAGLC_ID_DEFINED
+typedef struct tagLC_ID {
+  unsigned short wLanguage;
+  unsigned short wCountry;
+  unsigned short wCodePage;
+} LC_ID,*LPLC_ID;
+#endif /* _TAGLC_ID_DEFINED */
+
+#ifndef _THREADLOCALEINFO
+#define _THREADLOCALEINFO
+typedef struct threadlocaleinfostruct {
+#ifdef _UCRT
+  const unsigned short *_locale_pctype;
+  int _locale_mb_cur_max;
+  unsigned int _locale_lc_codepage;
+#else
+  int refcount;
+  unsigned int lc_codepage;
+  unsigned int lc_collate_cp;
+  unsigned long lc_handle[6];
+  LC_ID lc_id[6];
+  struct {
+    char *locale;
+    wchar_t *wlocale;
+    int *refcount;
+    int *wrefcount;
+  } lc_category[6];
+  int lc_clike;
+  int mb_cur_max;
+  int *lconv_intl_refcount;
+  int *lconv_num_refcount;
+  int *lconv_mon_refcount;
+  struct lconv *lconv;
+  int *ctype1_refcount;
+  unsigned short *ctype1;
+  const unsigned short *pctype;
+  const unsigned char *pclmap;
+  const unsigned char *pcumap;
+  struct __lc_time_data *lc_time_curr;
+#endif
+} threadlocinfo;
+#endif /* _THREADLOCALEINFO */
+
+#ifndef __crt_typefix
+#define __crt_typefix(ctype)
+#endif
+
+#ifndef _CRT_USE_WINAPI_FAMILY_DESKTOP_APP
+#ifdef WINAPI_FAMILY
+#include <winapifamily.h>
+#if WINAPI_FAMILY_PARTITION (WINAPI_PARTITION_DESKTOP)
+#define _CRT_USE_WINAPI_FAMILY_DESKTOP_APP
+#endif
+#else /* !WINAPI_FAMILY */
+#define _CRT_USE_WINAPI_FAMILY_DESKTOP_APP
+#endif /* !WINAPI_FAMILY */
+#endif /* _CRT_USE_WINAPI_FAMILY_DESKTOP_APP */
+
+#ifndef __WIDL__
+#pragma pack(pop)
+#endif
+
+#endif /* _INC_CORECRT */
+
+=== source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/crtdefs.h ===
+/**
+ * This file has no copyright assigned and is placed in the Public Domain.
+ * This file is part of the mingw-w64 runtime package.
+ * No warranty is given; refer to the file DISCLAIMER.PD within this package.
+ */
+
+#ifndef _INC_CRTDEFS
+#define _INC_CRTDEFS
+
+#include <corecrt.h>
+
+#endif /* _INC_CRTDEFS */
+
+=== source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/errno.h ===
+/**
+ * This file has no copyright assigned and is placed in the Public Domain.
+ * This file is part of the mingw-w64 runtime package.
+ * No warranty is given; refer to the file DISCLAIMER.PD within this package.
+ */
+#ifndef _INC_ERRNO
+#define _INC_ERRNO
+
+#include <crtdefs.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#ifndef _CRT_ERRNO_DEFINED
+#define _CRT_ERRNO_DEFINED
+_CRTIMP extern int *__cdecl _errno(void);
+#define errno (*_errno())
+
+errno_t __cdecl _set_errno(int _Value);
+errno_t __cdecl _get_errno(int *_Value);
+#endif /* _CRT_ERRNO_DEFINED */
+
+#define EPERM 1
+#define ENOENT 2
+#define ENOFILE ENOENT
+#define ESRCH 3
+#define EINTR 4
+#define EIO 5
+#define ENXIO 6
+#define E2BIG 7
+#define ENOEXEC 8
+#define EBADF 9
+#define ECHILD 10
+#define EAGAIN 11
+#define ENOMEM 12
+#define EACCES 13
+#define EFAULT 14
+#define EBUSY 16
+#define EEXIST 17
+#define EXDEV 18
+#define ENODEV 19
+#define ENOTDIR 20
+#define EISDIR 21
+#define ENFILE 23
+#define EMFILE 24
+#define ENOTTY 25
+#define EFBIG 27
+#define ENOSPC 28
+#define ESPIPE 29
+#define EROFS 30
+#define EMLINK 31
+#define EPIPE 32
+#define EDOM 33
+#define EDEADLK 36
+#define ENAMETOOLONG 38
+#define ENOLCK 39
+#define ENOSYS 40
+#define ENOTEMPTY 41
+
+#ifndef RC_INVOKED
+#if !defined(_SECURECRT_ERRCODE_VALUES_DEFINED)
+#define _SECURECRT_ERRCODE_VALUES_DEFINED
+#define EINVAL 22
+#define ERANGE 34
+#define EILSEQ 42
+#define STRUNCATE 80
+#endif
+#endif
+
+#define EDEADLOCK EDEADLK
+
+/* Posix thread extensions.  */
+
+#ifndef ENOTSUP
+#define ENOTSUP         129
+#endif
+
+/* Extension defined as by report VC 10+ defines error-numbers.  */
+
+#ifndef EAFNOSUPPORT
+#define EAFNOSUPPORT 102
+#endif
+
+#ifndef EADDRINUSE
+#define EADDRINUSE 100
+#endif
+
+#ifndef EADDRNOTAVAIL
+#define EADDRNOTAVAIL 101
+#endif
+
+#ifndef EISCONN
+#define EISCONN 113
+#endif
+
+#ifndef ENOBUFS
+#define ENOBUFS 119
+#endif
+
+#ifndef ECONNABORTED
+#define ECONNABORTED 106
+#endif
+
+#ifndef EALREADY
+#define EALREADY 103
+#endif
+
+#ifndef ECONNREFUSED
+#define ECONNREFUSED 107
+#endif
+
+#ifndef ECONNRESET
+#define ECONNRESET 108
+#endif
+
+#ifndef EDESTADDRREQ
+#define EDESTADDRREQ 109
+#endif
+
+#ifndef EHOSTUNREACH
+#define EHOSTUNREACH 110
+#endif
+
+#ifndef EMSGSIZE
+#define EMSGSIZE 115
+#endif
+
+#ifndef ENETDOWN
+#define ENETDOWN 116
+#endif
+
+#ifndef ENETRESET
+#define ENETRESET 117
+#endif
+
+#ifndef ENETUNREACH
+#define ENETUNREACH 118
+#endif
+
+#ifndef ENOPROTOOPT
+#define ENOPROTOOPT 123
+#endif
+
+#ifndef ENOTSOCK
+#define ENOTSOCK 128
+#endif
+
+#ifndef ENOTCONN
+#define ENOTCONN 126
+#endif
+
+#ifndef ECANCELED
+#define ECANCELED 105
+#endif
+
+#ifndef EINPROGRESS
+#define EINPROGRESS 112
+#endif
+
+#ifndef EOPNOTSUPP
+#define EOPNOTSUPP 130
+#endif
+
+#ifndef EWOULDBLOCK
+#define EWOULDBLOCK 140
+#endif
+
+#ifndef EOWNERDEAD
+#define EOWNERDEAD 133
+#endif
+
+#ifndef EPROTO
+#define EPROTO 134
+#endif
+
+#ifndef EPROTONOSUPPORT
+#define EPROTONOSUPPORT 135
+#endif
+
+#ifndef EBADMSG
+#define EBADMSG 104
+#endif
+
+#ifndef EIDRM
+#define EIDRM 111
+#endif
+
+#ifndef ENODATA
+#define ENODATA 120
+#endif
+
+#ifndef ENOLINK
+#define ENOLINK 121
+#endif
+
+#ifndef ENOMSG
+#define ENOMSG 122
+#endif
+
+#ifndef ENOSR
+#define ENOSR 124
+#endif
+
+#ifndef ENOSTR
+#define ENOSTR 125
+#endif
+
+#ifndef ENOTRECOVERABLE
+#define ENOTRECOVERABLE 127
+#endif
+
+#ifndef ETIME
+#define ETIME 137
+#endif
+
+#ifndef ETXTBSY
+#define ETXTBSY 139
+#endif
+
+/* Defined as WSAETIMEDOUT.  */
+#ifndef ETIMEDOUT
+#define ETIMEDOUT 138
+#endif
+
+#ifndef ELOOP
+#define ELOOP 114
+#endif
+
+#ifndef EPROTOTYPE
+#define EPROTOTYPE 136
+#endif
+
+#ifndef EOVERFLOW
+#define EOVERFLOW 132
+#endif
+
+#ifdef __cplusplus
+}
+#endif
+#endif
+
+=== source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/math.h ===
+/**
+ * This file has no copyright assigned and is placed in the Public Domain.
+ * This file is part of the mingw-w64 runtime package.
+ * No warranty is given; refer to the file DISCLAIMER.PD within this package.
+ */
+#ifndef _MATH_H_
+#define _MATH_H_
+
+#ifdef __GNUC__
+#pragma GCC system_header
+#endif /* __GNUC__ */
+
+#include <crtdefs.h>
+
+struct _exception;
+
+#pragma pack(push,_CRT_PACKING)
+
+#define	_DOMAIN		1	/* domain error in argument */
+#define	_SING		2	/* singularity */
+#define	_OVERFLOW	3	/* range overflow */
+#define	_UNDERFLOW	4	/* range underflow */
+#define	_TLOSS		5	/* total loss of precision */
+#define	_PLOSS		6	/* partial loss of precision */
+
+#ifndef __STRICT_ANSI__
+#ifndef	NO_OLDNAMES
+
+#define	DOMAIN		_DOMAIN
+#define	SING		_SING
+#define	OVERFLOW	_OVERFLOW
+#define	UNDERFLOW	_UNDERFLOW
+#define	TLOSS		_TLOSS
+#define	PLOSS		_PLOSS
+
+#endif
+#endif
+
+#if !defined(__STRICT_ANSI__) || defined(_POSIX_C_SOURCE) || defined(_POSIX_SOURCE) || defined(_XOPEN_SOURCE) || defined(_GNU_SOURCE) || defined(_BSD_SOURCE) || defined(_USE_MATH_DEFINES)
+#define M_E		2.7182818284590452354
+#define M_LOG2E		1.4426950408889634074
+#define M_LOG10E	0.43429448190325182765
+#define M_LN2		0.69314718055994530942
+#define M_LN10		2.30258509299404568402
+#define M_PI		3.14159265358979323846
+#define M_PI_2		1.57079632679489661923
+#define M_PI_4		0.78539816339744830962
+#define M_1_PI		0.31830988618379067154
+#define M_2_PI		0.63661977236758134308
+#define M_2_SQRTPI	1.12837916709551257390
+#define M_SQRT2		1.41421356237309504880
+#define M_SQRT1_2	0.70710678118654752440
+#endif
+
+/* See also float.h  */
+#ifndef __MINGW_FPCLASS_DEFINED
+#define __MINGW_FPCLASS_DEFINED 1
+/* IEEE 754 classication */
+#define	_FPCLASS_SNAN	0x0001	/* Signaling "Not a Number" */
+#define	_FPCLASS_QNAN	0x0002	/* Quiet "Not a Number" */
+#define	_FPCLASS_NINF	0x0004	/* Negative Infinity */
+#define	_FPCLASS_NN	0x0008	/* Negative Normal */
+#define	_FPCLASS_ND	0x0010	/* Negative Denormal */
+#define	_FPCLASS_NZ	0x0020	/* Negative Zero */
+#define	_FPCLASS_PZ	0x0040	/* Positive Zero */
+#define	_FPCLASS_PD	0x0080	/* Positive Denormal */
+#define	_FPCLASS_PN	0x0100	/* Positive Normal */
+#define	_FPCLASS_PINF	0x0200	/* Positive Infinity */
+#endif
+
+#ifndef RC_INVOKED
+
+#ifndef __mingw_types_compatible_p
+#ifdef __cplusplus
+extern "C++" {
+template <typename type1, typename type2> struct __mingw_types_compatible_p {
+  static const bool result = false;
+};
+
+template <typename type1> struct __mingw_types_compatible_p<type1, type1> {
+ static const bool result = true;
+};
+
+template <typename type1> struct __mingw_types_compatible_p<const type1, type1> {
+  static const bool result = true;
+};
+
+template <typename type1> struct __mingw_types_compatible_p<type1, const type1> {
+  static const bool result = true;
+};
+}
+
+#define __mingw_types_compatible_p(type1, type2) __mingw_types_compatible_p <type1, type2>::result
+#else
+#define __mingw_types_compatible_p(type1, type2) __builtin_types_compatible_p (type1, type2)
+#endif
+#endif
+
+#ifndef __mingw_choose_expr
+#ifdef __cplusplus
+#define __mingw_choose_expr(C, E1, E2) ((C) ? E1 : E2)
+#else
+#define __mingw_choose_expr __builtin_choose_expr
+#endif
+#endif
+
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#ifndef __MINGW_SOFTMATH
+#define __MINGW_SOFTMATH
+
+/* IEEE float/double type shapes.  */
+
+  typedef union __mingw_dbl_type_t {
+    double x;
+    unsigned long long val;
+    __C89_NAMELESS struct {
+      unsigned int low, high;
+    } lh;
+  } __mingw_dbl_type_t;
+
+  typedef union __mingw_flt_type_t {
+    float x;
+    unsigned int val;
+  } __mingw_flt_type_t;
+
+  typedef union __mingw_ldbl_type_t
+  {
+    long double x;
+    __C89_NAMELESS struct {
+      unsigned int low, high;
+      int sign_exponent : 16;
+      int res1 : 16;
+      int res0 : 32;
+    } lh;
+  } __mingw_ldbl_type_t;
+
+#endif
+
+#ifndef _HUGE
+  extern double * __MINGW_IMP_SYMBOL(_HUGE);
+#define _HUGE	(* __MINGW_IMP_SYMBOL(_HUGE))
+#endif
+
+#ifdef __GNUC__
+#define	HUGE_VAL __builtin_huge_val()
+#else
+#define HUGE_VAL _HUGE
+#endif /* __GNUC__ */
+
+#ifndef _EXCEPTION_DEFINED
+#define _EXCEPTION_DEFINED
+  struct _exception {
+    int type;
+    const char *name;
+    double arg1;
+    double arg2;
+    double retval;
+  };
+
+  void __mingw_raise_matherr (int typ, const char *name, double a1, double a2,
+			      double rslt);
+  void __mingw_setusermatherr (int (__cdecl *)(struct _exception *));
+  _CRTIMP void __setusermatherr(int (__cdecl *)(struct _exception *));
+  #define __setusermatherr __mingw_setusermatherr
+#endif
+
+  double __cdecl sin(double _X);
+  double __cdecl cos(double _X);
+  double __cdecl tan(double _X);
+  double __cdecl sinh(double _X);
+  double __cdecl cosh(double _X);
+  double __cdecl tanh(double _X);
+  double __cdecl asin(double _X);
+  double __cdecl acos(double _X);
+  double __cdecl atan(double _X);
+  double __cdecl atan2(double _Y,double _X);
+  double __cdecl exp(double _X);
+  double __cdecl log(double _X);
+  double __cdecl log10(double _X);
+  double __cdecl pow(double _X,double _Y);
+  double __cdecl sqrt(double _X);
+  double __cdecl ceil(double _X);
+  double __cdecl floor(double _X);
+
+/* 7.12.7.2 The fabs functions: Double in C89 */
+  extern  float __cdecl fabsf (float x);
+  extern long double __cdecl fabsl (long double);
+  extern double __cdecl fabs (double _X);
+
+#ifndef __CRT__NO_INLINE
+#if !defined (__ia64__)
+  __CRT_INLINE float __cdecl fabsf (float x)
+  {
+#if defined(__x86_64__) || defined(__arm__) || defined(__aarch64__)
+    return __builtin_fabsf (x);
+#else
+    float res = 0.0F;
+    __asm__ __volatile__ ("fabs;" : "=t" (res) : "0" (x));
+    return res;
+#endif
+  }
+
+  __CRT_INLINE long double __cdecl fabsl (long double x)
+  {
+#if __SIZEOF_LONG_DOUBLE__ == __SIZEOF_DOUBLE__
+    return __builtin_fabsl (x);
+#else
+    long double res = 0.0l;
+    __asm__ __volatile__ ("fabs;" : "=t" (res) : "0" (x));
+    return res;
+#endif
+  }
+
+  __CRT_INLINE double __cdecl fabs (double x)
+  {
+#if defined(__x86_64__) || defined(__arm__) || defined(__aarch64__)
+    return __builtin_fabs (x);
+#else
+    double res = 0.0;
+    __asm__ __volatile__ ("fabs;" : "=t" (res) : "0" (x));
+    return res;
+#endif
+  }
+#endif
+#endif
+
+  double __cdecl ldexp(double _X,int _Y);
+  double __cdecl frexp(double _X,int *_Y);
+  double __cdecl modf(double _X,double *_Y);
+  double __cdecl fmod(double _X,double _Y);
+
+  void __cdecl sincos (double __x, double *p_sin, double *p_cos);
+  void __cdecl sincosl (long double __x, long double *p_sin, long double *p_cos);
+  void __cdecl sincosf (float __x, float *p_sin, float *p_cos);
+
+#ifndef _CRT_ABS_DEFINED
+#define _CRT_ABS_DEFINED
+  int __cdecl abs(int _X);
+  long __cdecl labs(long _X);
+#endif
+#ifndef _CRT_ATOF_DEFINED
+#define _CRT_ATOF_DEFINED
+  double __cdecl atof(const char *_String);
+  double __cdecl _atof_l(const char *_String,_locale_t _Locale);
+#endif
+
+#define EDOM 33
+#define ERANGE 34
+
+#ifndef _COMPLEX_DEFINED
+#define _COMPLEX_DEFINED
+  struct _complex {
+    double x;
+    double y;
+  };
+#endif
+
+  double __cdecl _cabs(struct _complex _ComplexA); /* Overridden to use our cabs.  */
+  double __cdecl _hypot(double _X,double _Y);
+  _CRTIMP double __cdecl _j0(double _X);
+  _CRTIMP double __cdecl _j1(double _X);
+  _CRTIMP double __cdecl _jn(int _X,double _Y);
+  _CRTIMP double __cdecl _y0(double _X);
+  _CRTIMP double __cdecl _y1(double _X);
+  _CRTIMP double __cdecl _yn(int _X,double _Y);
+#ifndef _CRT_MATHERR_DEFINED
+#define _CRT_MATHERR_DEFINED
+  _CRTIMP int __cdecl _matherr (struct _exception *);
+#endif
+
+/* These are also declared in Mingw float.h; needed here as well to work 
+   around GCC build issues.  */
+/* BEGIN FLOAT.H COPY */
+/*
+ * IEEE recommended functions
+ */
+#ifndef _SIGN_DEFINED
+#define _SIGN_DEFINED
+  _CRTIMP double __cdecl _chgsign (double _X);
+  _CRTIMP double __cdecl _copysign (double _Number,double _Sign);
+  _CRTIMP double __cdecl _logb (double);
+  _CRTIMP double __cdecl _nextafter (double, double);
+  _CRTIMP double __cdecl _scalb (double, long);
+  _CRTIMP int __cdecl _finite (double);
+  _CRTIMP int __cdecl _fpclass (double);
+  _CRTIMP int __cdecl _isnan (double);
+#endif
+
+/* END FLOAT.H COPY */
+
+#if !defined(__STRICT_ANSI__) || defined(_POSIX_C_SOURCE) || defined(_POSIX_SOURCE) || defined(_XOPEN_SOURCE) || defined(_GNU_SOURCE) || defined(_BSD_SOURCE)
+
+_CRTIMP double __cdecl j0 (double) __MINGW_ATTRIB_DEPRECATED_MSVC2005;
+_CRTIMP double __cdecl j1 (double) __MINGW_ATTRIB_DEPRECATED_MSVC2005;
+_CRTIMP double __cdecl jn (int, double) __MINGW_ATTRIB_DEPRECATED_MSVC2005;
+_CRTIMP double __cdecl y0 (double) __MINGW_ATTRIB_DEPRECATED_MSVC2005;
+_CRTIMP double __cdecl y1 (double) __MINGW_ATTRIB_DEPRECATED_MSVC2005;
+_CRTIMP double __cdecl yn (int, double) __MINGW_ATTRIB_DEPRECATED_MSVC2005;
+
+#if !defined(NO_OLDNAMES)
+
+_CRTIMP double __cdecl chgsign (double);
+/*
+ * scalb() is a GCC built-in.
+ * Exclude this _scalb() stub; the semantics are incompatible
+ * with the built-in implementation.
+ *
+_CRTIMP double __cdecl scalb (double, long);
+ *
+ */
+  _CRTIMP int __cdecl finite (double);
+  _CRTIMP int __cdecl fpclass (double);
+
+#define FP_SNAN    _FPCLASS_SNAN
+#define FP_QNAN    _FPCLASS_QNAN
+#define FP_NINF    _FPCLASS_NINF
+#define FP_PINF    _FPCLASS_PINF
+#define FP_NDENORM _FPCLASS_ND
+#define FP_PDENORM _FPCLASS_PD
+#define FP_NZERO   _FPCLASS_NZ
+#define FP_PZERO   _FPCLASS_PZ
+#define FP_NNORM   _FPCLASS_NN
+#define FP_PNORM   _FPCLASS_PN
+
+#endif /* !define (NO_OLDNAMES) */
+#endif
+
+#if(defined(_X86_) && !defined(__x86_64))
+  _CRTIMP int __cdecl _set_SSE2_enable(int _Flag);
+#endif
+
+#ifndef __NO_ISOCEXT
+#if (defined (__STDC_VERSION__) && __STDC_VERSION__ >= 199901L) \
+	|| !defined __STRICT_ANSI__ || defined __cplusplus
+
+#ifdef __GNUC__
+#define HUGE_VALF	__builtin_huge_valf()
+#define HUGE_VALL	__builtin_huge_vall()
+#define INFINITY	__builtin_inff()
+#define NAN		__builtin_nanf("")
+#else
+extern const float __INFF;
+#define HUGE_VALF __INFF
+extern const long double  __INFL;
+#define HUGE_VALL __INFL
+#define INFINITY HUGE_VALF
+extern const double __QNANF;
+#define NAN __QNANF
+#endif /* __GNUC__ */
+
+/* Use the compiler's builtin define for FLT_EVAL_METHOD to
+   set float_t and double_t.  */
+#if defined (__x86_64__) || defined(__FLT_EVAL_METHOD__)  
+# if defined (__x86_64__) || ( __FLT_EVAL_METHOD__== 0)
+typedef float float_t;
+typedef double double_t;
+# elif (__FLT_EVAL_METHOD__ == 1)
+typedef double float_t;
+typedef double double_t;
+# else /* (__FLT_EVAL_METHOD__ == 2) default ix87 FPU */
+typedef long double float_t;
+typedef long double double_t;
+#endif
+#else /* ix87 FPU default */
+typedef long double float_t;
+typedef long double double_t;
+#endif
+
+/* 7.12.3.1 */
+/*
+   Return values for fpclassify.
+   These are based on Intel x87 fpu condition codes
+   in the high byte of status word and differ from
+   the return values for MS IEEE 754 extension _fpclass()
+*/
+#define FP_NAN		0x0100
+#define FP_NORMAL	0x0400
+#define FP_INFINITE	(FP_NAN | FP_NORMAL)
+#define FP_ZERO		0x4000
+#define FP_SUBNORMAL	(FP_NORMAL | FP_ZERO)
+/* 0x0200 is signbit mask */
+
+/*
+  We can't inline float or double, because we want to ensure truncation
+  to semantic type before classification. 
+  (A normal long double value might become subnormal when 
+  converted to double, and zero when converted to float.)
+*/
+
+  extern int __cdecl __fpclassifyl (long double);
+  extern int __cdecl __fpclassifyf (float);
+  extern int __cdecl __fpclassify (double);
+
+#ifndef __CRT__NO_INLINE
+  __CRT_INLINE int __cdecl __fpclassifyl (long double x) {
+#if __SIZEOF_LONG_DOUBLE__ == __SIZEOF_DOUBLE__
+    return __fpclassify(x);
+#elif defined(__x86_64__) || defined(_AMD64_)
+    __mingw_ldbl_type_t hlp;
+    unsigned int e;
+    hlp.x = x;
+    e = hlp.lh.sign_exponent & 0x7fff;
+    if (!e)
+      {
+        unsigned int h = hlp.lh.high;
+        if (!(hlp.lh.low | h))
+          return FP_ZERO;
+        else if (!(h & 0x80000000))
+          return FP_SUBNORMAL;
+      }
+    else if (e == 0x7fff)
+      return (((hlp.lh.high & 0x7fffffff) | hlp.lh.low) == 0 ?
+              FP_INFINITE : FP_NAN);
+    return FP_NORMAL;
+#elif defined(__i386__) || defined(_X86_)
+    unsigned short sw;
+    __asm__ __volatile__ ("fxam; fstsw %%ax;" : "=a" (sw): "t" (x));
+    return sw & (FP_NAN | FP_NORMAL | FP_ZERO );
+#endif
+  }
+  __CRT_INLINE int __cdecl __fpclassify (double x) {
+#if defined(__x86_64__) || defined(_AMD64_) || defined(__arm__) || defined(_ARM_) || defined(__aarch64__) || defined(_ARM64_)
+    __mingw_dbl_type_t hlp;
+    unsigned int l, h;
+
+    hlp.x = x;
+    h = hlp.lh.high;
+    l = hlp.lh.low | (h & 0xfffff);
+    h &= 0x7ff00000;
+    if ((h | l) == 0)
+      return FP_ZERO;
+    if (!h)
+      return FP_SUBNORMAL;
+    if (h == 0x7ff00000)
+      return (l ? FP_NAN : FP_INFINITE);
+    return FP_NORMAL;
+#elif defined(__i386__) || defined(_X86_)
+    unsigned short sw;
+    __asm__ __volatile__ ("fxam; fstsw %%ax;" : "=a" (sw): "t" (x));
+    return sw & (FP_NAN | FP_NORMAL | FP_ZERO );
+#endif
+  }
+  __CRT_INLINE int __cdecl __fpclassifyf (float x) {
+#if defined(__x86_64__) || defined(_AMD64_) || defined(__arm__) || defined(_ARM_) || defined(__aarch64__) || defined(_ARM64_)
+    __mingw_flt_type_t hlp;
+
+    hlp.x = x;
+    hlp.val &= 0x7fffffff;
+    if (hlp.val == 0)
+      return FP_ZERO;
+    if (hlp.val < 0x800000)
+      return FP_SUBNORMAL;
+    if (hlp.val >= 0x7f800000)
+      return (hlp.val > 0x7f800000 ? FP_NAN : FP_INFINITE);
+    return FP_NORMAL;
+#elif defined(__i386__) || defined(_X86_)
+    unsigned short sw;
+    __asm__ __volatile__ ("fxam; fstsw %%ax;" : "=a" (sw): "t" (x));
+    return sw & (FP_NAN | FP_NORMAL | FP_ZERO );
+#endif
+  }
+#endif
+
+#ifdef __STDC_WANT_DEC_FP__
+#define __dfp_expansion(__call,__fin,x) \
+__mingw_choose_expr (                                  \
+      __mingw_types_compatible_p (__typeof__ (x), _Decimal32),    \
+        __call##d32(x),                                         \
+    __mingw_choose_expr (                                     \
+      __mingw_types_compatible_p (__typeof__ (x), _Decimal64),    \
+        __call##d64(x),                                         \
+    __mingw_choose_expr (                                     \
+      __mingw_types_compatible_p (__typeof__ (x), _Decimal128),   \
+        __call##d128(x),                                        \
+__fin)))
+#else
+#define __dfp_expansion(__call,__fin,x) __fin
+#endif
+
+#define fpclassify(x) \
+__mingw_choose_expr (                                         \
+  __mingw_types_compatible_p (__typeof__ (x), double),            \
+    __fpclassify(x),                                            \
+    __mingw_choose_expr (                                     \
+      __mingw_types_compatible_p (__typeof__ (x), float),         \
+        __fpclassifyf(x),                                       \
+    __mingw_choose_expr (                                     \
+      __mingw_types_compatible_p (__typeof__ (x), long double),   \
+        __fpclassifyl(x),                                       \
+    __dfp_expansion(__fpclassify,(__builtin_trap(),0),x))))
+
+
+/* 7.12.3.2 */
+#define isfinite(x) ((fpclassify(x) & FP_NAN) == 0)
+
+/* 7.12.3.3 */
+#define isinf(x) (fpclassify(x) == FP_INFINITE)
+
+/* 7.12.3.4 */
+/* We don't need to worry about truncation here:
+   A NaN stays a NaN. */
+
+  extern int __cdecl __isnan (double);
+  extern int __cdecl __isnanf (float);
+  extern int __cdecl __isnanl (long double);
+
+#ifndef __CRT__NO_INLINE
+  __CRT_INLINE int __cdecl __isnan (double _x)
+  {
+#if defined(__x86_64__) || defined(_AMD64_) || defined(__arm__) || defined(_ARM_) || defined(__aarch64__) || defined(_ARM64_)
+    __mingw_dbl_type_t hlp;
+    unsigned int l, h;
+
+    hlp.x = _x;
+    l = hlp.lh.low;
+    h = hlp.lh.high & 0x7fffffff;
+    h |= (l | -l) >> 31;
+    h = 0x7ff00000 - h;
+    return (int) h >> 31;
+#elif defined(__i386__) || defined(_X86_)
+    unsigned short sw;
+    __asm__ __volatile__ ("fxam;"
+      "fstsw %%ax": "=a" (sw) : "t" (_x));
+    return (sw & (FP_NAN | FP_NORMAL | FP_INFINITE | FP_ZERO | FP_SUBNORMAL))
+      == FP_NAN;
+#endif
+  }
+
+  __CRT_INLINE int __cdecl __isnanf (float _x)
+  {
+#if defined(__x86_64__) || defined(_AMD64_) || defined(__arm__) || defined(_ARM_) || defined(__aarch64__) || defined(_ARM64_)
+    __mingw_flt_type_t hlp;
+    unsigned int i;
+    
+    hlp.x = _x;
+    i = hlp.val & 0x7fffffff;
+    i = 0x7f800000 - i;
+    return (int) (i >> 31);
+#elif defined(__i386__) || defined(_X86_)
+    unsigned short sw;
+    __asm__ __volatile__ ("fxam;"
+      "fstsw %%ax": "=a" (sw) : "t" (_x));
+    return (sw & (FP_NAN | FP_NORMAL | FP_INFINITE | FP_ZERO | FP_SUBNORMAL))
+      == FP_NAN;
+#endif
+  }
+
+  __CRT_INLINE int __cdecl __isnanl (long double _x)
+  {
+#if __SIZEOF_LONG_DOUBLE__ == __SIZEOF_DOUBLE__
+    return __isnan(_x);
+#elif defined(__x86_64__) || defined(_AMD64_)
+    __mingw_ldbl_type_t ld;
+    unsigned int xx, signexp;
+
+    ld.x = _x;
+    signexp = (ld.lh.sign_exponent & 0x7fff) << 1;
+    xx = ld.lh.low | (ld.lh.high & 0x7fffffffu);
+    signexp |= (xx | (-xx)) >> 31;
+    signexp = 0xfffe - signexp;
+    return (int) signexp >> 16;
+#elif defined(__i386__) || defined(_X86_)
+    unsigned short sw;
+    __asm__ __volatile__ ("fxam;"
+      "fstsw %%ax": "=a" (sw) : "t" (_x));
+    return (sw & (FP_NAN | FP_NORMAL | FP_INFINITE | FP_ZERO | FP_SUBNORMAL))
+      == FP_NAN;
+#endif
+  }
+#endif
+
+
+
+#define isnan(x) \
+__mingw_choose_expr (                                         \
+  __mingw_types_compatible_p (__typeof__ (x), double),            \
+    __isnan((double)(x)),                                         \
+    __mingw_choose_expr (                                     \
+      __mingw_types_compatible_p (__typeof__ (x), float),         \
+        __isnanf((float)(x)),                                     \
+    __mingw_choose_expr (                                     \
+      __mingw_types_compatible_p (__typeof__ (x), long double),   \
+        __isnanl((long double)(x)),                               \
+    __dfp_expansion(__isnan,(__builtin_trap(),(int)0),x))))
+
+/* 7.12.3.5 */
+#define isnormal(x) (fpclassify(x) == FP_NORMAL)
+
+/* 7.12.3.6 The signbit macro */
+  extern int __cdecl __signbit (double);
+  extern int __cdecl __signbitf (float);
+  extern int __cdecl __signbitl (long double);
+#ifndef __CRT__NO_INLINE
+  __CRT_INLINE int __cdecl __signbit (double x) {
+#if defined(__x86_64__) || defined(_AMD64_) || defined(__arm__) || defined(_ARM_) || defined(__aarch64__) || defined(_ARM64_)
+    __mingw_dbl_type_t hlp;
+
+    hlp.x = x;
+    return ((hlp.lh.high & 0x80000000) != 0);
+#elif defined(__i386__) || defined(_X86_)
+    unsigned short stw;
+    __asm__ __volatile__ ( "fxam; fstsw %%ax;": "=a" (stw) : "t" (x));
+    return stw & 0x0200;
+#endif
+  }
+
+  __CRT_INLINE int __cdecl __signbitf (float x) {
+#if defined(__x86_64__) || defined(_AMD64_) || defined(__arm__) || defined(_ARM_) || defined(__aarch64__) || defined(_ARM64_)
+    __mingw_flt_type_t hlp;
+    hlp.x = x;
+    return ((hlp.val & 0x80000000) != 0);
+#elif defined(__i386__) || defined(_X86_)
+    unsigned short stw;
+    __asm__ __volatile__ ("fxam; fstsw %%ax;": "=a" (stw) : "t" (x));
+    return stw & 0x0200;
+#endif
+  }
+
+  __CRT_INLINE int __cdecl __signbitl (long double x) {
+#if __SIZEOF_LONG_DOUBLE__ == __SIZEOF_DOUBLE__
+    return __signbit(x);
+#elif defined(__x86_64__) || defined(_AMD64_)
+    __mingw_ldbl_type_t ld;
+    ld.x = x;
+    return ((ld.lh.sign_exponent & 0x8000) != 0);
+#elif defined(__i386__) || defined(_X86_)
+    unsigned short stw;
+    __asm__ __volatile__ ("fxam; fstsw %%ax;": "=a" (stw) : "t" (x));
+    return stw & 0x0200;
+#endif
+  }
+#endif
+
+#define signbit(x) \
+__mingw_choose_expr (                                         \
+  __mingw_types_compatible_p (__typeof__ (x), double),            \
+    __signbit(x),                                               \
+    __mingw_choose_expr (                                     \
+      __mingw_types_compatible_p (__typeof__ (x), float),         \
+        __signbitf(x),                                          \
+    __mingw_choose_expr (                                     \
+      __mingw_types_compatible_p (__typeof__ (x), long double),   \
+        __signbitl(x),                                          \
+     __dfp_expansion(__signbit,(__builtin_trap(),x),x))))
+
+/* 7.12.4 Trigonometric functions: Double in C89 */
+  extern float __cdecl sinf(float _X);
+  extern long double __cdecl sinl(long double);
+
+  extern float __cdecl cosf(float _X);
+  extern long double __cdecl cosl(long double);
+
+  extern float __cdecl tanf(float _X);
+  extern long double __cdecl tanl(long double);
+  extern float __cdecl asinf(float _X);
+  extern long double __cdecl asinl(long double);
+
+  extern float __cdecl acosf (float);
+  extern long double __cdecl acosl (long double);
+
+  extern float __cdecl atanf (float);
+  extern long double __cdecl atanl (long double);
+
+  extern float __cdecl atan2f (float, float);
+  extern long double __cdecl atan2l (long double, long double);
+
+/* 7.12.5 Hyperbolic functions: Double in C89  */
+  extern float __cdecl sinhf(float _X);
+#if !defined(__CRT__NO_INLINE) && !defined(_UCRT)
+  __CRT_INLINE float sinhf(float _X) { return ((float)sinh((double)_X)); }
+#endif
+  extern long double __cdecl sinhl(long double);
+
+  extern float __cdecl coshf(float _X);
+#if !defined(__CRT__NO_INLINE) && !defined(_UCRT)
+  __CRT_INLINE float coshf(float _X) { return ((float)cosh((double)_X)); }
+#endif
+  extern long double __cdecl coshl(long double);
+
+  extern float __cdecl tanhf(float _X);
+#if !defined(__CRT__NO_INLINE) && !defined(_UCRT)
+  __CRT_INLINE float tanhf(float _X) { return ((float)tanh((double)_X)); }
+#endif
+  extern long double __cdecl tanhl(long double);
+
+/* Inverse hyperbolic trig functions  */ 
+/* 7.12.5.1 */
+  extern double __cdecl acosh (double);
+  extern float __cdecl acoshf (float);
+  extern long double __cdecl acoshl (long double);
+
+/* 7.12.5.2 */
+  extern double __cdecl asinh (double);
+  extern float __cdecl asinhf (float);
+  extern long double __cdecl asinhl (long double);
+
+/* 7.12.5.3 */
+  extern double __cdecl atanh (double);
+  extern float __cdecl atanhf  (float);
+  extern long double __cdecl atanhl (long double);
+
+/* Exponentials and logarithms  */
+/* 7.12.6.1 Double in C89 */
+  extern float __cdecl expf(float _X);
+#if !defined(__CRT__NO_INLINE) && !defined(_UCRT)
+  __CRT_INLINE float expf(float _X) { return ((float)exp((double)_X)); }
+#endif
+  extern long double __cdecl expl(long double);
+
+/* 7.12.6.2 */
+  extern double __cdecl exp2(double);
+  extern float __cdecl exp2f(float);
+  extern long double __cdecl exp2l(long double);
+
+/* 7.12.6.3 The expm1 functions */
+/* TODO: These could be inlined */
+  extern double __cdecl expm1(double);
+  extern float __cdecl expm1f(float);
+  extern long double __cdecl expm1l(long double);
+
+/* 7.12.6.4 Double in C89 */
+  extern float frexpf(float _X,int *_Y);
+#if !defined(__CRT__NO_INLINE) && !defined(_UCRT)
+  __CRT_INLINE float frexpf(float _X,int *_Y) { return ((float)frexp((double)_X,_Y)); }
+#endif
+  extern long double __cdecl frexpl(long double,int *);
+
+/* 7.12.6.5 */
+#define FP_ILOGB0 ((int)0x80000000)
+#define FP_ILOGBNAN ((int)0x7fffffff)
+  extern int __cdecl ilogb (double);
+  extern int __cdecl ilogbf (float);
+  extern int __cdecl ilogbl (long double);
+
+/* 7.12.6.6  Double in C89 */
+  extern float __cdecl ldexpf(float _X,int _Y);
+#if !defined(__CRT__NO_INLINE) && !defined(_UCRT)
+  __CRT_INLINE float __cdecl ldexpf (float x, int expn) { return (float) ldexp ((double)x, expn); }
+#endif
+  extern long double __cdecl ldexpl (long double, int);
+
+/* 7.12.6.7 Double in C89 */
+  extern float __cdecl logf (float);
+  extern long double __cdecl logl(long double);
+
+/* 7.12.6.8 Double in C89 */
+  extern float __cdecl log10f (float);
+  extern long double __cdecl log10l(long double);
+
+/* 7.12.6.9 */
+  extern double __cdecl log1p(double);
+  extern float __cdecl log1pf(float);
+  extern long double __cdecl log1pl(long double);
+
+/* 7.12.6.10 */
+  extern double __cdecl log2 (double);
+  extern float __cdecl log2f (float);
+  extern long double __cdecl log2l (long double);
+
+/* 7.12.6.11 */
+  extern double __cdecl logb (double);
+  extern float __cdecl logbf (float);
+  extern long double __cdecl logbl (long double);
+
+/* 7.12.6.12  Double in C89 */
+  extern float __cdecl modff (float, float*);
+  extern long double __cdecl modfl (long double, long double*);
+
+/* 7.12.6.13 */
+  extern double __cdecl scalbn (double, int);
+  extern float __cdecl scalbnf (float, int);
+  extern long double __cdecl scalbnl (long double, int);
+
+  extern double __cdecl scalbln (double, long);
+  extern float __cdecl scalblnf (float, long);
+  extern long double __cdecl scalblnl (long double, long);
+
+/* 7.12.7.1 */
+/* Implementations adapted from Cephes versions */ 
+  extern double __cdecl cbrt (double);
+  extern float __cdecl cbrtf (float);
+  extern long double __cdecl cbrtl (long double);
+
+/* 7.12.7.3  */
+  extern double __cdecl hypot (double, double) __MINGW_ATTRIB_DEPRECATED_MSVC2005; /* in libmoldname.a */
+  extern float __cdecl hypotf (float x, float y);
+#if !defined(__CRT__NO_INLINE) && !defined(_UCRT)
+  __CRT_INLINE float __cdecl hypotf (float x, float y) { return (float) hypot ((double)x, (double)y);}
+#endif
+  extern long double __cdecl hypotl (long double, long double);
+
+/* 7.12.7.4 The pow functions. Double in C89 */
+  extern float __cdecl powf(float _X,float _Y);
+#if !defined(__CRT__NO_INLINE) && !defined(_UCRT)
+  __CRT_INLINE float powf(float _X,float _Y) { return ((float)pow((double)_X,(double)_Y)); }
+#endif
+  extern long double __cdecl powl (long double, long double);
+
+/* 7.12.7.5 The sqrt functions. Double in C89. */
+  extern float __cdecl sqrtf (float);
+  extern long double sqrtl(long double);
+
+/* 7.12.8.1 The erf functions  */
+  extern double __cdecl erf (double);
+  extern float __cdecl erff (float);
+  extern long double __cdecl erfl (long double);
+
+/* 7.12.8.2 The erfc functions  */
+  extern double __cdecl erfc (double);
+  extern float __cdecl erfcf (float);
+  extern long double __cdecl erfcl (long double);
+
+/* 7.12.8.3 The lgamma functions */
+  extern double __cdecl lgamma (double);
+  extern float __cdecl lgammaf (float);
+  extern long double __cdecl lgammal (long double);
+
+  extern int signgam;
+
+/* 7.12.8.4 The tgamma functions */
+  extern double __cdecl tgamma (double);
+  extern float __cdecl tgammaf (float);
+  extern long double __cdecl tgammal (long double);
+
+/* 7.12.9.1 Double in C89 */
+  extern float __cdecl ceilf (float);
+  extern long double __cdecl ceill (long double);
+
+/* 7.12.9.2 Double in C89 */
+  extern float __cdecl floorf (float);
+  extern long double __cdecl floorl (long double);
+
+/* 7.12.9.3 */
+  extern double __cdecl nearbyint ( double);
+  extern float __cdecl nearbyintf (float);
+  extern long double __cdecl nearbyintl (long double);
+
+/* 7.12.9.4 */
+/* round, using fpu control word settings */
+extern double __cdecl rint (double);
+extern float __cdecl rintf (float);
+extern long double __cdecl rintl (long double);
+
+/* 7.12.9.5 */
+extern long __cdecl lrint (double);
+extern long __cdecl lrintf (float);
+extern long __cdecl lrintl (long double);
+
+__MINGW_EXTENSION long long __cdecl llrint (double);
+__MINGW_EXTENSION long long __cdecl llrintf (float);
+__MINGW_EXTENSION long long __cdecl llrintl (long double);
+
+/* 7.12.9.6 */
+/* round away from zero, regardless of fpu control word settings */
+  extern double __cdecl round (double);
+  extern float __cdecl roundf (float);
+  extern long double __cdecl roundl (long double);
+
+/* 7.12.9.7  */
+  extern long __cdecl lround (double);
+  extern long __cdecl lroundf (float);
+  extern long __cdecl lroundl (long double);
+  __MINGW_EXTENSION long long __cdecl llround (double);
+  __MINGW_EXTENSION long long __cdecl llroundf (float);
+  __MINGW_EXTENSION long long __cdecl llroundl (long double);
+  
+/* 7.12.9.8 */
+/* round towards zero, regardless of fpu control word settings */
+  extern double __cdecl trunc (double);
+  extern float __cdecl truncf (float);
+  extern long double __cdecl truncl (long double);
+
+/* 7.12.10.1 Double in C89 */
+  extern float __cdecl fmodf (float, float);
+  extern long double __cdecl fmodl (long double, long double);
+
+/* 7.12.10.2 */ 
+  extern double __cdecl remainder (double, double);
+  extern float __cdecl remainderf (float, float);
+  extern long double __cdecl remainderl (long double, long double);
+
+/* 7.12.10.3 */
+  extern double __cdecl remquo(double, double, int *);
+  extern float __cdecl remquof(float, float, int *);
+  extern long double __cdecl remquol(long double, long double, int *);
+
+/* 7.12.11.1 */
+  extern double __cdecl copysign (double, double); /* in libmoldname.a */
+  extern float __cdecl copysignf (float, float);
+  extern long double __cdecl copysignl (long double, long double);
+
+#ifndef __CRT__NO_INLINE
+#if !defined (__ia64__)
+  __CRT_INLINE double __cdecl copysign (double x, double y)
+  {
+    __mingw_dbl_type_t hx, hy;
+    hx.x = x; hy.x = y;
+    hx.lh.high = (hx.lh.high & 0x7fffffff) | (hy.lh.high & 0x80000000);
+    return hx.x;
+  }
+  __CRT_INLINE float __cdecl copysignf (float x, float y)
+  {
+    __mingw_flt_type_t hx, hy;
+    hx.x = x; hy.x = y;
+    hx.val = (hx.val & 0x7fffffff) | (hy.val & 0x80000000);
+    return hx.x;
+  }
+#endif
+#endif
+
+/* 7.12.11.2 Return a NaN */
+  extern double __cdecl nan(const char *tagp);
+  extern float __cdecl nanf(const char *tagp);
+  extern long double __cdecl nanl(const char *tagp);
+
+#ifndef __STRICT_ANSI__
+#define _nan() nan("")
+#define _nanf() nanf("")
+#define _nanl() nanl("")
+#endif
+
+/* 7.12.11.3 */
+  extern double __cdecl nextafter (double, double); /* in libmoldname.a */
+  extern float __cdecl nextafterf (float, float);
+  extern long double __cdecl nextafterl (long double, long double);
+
+/* 7.12.11.4 The nexttoward functions */
+  extern double __cdecl nexttoward (double,  long double);
+  extern float __cdecl nexttowardf (float,  long double);
+  extern long double __cdecl nexttowardl (long double, long double);
+
+/* 7.12.12.1 */
+/*  x > y ? (x - y) : 0.0  */
+  extern double __cdecl fdim (double x, double y);
+  extern float __cdecl fdimf (float x, float y);
+  extern long double __cdecl fdiml (long double x, long double y);
+
+/* fmax and fmin.
+   NaN arguments are treated as missing data: if one argument is a NaN
+   and the other numeric, then these functions choose the numeric
+   value. */
+
+/* 7.12.12.2 */
+  extern double __cdecl fmax  (double, double);
+  extern float __cdecl fmaxf (float, float);
+  extern long double __cdecl fmaxl (long double, long double);
+
+/* 7.12.12.3 */
+  extern double __cdecl fmin (double, double);
+  extern float __cdecl fminf (float, float);
+  extern long double __cdecl fminl (long double, long double);
+
+/* 7.12.13.1 */
+/* return x * y + z as a ternary op */ 
+  extern double __cdecl fma (double, double, double);
+  extern float __cdecl fmaf (float, float, float);
+  extern long double __cdecl fmal (long double, long double, long double);
+
+/* 7.12.14 */
+/* 
+ *  With these functions, comparisons involving quiet NaNs set the FP
+ *  condition code to "unordered".  The IEEE floating-point spec
+ *  dictates that the result of floating-point comparisons should be
+ *  false whenever a NaN is involved, with the exception of the != op, 
+ *  which always returns true: yes, (NaN != NaN) is true).
+ */
+
+#ifdef __GNUC__
+
+#define isgreater(x, y) __builtin_isgreater(x, y)
+#define isgreaterequal(x, y) __builtin_isgreaterequal(x, y)
+#define isless(x, y) __builtin_isless(x, y)
+#define islessequal(x, y) __builtin_islessequal(x, y)
+#define islessgreater(x, y) __builtin_islessgreater(x, y)
+#define isunordered(x, y) __builtin_isunordered(x, y)
+
+#else
+/*  helper  */
+#ifndef __CRT__NO_INLINE
+  __CRT_INLINE int  __cdecl
+    __fp_unordered_compare (long double x, long double y){
+      unsigned short retval;
+      __asm__ __volatile__ ("fucom %%st(1);"
+	"fnstsw;": "=a" (retval) : "t" (x), "u" (y));
+      return retval;
+  }
+#endif /* __GNUC__ */
+
+#define isgreater(x, y) ((__fp_unordered_compare(x, y)  & 0x4500) == 0)
+#define isless(x, y) ((__fp_unordered_compare (y, x)  & 0x4500) == 0)
+#define isgreaterequal(x, y) ((__fp_unordered_compare (x, y)  & FP_INFINITE) == 0)
+#define islessequal(x, y) ((__fp_unordered_compare(y, x)  & FP_INFINITE) == 0)
+#define islessgreater(x, y) ((__fp_unordered_compare(x, y)  & FP_SUBNORMAL) == 0)
+#define isunordered(x, y) ((__fp_unordered_compare(x, y)  & 0x4500) == 0x4500)
+
+#endif
+
+#endif /* __STDC_VERSION__ >= 199901L */
+#endif /* __NO_ISOCEXT */
+
+#if defined(_X86_) && !defined(__x86_64)
+  _CRTIMP float __cdecl _hypotf(float _X,float _Y);
+#endif
+
+#if !defined(__ia64__)
+   _CRTIMP float __cdecl _copysignf (float _Number,float _Sign);
+   _CRTIMP float __cdecl _chgsignf (float _X);
+   _CRTIMP float __cdecl _logbf(float _X);
+   _CRTIMP float __cdecl _nextafterf(float _X,float _Y);
+   _CRTIMP int __cdecl _finitef(float _X);
+   _CRTIMP int __cdecl _isnanf(float _X);
+   _CRTIMP int __cdecl _fpclassf(float _X);
+#endif
+
+#ifdef _SIGN_DEFINED
+   extern long double __cdecl _chgsignl (long double);
+#define _copysignl copysignl
+#endif /* _SIGN_DEFINED */
+
+#define _hypotl hypotl
+
+#ifndef	NO_OLDNAMES
+#define matherr _matherr
+#define HUGE	_HUGE
+#endif
+
+/* Documentation on decimal float math
+   http://h21007.www2.hp.com/portal/site/dspp/menuitem.863c3e4cbcdc3f3515b49c108973a801?ciid=8cf166fedd1aa110VgnVCM100000a360ea10RCRD 
+ */
+#ifdef __STDC_WANT_DEC_FP__
+
+#define DEC_INFINITY __builtin_infd32()
+#define DEC_NAN __builtin_nand32("")
+
+  extern int __cdecl __isnand32(_Decimal32 x);
+  extern int __cdecl __isnand64(_Decimal64 x);
+  extern int __cdecl __isnand128(_Decimal128 x);
+  extern int __cdecl __fpclassifyd32 (_Decimal32);
+  extern int __cdecl __fpclassifyd64 (_Decimal64);
+  extern int __cdecl __fpclassifyd128 (_Decimal128);
+  extern int __cdecl __signbitd32 (_Decimal32);
+  extern int __cdecl __signbitd64 (_Decimal64);
+  extern int __cdecl __signbitd128 (_Decimal128);
+
+#ifndef __CRT__NO_INLINE
+  __CRT_INLINE int __cdecl __isnand32(_Decimal32 x){
+    return __builtin_isnand32(x);
+  }
+
+  __CRT_INLINE int __cdecl __isnand64(_Decimal64 x){
+    return __builtin_isnand64(x);
+  }
+
+  __CRT_INLINE int __cdecl __isnand128(_Decimal128 x){
+    return __builtin_isnand128(x);
+  }
+
+  __CRT_INLINE int __cdecl __signbitd32 (_Decimal32 x){
+    return __builtin_signbitd32(x);
+  }
+
+  __CRT_INLINE int __cdecl __signbitd64 (_Decimal64 x){
+    return __builtin_signbitd64(x);
+  }
+
+  __CRT_INLINE int __cdecl __signbitd128 (_Decimal128 x){
+    return __builtin_signbitd128(x);
+  }
+
+#endif
+
+/* Still missing 
+#define HUGE_VAL_D32
+#define HUGE_VAL_D64
+#define HUGE_VAL_D128
+*/
+
+/*** exponentials ***/
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/expd64.3m.htm */
+_Decimal64 __cdecl expd64(_Decimal64 _X);
+_Decimal128 __cdecl expd128(_Decimal128 _X);
+_Decimal32 __cdecl expd32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/exp2d64.3m.htm */
+_Decimal64 __cdecl exp2d64(_Decimal64 _X);
+_Decimal128 __cdecl exp2d128(_Decimal128 _X);
+_Decimal32 __cdecl exp2d32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/exp10d64.3m.htm */
+_Decimal64 __cdecl exp10d64(_Decimal64 _X);
+_Decimal128 __cdecl exp10d128(_Decimal128 _X);
+_Decimal32 __cdecl exp10d32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/expm1d64.3m.htm */
+_Decimal64 __cdecl expm1d64(_Decimal64 _X);
+_Decimal128 __cdecl expm1d128(_Decimal128 _X);
+_Decimal32 __cdecl expm1d32(_Decimal32 _X);
+
+/*** logarithms ***/
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/logd64.3m.htm */
+_Decimal64 __cdecl logd64(_Decimal64 _X);
+_Decimal128 __cdecl logd128(_Decimal128 _X);
+_Decimal32 __cdecl logd32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/log2d64.3m.htm */
+_Decimal64 __cdecl log2d64(_Decimal64 _X);
+_Decimal128 __cdecl log2d128(_Decimal128 _X);
+_Decimal32 __cdecl log2d32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/log10d64.3m.htm */
+_Decimal64 __cdecl log10d64(_Decimal64 _X);
+_Decimal128 __cdecl log10d128(_Decimal128 _X);
+_Decimal32 __cdecl log10d32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/log1pd64.3m.htm */
+_Decimal64 __cdecl log1pd64(_Decimal64 _X);
+_Decimal128 __cdecl log1pd128(_Decimal128 _X);
+_Decimal32 __cdecl log1pd32(_Decimal32 _X);
+
+/*** trigonometrics ***/
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/cosd64.3m.htm */
+_Decimal64 __cdecl cosd64(_Decimal64 _X);
+_Decimal128 __cdecl cosd128(_Decimal128 _X);
+_Decimal32 __cdecl cosd32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/sind64.3m.htm */
+_Decimal64 __cdecl sind64(_Decimal64 _X);
+_Decimal128 __cdecl sind128(_Decimal128 _X);
+_Decimal32 __cdecl sind32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/tand64.3m.htm */
+_Decimal64 __cdecl tand64(_Decimal64 _X);
+_Decimal128 __cdecl tand128(_Decimal128 _X);
+_Decimal32 __cdecl tand32(_Decimal32 _X);
+
+/*** inverse trigonometrics ***/
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/acosd64.3m.htm */
+_Decimal64 __cdecl acosd64(_Decimal64 _X);
+_Decimal128 __cdecl acosd128(_Decimal128 _X);
+_Decimal32 __cdecl acosd32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/asind64.3m.htm */
+_Decimal64 __cdecl asind64(_Decimal64 _X);
+_Decimal128 __cdecl asind128(_Decimal128 _X);
+_Decimal32 __cdecl asind32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/atand64.3m.htm */
+_Decimal64 __cdecl atand64(_Decimal64 _X);
+_Decimal128 __cdecl atand128(_Decimal128 _X);
+_Decimal32 __cdecl atand32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/atan2d64.3m.htm */
+_Decimal64 __cdecl atan2d64(_Decimal64 _X, _Decimal64 _Y);
+_Decimal128 __cdecl atan2d128(_Decimal128 _X, _Decimal128 _Y);
+_Decimal32 __cdecl atan2d32(_Decimal32 _X, _Decimal32 _Y);
+
+/*** hyperbolics ***/
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/coshd64.3m.htm */
+_Decimal64 __cdecl coshd64(_Decimal64 _X);
+_Decimal128 __cdecl coshd128(_Decimal128 _X);
+_Decimal32 __cdecl coshd32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/sinhd64.3m.htm */
+_Decimal64 __cdecl sinhd64(_Decimal64 _X);
+_Decimal128 __cdecl sinhd128(_Decimal128 _X);
+_Decimal32 __cdecl sinhd32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/tanhd64.3m.htm */
+_Decimal64 __cdecl tanhd64(_Decimal64 _X);
+_Decimal128 __cdecl tanhd128(_Decimal128 _X);
+_Decimal32 __cdecl tanhd32(_Decimal32 _X);
+
+/*** inverse hyperbolics ***/
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/acoshd64.3m.htm */
+_Decimal64 __cdecl acoshd64(_Decimal64 _X);
+_Decimal128 __cdecl acoshd128(_Decimal128 _X);
+_Decimal32 __cdecl acoshd32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/asinhd64.3m.htm */
+_Decimal64 __cdecl asinhd64(_Decimal64 _X);
+_Decimal128 __cdecl asinhd128(_Decimal128 _X);
+_Decimal32 __cdecl asinhd32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/atanhd64.3m.htm */
+_Decimal64 __cdecl atanhd64(_Decimal64 _X);
+_Decimal128 __cdecl atanhd128(_Decimal128 _X);
+_Decimal32 __cdecl atanhd32(_Decimal32 _X);
+
+/*** square & cube roots, hypotenuse ***/
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/sqrtd64.3m.htm */
+_Decimal64 __cdecl sqrtd64(_Decimal64 _X);
+_Decimal128 __cdecl sqrtd128(_Decimal128 _X);
+_Decimal32 __cdecl sqrtd32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/cbrtd64.3m.htm */
+_Decimal64 __cdecl cbrtd64(_Decimal64 _X);
+_Decimal128 __cdecl cbrtd128(_Decimal128 _X);
+_Decimal32 __cdecl cbrtd32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/hypotd64.3m.htm */
+_Decimal64 __cdecl hypotd64(_Decimal64 _X, _Decimal64 _Y);
+_Decimal128 __cdecl hypotd128(_Decimal128 _X, _Decimal128 _Y);
+_Decimal32 __cdecl hypotd32(_Decimal32 _X, _Decimal32 _Y);
+
+/*** floating multiply-add ***/
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/fmad64.3m.htm */
+_Decimal64 __cdecl fmad64(_Decimal64 _X, _Decimal64 y, _Decimal64 _Z);
+_Decimal128 __cdecl fmad128(_Decimal128 _X, _Decimal128 y, _Decimal128 _Z);
+_Decimal32 __cdecl fmad32(_Decimal32 _X, _Decimal32 y, _Decimal32 _Z);
+
+/*** exponent/significand ***/
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/logbd64.3m.htm */
+_Decimal64 __cdecl logbd64(_Decimal64 _X);
+_Decimal128 __cdecl logbd128(_Decimal128 _X);
+_Decimal32 __cdecl logbd32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/ilogbd64.3m.htm */
+int __cdecl ilogbd64(_Decimal64 _X);
+int __cdecl ilogbd128(_Decimal128 _X);
+int __cdecl ilogbd32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/frexpd64.3m.htm */
+_Decimal64 __cdecl frexpd64(_Decimal64 _X, int *_Y);
+_Decimal128 __cdecl frexpd128(_Decimal128 _X, int *_Y);
+_Decimal32 __cdecl frexpd32(_Decimal32 _X, int *_Y);
+
+/*** quantum ***/
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/quantized64.3m.htm */
+_Decimal64 __cdecl quantized64(_Decimal64 _X, _Decimal64 _Y);
+_Decimal128 __cdecl quantized128(_Decimal128 _X, _Decimal128 _Y);
+_Decimal32 __cdecl quantized32(_Decimal32 _X, _Decimal32 _Y);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/samequantumd64.3m.htm */
+_Bool __cdecl samequantumd64(_Decimal64 _X, _Decimal64 _Y);
+_Bool __cdecl samequantumd128(_Decimal128 _X, _Decimal128 _Y);
+_Bool __cdecl samequantumd32(_Decimal32 _X, _Decimal32 _Y);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/quantexpd64.3m.htm */
+int __cdecl quantexpd64(_Decimal64 _X);
+int __cdecl quantexpd128(_Decimal128 _X);
+int __cdecl quantexpd32(_Decimal32 _X);
+
+/*** scaling ***/
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/scalbnd64.3m.htm */
+_Decimal64 __cdecl scalbnd64(_Decimal64 _X, int _Y);
+_Decimal128 __cdecl scalbnd128(_Decimal128 _X, int _Y);
+_Decimal32 __cdecl scalbnd32(_Decimal32 _X, int _Y);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/scalblnd64.3m.htm */
+_Decimal64 __cdecl scalblnd64(_Decimal64 _X, long int _Y);
+_Decimal128 __cdecl scalblnd128(_Decimal128 _X, long int _Y);
+_Decimal32 __cdecl scalblnd32(_Decimal32 _X, long int _Y);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/ldexpd64.3m.htm */
+_Decimal64 __cdecl ldexpd64(_Decimal64 _X, int _Y);
+_Decimal128 __cdecl ldexpd128(_Decimal128 _X, int _Y);
+_Decimal32 __cdecl ldexpd32(_Decimal32 _X, int _Y);
+
+/*** rounding to integral floating ***/
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/ceild64.3m.htm */
+_Decimal64 __cdecl ceild64(_Decimal64 _X);
+_Decimal128 __cdecl ceild128(_Decimal128 _X);
+_Decimal32 __cdecl ceild32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/floord64.3m.htm */
+_Decimal64 __cdecl floord64(_Decimal64 _X);
+_Decimal128 __cdecl floord128(_Decimal128 _X);
+_Decimal32 __cdecl floord32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/truncd64.3m.htm */
+_Decimal64 __cdecl truncd64(_Decimal64 _X);
+_Decimal128 __cdecl truncd128(_Decimal128 _X);
+_Decimal32 __cdecl truncd32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/roundd64.3m.htm */
+_Decimal64 __cdecl roundd64(_Decimal64 _X);
+_Decimal128 __cdecl roundd128(_Decimal128 _X);
+_Decimal32 __cdecl roundd32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/rintd64.3m.htm */
+_Decimal64 __cdecl rintd64(_Decimal64 _X);
+_Decimal128 __cdecl rintd128(_Decimal128 _X);
+_Decimal32 __cdecl rintd32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/nearbyintd64.3m.htm */
+_Decimal64 __cdecl nearbyintd64(_Decimal64 _X);
+_Decimal128 __cdecl nearbyintd128(_Decimal128 _X);
+_Decimal32 __cdecl nearbyintd32(_Decimal32 _X);
+
+/*** rounding to integer ***/
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/lroundd64.3m.htm */
+long int __cdecl lroundd64(_Decimal64 _X);
+long int __cdecl lroundd128(_Decimal128 _X);
+long int __cdecl lroundd32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/llroundd64.3m.htm */
+long long int __cdecl llroundd64(_Decimal64 _X);
+long long int __cdecl llroundd128(_Decimal128 _X);
+long long int __cdecl llroundd32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/lrintd64.3m.htm */
+long int __cdecl lrintd64(_Decimal64 _X);
+long int __cdecl lrintd128(_Decimal128 _X);
+long int __cdecl lrintd32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/llrintd64.3m.htm */
+long long int __cdecl llrintd64(_Decimal64 _X);
+long long int __cdecl llrintd128(_Decimal128 _X);
+long long int __cdecl llrintd32(_Decimal32 _X);
+
+/*** integral and fractional parts ***/
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/modfd64.3m.htm */
+_Decimal64 __cdecl modfd64(_Decimal64 _X, _Decimal64 *_Y);
+_Decimal128 __cdecl modfd128(_Decimal128 _X, _Decimal128 *_Y);
+_Decimal32 __cdecl modfd32(_Decimal32 _X, _Decimal32 *_Y);
+
+/** remainder/mod ***/
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/remainderd64.3m.htm */
+_Decimal64 __cdecl remainderd64(_Decimal64 _X, _Decimal64 _Y);
+_Decimal128 __cdecl remainderd128(_Decimal128 _X, _Decimal128 _Y);
+_Decimal32 __cdecl remainderd32(_Decimal32 _X, _Decimal32 _Y);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/fmodd64.3m.htm */
+_Decimal64 __cdecl fmodd64(_Decimal64 _X, _Decimal64 _Y);
+_Decimal128 __cdecl fmodd128(_Decimal128 _X, _Decimal128 _Y);
+_Decimal32 __cdecl fmodd32(_Decimal32 _X, _Decimal32 _Y);
+
+/*** error functions ***/
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/erfd64.3m.htm */
+_Decimal64 __cdecl erfd64(_Decimal64 _X);
+_Decimal128 __cdecl erfd128(_Decimal128 _X);
+_Decimal32 __cdecl erfd32(_Decimal32 _X);
+_Decimal64 __cdecl erfcd64(_Decimal64 _X);
+_Decimal128 __cdecl erfcd128(_Decimal128 _X);
+_Decimal32 __cdecl erfcd32(_Decimal32 _X);
+
+/*** gamma functions ***/
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/lgammad64.3m.htm */
+_Decimal64 __cdecl lgammad64(_Decimal64 _X);
+_Decimal128 __cdecl lgammad128(_Decimal128 _X);
+_Decimal32 __cdecl lgammad32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/tgammad64.3m.htm */
+_Decimal64 __cdecl tgammad64(_Decimal64 _X);
+_Decimal128 __cdecl tgammad128(_Decimal128 _X);
+_Decimal32 __cdecl tgammad32(_Decimal32 _X);
+
+/*** next value ***/
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/nextafterd64.3m.htm */
+_Decimal64 __cdecl nextafterd64(_Decimal64 _X, _Decimal64 _Y);
+_Decimal128 __cdecl nextafterd128(_Decimal128 _X, _Decimal128 _Y);
+_Decimal32 __cdecl nextafterd32(_Decimal32 _X, _Decimal32 _Y);
+_Decimal64 __cdecl nexttowardd64(_Decimal64 _X, _Decimal128 _Y);
+_Decimal128 __cdecl nexttowardd128(_Decimal128 _X, _Decimal128 _Y);
+_Decimal32 __cdecl nexttowardd32(_Decimal32 _X, _Decimal128 _Y);
+
+/*** absolute value, copy sign ***/
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/fabsd64.3m.htm */
+_Decimal64 __cdecl fabsd64(_Decimal64 _X);
+_Decimal128 __cdecl fabsd128(_Decimal128 _X);
+_Decimal32 __cdecl fabsd32(_Decimal32 _X);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/copysignd64.3m.htm */
+_Decimal64 __cdecl copysignd64(_Decimal64 _X, _Decimal64 _Y);
+_Decimal128 __cdecl copysignd128(_Decimal128 _X, _Decimal128 _Y);
+_Decimal32 __cdecl copysignd32(_Decimal32 _X, _Decimal32 _Y);
+
+/*** max, min, positive difference ***/
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/fmaxd64.3m.htm */
+_Decimal64 __cdecl fmaxd64(_Decimal64 _X, _Decimal64 y_Y);
+_Decimal128 __cdecl fmaxd128(_Decimal128 _X, _Decimal128 _Y);
+_Decimal32 __cdecl fmaxd32(_Decimal32 _X, _Decimal32 _Y);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/fmind64.3m.htm */
+_Decimal64 __cdecl fmind64(_Decimal64 _X, _Decimal64 _Y);
+_Decimal128 __cdecl fmind128(_Decimal128 _X, _Decimal128 _Y);
+_Decimal32 __cdecl fmind32(_Decimal32 _X, _Decimal32 _Y);
+
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/fdimd64.3m.htm */
+_Decimal64 __cdecl fdimd64(_Decimal64 _X, _Decimal64 _Y);
+_Decimal128 __cdecl fdimd128(_Decimal128 _X, _Decimal128 _Y);
+_Decimal32 __cdecl fdimd32(_Decimal32 _X, _Decimal32 _Y);
+
+/*** not-a-number ***/
+/* http://h21007.www2.hp.com/portal/download/files/unprot/fp/manpages/nand64.3m.htm */
+_Decimal64 __cdecl nand64(__UNUSED_PARAM(const char *_X));
+_Decimal128 __cdecl nand128(__UNUSED_PARAM(const char *_X));
+_Decimal32 __cdecl nand32(__UNUSED_PARAM(const char *_X));
+
+/*** classifiers ***/
+int __cdecl isinfd64(_Decimal64 _X);
+int __cdecl isinfd128(_Decimal128 _X);
+int __cdecl isinfd32(_Decimal32 _X);
+int __cdecl isnand64(_Decimal64 _X);
+int __cdecl isnand128(_Decimal128 _X);
+int __cdecl isnand32(_Decimal32 _X);
+
+#endif /* __STDC_WANT_DEC_FP__ */
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif	/* Not RC_INVOKED */
+
+#pragma pack(pop)
+
+#endif /* End _MATH_H_ */
+
+
+=== source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/sdks/_mingw_ddk.h.in ===
+#ifndef MINGW_DDK_H
+#define MINGW_DDK_H
+#if MINGW_HAS_DDK
+#define MINGW_HAS_DDK_H 1
+#endif
+#endif
+
+=== source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/stddef.h ===
+/**
+ * This file has no copyright assigned and is placed in the Public Domain.
+ * This file is part of the mingw-w64 runtime package.
+ * No warranty is given; refer to the file DISCLAIMER.PD within this package.
+ */
+
+#include <crtdefs.h>
+
+#ifndef _INC_STDDEF
+#define _INC_STDDEF
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#ifndef _CRT_ERRNO_DEFINED
+#define _CRT_ERRNO_DEFINED
+  _CRTIMP extern int *__cdecl _errno(void);
+#define errno (*_errno())
+  errno_t __cdecl _set_errno(int _Value);
+  errno_t __cdecl _get_errno(int *_Value);
+#endif /* _CRT_ERRNO_DEFINED */
+
+  _CRTIMP extern unsigned long __cdecl __threadid(void);
+#define _threadid (__threadid())
+  _CRTIMP extern uintptr_t __cdecl __threadhandle(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* _INC_STDDEF */
+
+/*
+ * ISO C Standard:  7.17  Common definitions  <stddef.h>
+ */
+#if (!defined(_STDDEF_H) && !defined(_STDDEF_H_) && !defined(_ANSI_STDDEF_H) \
+     && !defined(__STDDEF_H__)) \
+    || defined(__need_wchar_t) || defined(__need_size_t) \
+    || defined(__need_ptrdiff_t) || defined(__need_NULL) \
+    || defined(__need_wint_t)
+
+/* Any one of these symbols __need_* means that GNU libc
+   wants us just to define one data type.  So don't define
+   the symbols that indicate this file's entire job has been done.  */
+#if (!defined(__need_wchar_t) && !defined(__need_size_t)	\
+     && !defined(__need_ptrdiff_t) && !defined(__need_NULL)	\
+     && !defined(__need_wint_t))
+#define _STDDEF_H
+#define _STDDEF_H_
+/* snaroff@next.com says the NeXT needs this.  */
+#define _ANSI_STDDEF_H
+/* Irix 5.1 needs this.  */
+#define __STDDEF_H__
+#endif
+
+#ifndef __sys_stdtypes_h
+/* In 4.3bsd-net2, machine/ansi.h defines these symbols, which are
+   defined if the corresponding type is *not* defined.
+   FreeBSD-2.1 defines _MACHINE_ANSI_H_ instead of _ANSI_H_ */
+#if defined(_ANSI_H_) || defined(_MACHINE_ANSI_H_)
+#if !defined(_SIZE_T_) && !defined(_BSD_SIZE_T_)
+#define _SIZE_T
+#endif
+#if !defined(_PTRDIFF_T_) && !defined(_BSD_PTRDIFF_T_)
+#define _PTRDIFF_T
+#endif
+/* On BSD/386 1.1, at least, machine/ansi.h defines _BSD_WCHAR_T_
+   instead of _WCHAR_T_. */
+#if !defined(_WCHAR_T_) && !defined(_BSD_WCHAR_T_)
+#ifndef _BSD_WCHAR_T_
+#define _WCHAR_T
+#endif
+#endif
+/* Undef _FOO_T_ if we are supposed to define foo_t.  */
+#if defined (__need_ptrdiff_t) || defined (_STDDEF_H_)
+#undef _PTRDIFF_T_
+#undef _BSD_PTRDIFF_T_
+#endif
+#if defined (__need_size_t) || defined (_STDDEF_H_)
+#undef _SIZE_T_
+#undef _BSD_SIZE_T_
+#endif
+#if defined (__need_wchar_t) || defined (_STDDEF_H_)
+#undef _WCHAR_T_
+#undef _BSD_WCHAR_T_
+#endif
+#endif /* defined(_ANSI_H_) || defined(_MACHINE_ANSI_H_) */
+
+/* Sequent's header files use _PTRDIFF_T_ in some conflicting way.
+   Just ignore it.  */
+#if defined (__sequent__) && defined (_PTRDIFF_T_)
+#undef _PTRDIFF_T_
+#endif
+
+/* On VxWorks, <type/vxTypesBase.h> may have defined macros like
+   _TYPE_size_t which will typedef size_t.  fixincludes patched the
+   vxTypesBase.h so that this macro is only defined if _GCC_SIZE_T is
+   not defined, and so that defining this macro defines _GCC_SIZE_T.
+   If we find that the macros are still defined at this point, we must
+   invoke them so that the type is defined as expected.  */
+#if defined (_TYPE_ptrdiff_t) && (defined (__need_ptrdiff_t) || defined (_STDDEF_H_))
+_TYPE_ptrdiff_t;
+#undef _TYPE_ptrdiff_t
+#endif
+#if defined (_TYPE_size_t) && (defined (__need_size_t) || defined (_STDDEF_H_))
+_TYPE_size_t;
+#undef _TYPE_size_t
+#endif
+#if defined (_TYPE_wchar_t) && (defined (__need_wchar_t) || defined (_STDDEF_H_))
+_TYPE_wchar_t;
+#undef _TYPE_wchar_t
+#endif
+
+/* In case nobody has defined these types, but we aren't running under
+   GCC 2.00, make sure that __PTRDIFF_TYPE__, __SIZE_TYPE__, and
+   __WCHAR_TYPE__ have reasonable values.  This can happen if the
+   parts of GCC is compiled by an older compiler, that actually
+   include gstddef.h, such as collect2.  */
+
+/* Signed type of difference of two pointers.  */
+
+/* Define this type if we are doing the whole job,
+   or if we want this type in particular.  */
+#if defined (_STDDEF_H) || defined (__need_ptrdiff_t)
+#ifndef _PTRDIFF_T	/* in case <sys/types.h> has defined it. */
+#ifndef _T_PTRDIFF_
+#ifndef _T_PTRDIFF
+#ifndef __PTRDIFF_T
+#ifndef _PTRDIFF_T_
+#ifndef _BSD_PTRDIFF_T_
+#ifndef ___int_ptrdiff_t_h
+#ifndef _GCC_PTRDIFF_T
+#define _PTRDIFF_T
+#define _T_PTRDIFF_
+#define _T_PTRDIFF
+#define __PTRDIFF_T
+#define _PTRDIFF_T_
+#define _BSD_PTRDIFF_T_
+#define ___int_ptrdiff_t_h
+#define _GCC_PTRDIFF_T
+#ifndef __PTRDIFF_TYPE__
+#ifdef _WIN64
+#define __PTRDIFF_TYPE__ long long int
+#else
+#define __PTRDIFF_TYPE__ long int
+#endif
+#endif
+#ifndef _PTRDIFF_T_DEFINED
+#define _PTRDIFF_T_DEFINED
+__MINGW_EXTENSION typedef __PTRDIFF_TYPE__ ptrdiff_t;
+#endif
+#endif /* _GCC_PTRDIFF_T */
+#endif /* ___int_ptrdiff_t_h */
+#endif /* _BSD_PTRDIFF_T_ */
+#endif /* _PTRDIFF_T_ */
+#endif /* __PTRDIFF_T */
+#endif /* _T_PTRDIFF */
+#endif /* _T_PTRDIFF_ */
+#endif /* _PTRDIFF_T */
+
+/* If this symbol has done its job, get rid of it.  */
+#undef	__need_ptrdiff_t
+
+#endif /* _STDDEF_H or __need_ptrdiff_t.  */
+
+/* Unsigned type of `sizeof' something.  */
+
+/* Define this type if we are doing the whole job,
+   or if we want this type in particular.  */
+#if defined (_STDDEF_H) || defined (__need_size_t)
+#ifndef __size_t__	/* BeOS */
+#ifndef __SIZE_T__	/* Cray Unicos/Mk */
+#ifndef _SIZE_T	/* in case <sys/types.h> has defined it. */
+#ifndef _SYS_SIZE_T_H
+#ifndef _T_SIZE_
+#ifndef _T_SIZE
+#ifndef __SIZE_T
+#ifndef _SIZE_T_
+#ifndef _BSD_SIZE_T_
+#ifndef _SIZE_T_DEFINED_
+#ifndef _SIZE_T_DEFINED
+#ifndef _BSD_SIZE_T_DEFINED_	/* Darwin */
+#ifndef _SIZE_T_DECLARED	/* FreeBSD 5 */
+#ifndef ___int_size_t_h
+#ifndef _GCC_SIZE_T
+#ifndef _SIZET_
+#ifndef __size_t
+#define __size_t__	/* BeOS */
+#define __SIZE_T__	/* Cray Unicos/Mk */
+#define _SIZE_T
+#define _SYS_SIZE_T_H
+#define _T_SIZE_
+#define _T_SIZE
+#define __SIZE_T
+#define _SIZE_T_
+#define _BSD_SIZE_T_
+#define _SIZE_T_DEFINED_
+#define _SIZE_T_DEFINED
+#define _BSD_SIZE_T_DEFINED_	/* Darwin */
+#define _SIZE_T_DECLARED	/* FreeBSD 5 */
+#define ___int_size_t_h
+#define _GCC_SIZE_T
+#define _SIZET_
+#if defined (__FreeBSD__) && (__FreeBSD__ >= 5)
+/* __size_t is a typedef on FreeBSD 5!, must not trash it. */
+#else
+#define __size_t
+#endif
+#ifndef __SIZE_TYPE__
+#ifdef _WIN64
+#define __SIZE_TYPE__ long long unsigned int
+#else
+#define __SIZE_TYPE__ long unsigned int
+#endif
+#endif
+#if !(defined (__GNUG__) && defined (size_t))
+__MINGW_EXTENSION typedef __SIZE_TYPE__ size_t;
+#ifdef __BEOS__
+typedef long ssize_t;
+#endif /* __BEOS__ */
+#endif /* !(defined (__GNUG__) && defined (size_t)) */
+#endif /* __size_t */
+#endif /* _SIZET_ */
+#endif /* _GCC_SIZE_T */
+#endif /* ___int_size_t_h */
+#endif /* _SIZE_T_DECLARED */
+#endif /* _BSD_SIZE_T_DEFINED_ */
+#endif /* _SIZE_T_DEFINED */
+#endif /* _SIZE_T_DEFINED_ */
+#endif /* _BSD_SIZE_T_ */
+#endif /* _SIZE_T_ */
+#endif /* __SIZE_T */
+#endif /* _T_SIZE */
+#endif /* _T_SIZE_ */
+#endif /* _SYS_SIZE_T_H */
+#endif /* _SIZE_T */
+#endif /* __SIZE_T__ */
+#endif /* __size_t__ */
+#undef	__need_size_t
+#endif /* _STDDEF_H or __need_size_t.  */
+
+
+/* Wide character type.
+   Locale-writers should change this as necessary to
+   be big enough to hold unique values not between 0 and 127,
+   and not (wchar_t) -1, for each defined multibyte character.  */
+
+/* Define this type if we are doing the whole job,
+   or if we want this type in particular.  */
+#if defined (_STDDEF_H) || defined (__need_wchar_t)
+#ifndef __wchar_t__	/* BeOS */
+#ifndef __WCHAR_T__	/* Cray Unicos/Mk */
+#ifndef _WCHAR_T
+#ifndef _T_WCHAR_
+#ifndef _T_WCHAR
+#ifndef __WCHAR_T
+#ifndef _WCHAR_T_
+#ifndef _BSD_WCHAR_T_
+#ifndef _BSD_WCHAR_T_DEFINED_    /* Darwin */
+#ifndef _BSD_RUNE_T_DEFINED_	/* Darwin */
+#ifndef _WCHAR_T_DECLARED /* FreeBSD 5 */
+#ifndef _WCHAR_T_DEFINED_
+#ifndef _WCHAR_T_DEFINED
+#ifndef _WCHAR_T_H
+#ifndef ___int_wchar_t_h
+#ifndef __INT_WCHAR_T_H
+#ifndef _GCC_WCHAR_T
+#define __wchar_t__	/* BeOS */
+#define __WCHAR_T__	/* Cray Unicos/Mk */
+#define _WCHAR_T
+#define _T_WCHAR_
+#define _T_WCHAR
+#define __WCHAR_T
+#define _WCHAR_T_
+#define _BSD_WCHAR_T_
+#define _WCHAR_T_DEFINED_
+#define _WCHAR_T_DEFINED
+#define _WCHAR_T_H
+#define ___int_wchar_t_h
+#define __INT_WCHAR_T_H
+#define _GCC_WCHAR_T
+#define _WCHAR_T_DECLARED
+
+/* On BSD/386 1.1, at least, machine/ansi.h defines _BSD_WCHAR_T_
+   instead of _WCHAR_T_, and _BSD_RUNE_T_ (which, unlike the other
+   symbols in the _FOO_T_ family, stays defined even after its
+   corresponding type is defined).  If we define wchar_t, then we
+   must undef _WCHAR_T_; for BSD/386 1.1 (and perhaps others), if
+   we undef _WCHAR_T_, then we must also define rune_t, since 
+   headers like runetype.h assume that if machine/ansi.h is included,
+   and _BSD_WCHAR_T_ is not defined, then rune_t is available.
+   machine/ansi.h says, "Note that _WCHAR_T_ and _RUNE_T_ must be of
+   the same type." */
+#ifdef _BSD_WCHAR_T_
+#undef _BSD_WCHAR_T_
+#ifdef _BSD_RUNE_T_
+#if !defined (_ANSI_SOURCE) && !defined (_POSIX_SOURCE)
+typedef _BSD_RUNE_T_ rune_t;
+#define _BSD_WCHAR_T_DEFINED_
+#define _BSD_RUNE_T_DEFINED_	/* Darwin */
+#if defined (__FreeBSD__) && (__FreeBSD__ < 5)
+/* Why is this file so hard to maintain properly?  In contrast to
+   the comment above regarding BSD/386 1.1, on FreeBSD for as long
+   as the symbol has existed, _BSD_RUNE_T_ must not stay defined or
+   redundant typedefs will occur when stdlib.h is included after this file. */
+#undef _BSD_RUNE_T_
+#endif
+#endif
+#endif
+#endif
+
+#ifndef __WCHAR_TYPE__
+/* wchar_t is unsigned short for compatibility with MS runtime */
+#define __WCHAR_TYPE__ unsigned short
+#endif
+#ifndef __cplusplus
+typedef __WCHAR_TYPE__ wchar_t;
+#endif
+#endif
+#endif
+#endif
+#endif
+#endif
+#endif
+#endif /* _WCHAR_T_DECLARED */
+#endif /* _BSD_RUNE_T_DEFINED_ */
+#endif
+#endif
+#endif
+#endif
+#endif
+#endif
+#endif
+#endif /* __WCHAR_T__ */
+#endif /* __wchar_t__ */
+#undef	__need_wchar_t
+#endif /* _STDDEF_H or __need_wchar_t.  */
+
+#if defined (__need_wint_t)
+#ifndef _WINT_T
+#define _WINT_T
+#ifndef __WINT_TYPE__
+/* wint_t is unsigned short for compatibility with MS runtime */
+#define __WINT_TYPE__ unsigned short
+#endif
+#ifndef _WCTYPE_T_DEFINED
+#define _WCTYPE_T_DEFINED
+  typedef __WINT_TYPE__ wint_t;
+  typedef unsigned short wctype_t;
+#endif
+#endif
+#undef __need_wint_t
+#endif
+
+/*  In 4.3bsd-net2, leave these undefined to indicate that size_t, etc.
+    are already defined.  */
+/*  BSD/OS 3.1 and FreeBSD [23].x require the MACHINE_ANSI_H check here.  */
+#if defined(_ANSI_H_) || defined(_MACHINE_ANSI_H_)
+/*  The references to _GCC_PTRDIFF_T_, _GCC_SIZE_T_, and _GCC_WCHAR_T_
+    are probably typos and should be removed before 2.8 is released.  */
+#ifdef _GCC_PTRDIFF_T_
+#undef _PTRDIFF_T_
+#undef _BSD_PTRDIFF_T_
+#endif
+#ifdef _GCC_SIZE_T_
+#undef _SIZE_T_
+#undef _BSD_SIZE_T_
+#endif
+#ifdef _GCC_WCHAR_T_
+#undef _WCHAR_T_
+#undef _BSD_WCHAR_T_
+#endif
+/*  The following ones are the real ones.  */
+#ifdef _GCC_PTRDIFF_T
+#undef _PTRDIFF_T_
+#undef _BSD_PTRDIFF_T_
+#endif
+#ifdef _GCC_SIZE_T
+#undef _SIZE_T_
+#undef _BSD_SIZE_T_
+#endif
+#ifdef _GCC_WCHAR_T
+#undef _WCHAR_T_
+#undef _BSD_WCHAR_T_
+#endif
+#endif /* _ANSI_H_ || _MACHINE_ANSI_H_ */
+
+#endif /* __sys_stdtypes_h */
+
+/* A null pointer constant.  */
+
+#if defined (_STDDEF_H) || defined (__need_NULL)
+#undef NULL		/* in case <stdio.h> has defined it. */
+#if defined(__GNUG__) && __GNUG__ >= 3
+#define NULL __null
+#else   /* G++ */
+#ifndef __cplusplus
+#define NULL ((void *)0)
+#else   /* C++ */
+#ifndef _WIN64
+#define NULL 0
+#else
+#define NULL 0LL
+#endif  /* W64 */
+#endif  /* C++ */
+#endif  /* G++ */
+#endif	/* NULL not defined and <stddef.h> or need NULL.  */
+#undef	__need_NULL
+
+#ifdef _STDDEF_H
+
+/* Offset of member MEMBER in a struct of type TYPE. */
+#define offsetof(TYPE, MEMBER) __builtin_offsetof (TYPE, MEMBER)
+
+#if (defined (__STDC_VERSION__) && __STDC_VERSION__ >= 201112L) \
+  || (defined(__cplusplus) && __cplusplus >= 201103L)
+#if !defined(_GCC_MAX_ALIGN_T) && !defined(__CLANG_MAX_ALIGN_T_DEFINED)
+#define _GCC_MAX_ALIGN_T
+#define __CLANG_MAX_ALIGN_T_DEFINED
+/* Type whose alignment is supported in every context and is at least
+   as great as that of any standard type not using alignment
+   specifiers.  */
+typedef struct {
+  long long __max_align_ll __attribute__((__aligned__(__alignof__(long long))));
+  long double __max_align_ld __attribute__((__aligned__(__alignof__(long double))));
+} max_align_t;
+#endif
+#endif /* C11 or C++11.  */
+
+#endif /* _STDDEF_H was defined this time.  */
+
+#endif /* !_STDDEF_H && !_STDDEF_H_ && !_ANSI_STDDEF_H && !__STDDEF_H__
+	  || __need_XXX was not defined before */
+
+
+=== source-units/mingw-w64-v13.0.0/mingw-w64-headers/crt/vadefs.h ===
+/**
+ * This file has no copyright assigned and is placed in the Public Domain.
+ * This file is part of the mingw-w64 runtime package.
+ * No warranty is given; refer to the file DISCLAIMER.PD within this package.
+ */
+#ifndef _INC_VADEFS
+#define _INC_VADEFS
+
+#include <_mingw.h>
+
+#ifndef __WIDL__
+#undef _CRT_PACKING
+#define _CRT_PACKING 8
+#pragma pack(push,_CRT_PACKING)
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#if defined (__GNUC__)
+#ifndef __GNUC_VA_LIST
+#define __GNUC_VA_LIST
+  typedef __builtin_va_list __gnuc_va_list;
+#endif
+#endif /* __GNUC__ */
+
+#ifndef _VA_LIST_DEFINED	/* if stdargs.h didn't define it */
+#define _VA_LIST_DEFINED
+#if defined(__GNUC__)
+  typedef __gnuc_va_list va_list;
+#elif defined(_MSC_VER)
+  typedef char *  va_list;
+#elif !defined(__WIDL__)
+#error VARARGS not implemented for this compiler
+#endif
+#endif /* _VA_LIST_DEFINED */
+
+#ifdef __cplusplus
+#define _ADDRESSOF(v) (&reinterpret_cast<const char &>(v))
+#else
+#define _ADDRESSOF(v) (&(v))
+#endif
+
+#if defined (__GNUC__)
+/* Use GCC builtins */
+
+#define _crt_va_start(v,l)	__builtin_va_start(v,l)
+#define _crt_va_arg(v,l)	__builtin_va_arg(v,l)
+#define _crt_va_end(v)		__builtin_va_end(v)
+#define _crt_va_copy(d,s)	__builtin_va_copy(d,s)
+
+#elif defined(_MSC_VER)
+/* MSVC specific */
+
+#if defined(_M_IA64)
+#define _VA_ALIGN 8
+#define _SLOTSIZEOF(t) ((sizeof(t) + _VA_ALIGN - 1) & ~(_VA_ALIGN - 1))
+#define _VA_STRUCT_ALIGN 16
+#define _ALIGNOF(ap) ((((ap)+_VA_STRUCT_ALIGN - 1) & ~(_VA_STRUCT_ALIGN -1)) - (ap))
+#define _APALIGN(t,ap) (__alignof(t) > 8 ? _ALIGNOF((uintptr_t) ap) : 0)
+#else
+#define _SLOTSIZEOF(t) (sizeof(t))
+#define _APALIGN(t,ap) (__alignof(t))
+#endif
+
+#if defined(_M_IX86)
+
+#define _INTSIZEOF(n) ((sizeof(n) + sizeof(int) - 1) & ~(sizeof(int) - 1))
+#define _crt_va_start(v,l)	((v) = (va_list)_ADDRESSOF(l) + _INTSIZEOF(l))
+#define _crt_va_arg(v,l)	(*(l *)(((v) += _INTSIZEOF(l)) - _INTSIZEOF(l)))
+#define _crt_va_end(v)		((v) = (va_list)0)
+#define _crt_va_copy(d,s)	((d) = (s))
+
+#elif defined(_M_AMD64)
+
+#define _PTRSIZEOF(n) ((sizeof(n) + sizeof(void*) - 1) & ~(sizeof(void*) - 1))
+#define _ISSTRUCT(t)  ((sizeof(t) > sizeof(void*)) || (sizeof(t) & (sizeof(t) - 1)) != 0)
+#define _crt_va_start(v,l)	((v) = (va_list)_ADDRESSOF(l) + _PTRSIZEOF(l))
+#define _crt_va_arg(v,t)	_ISSTRUCT(t) ?						\
+				 (**(t**)(((v) += sizeof(void*)) - sizeof(void*))) :	\
+				 ( *(t *)(((v) += sizeof(void*)) - sizeof(void*)))
+#define _crt_va_end(v)		((v) = (va_list)0)
+#define _crt_va_copy(d,s)	((d) = (s))
+
+#elif defined(_M_IA64)
+
+#error VARARGS not implemented for IA64
+
+#else
+
+#error VARARGS not implemented for this TARGET
+
+#endif /* cpu ifdefs */
+
+#endif /* compiler ifdefs */
+
+#ifdef __cplusplus
+}
+#endif
+
+#ifndef __WIDL__
+#pragma pack(pop)
+#endif
+
+#endif /* _INC_VADEFS */
+
+
+=== source-units/mingw-w64-v13.0.0/mingw-w64-headers/include/winapifamily.h ===
+/**
+ * This file is part of the mingw-w64 runtime package.
+ * No warranty is given; refer to the file DISCLAIMER within this package.
+ */
+
+#ifndef _INC_WINAPIFAMILY
+#define _INC_WINAPIFAMILY
+
+#define WINAPI_PARTITION_DESKTOP 0x1
+#define WINAPI_PARTITION_APP     0x2    
+
+#define WINAPI_FAMILY_APP WINAPI_PARTITION_APP
+#define WINAPI_FAMILY_DESKTOP_APP (WINAPI_PARTITION_DESKTOP \
+				   | WINAPI_PARTITION_APP)    
+
+/* WINAPI_FAMILY can be either desktop + App, or App.  */
+#ifndef WINAPI_FAMILY
+#define WINAPI_FAMILY WINAPI_FAMILY_DESKTOP_APP
+#endif
+
+#define WINAPI_FAMILY_PARTITION(v) ((WINAPI_FAMILY & v) == v)
+#define WINAPI_FAMILY_ONE_PARTITION(vset, v) ((WINAPI_FAMILY & vset) == v)
+
+#endif 
+

@@ -1,4 +1,5 @@
 import pathlib,json,hashlib,re,subprocess,shutil
+from source_coverage import verify_profile_coverage
 c=pathlib.Path(__file__).resolve().parent;e=c.parent;r=e.parent.parent;m=r/'target/windows-verification/gnu-route/mingw/usr';out=c/'receipts';binary=c/'prefix/bin/ffmpeg.exe'
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def save(n,x):(out/n).write_text(json.dumps(x,indent=2)+'\n')
@@ -76,14 +77,16 @@ print('Static PE/config/link/feature assertions passed:',binary,sha(binary),impo
 
 # Exact target RPMs keep the retained source mappings applicable only if selection matches.
 coverage=json.loads((out/'coverage-397.json').read_text())['entries']
-expected_members={(item['archive'],item['member']) for item in coverage if item['kind']!='explicit startup object'}
 def resolved_link_input(name):
  path=pathlib.Path(name)
  return (path if path.is_absolute() else c/'build/ffmpeg'/path).resolve()
 actual_members={(pathlib.Path(archive).name,member) for archive,member in archives if resolved_link_input(archive).is_relative_to(m)}
-assert actual_members==expected_members,{'new':sorted(actual_members-expected_members),'missing':sorted(expected_members-actual_members)}
+extra_archive=m/'x86_64-w64-mingw32/sys-root/mingw/lib/libmsvcrt.a'
+extra_member=subprocess.check_output([m/'bin/x86_64-w64-mingw32-ar','p',extra_archive,'lib64_libmsvcrt_common_a-cbrt.o'],timeout=30)
+profile_coverage=verify_profile_coverage(out,actual_members,extra_archive,extra_member)
 for item in coverage:
  if item['kind']=='explicit startup object':
   matches=[entry for entry in inputs if pathlib.Path(entry['path']).name==item['member']]
   assert len(matches)==1 and matches[0]['sha256']==item['object_sha256'],item['member']
-save('target-source-map-check.json',{'status':'PASS','mapped_selected_archive_members':len(actual_members),'startup_objects':3,'source_map':'coverage-397.json','exact_pinned_target_rpms':True,'pending_header_closure_preserved':True,'legal_completeness_claimed':False})
+shutil.copytree(out/'audio-profile-extra/notices',c/'notices/audio-profile-extra',dirs_exist_ok=True)
+save('target-source-map-check.json',{**profile_coverage,'startup_objects':3,'exact_pinned_target_rpms':True})

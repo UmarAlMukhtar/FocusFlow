@@ -43,6 +43,7 @@ def main():
         for path in (args.candidate / 'receipts').iterdir():
             if path.is_file() and path.suffix in ['.json', '.txt', '.mak', '.h', '.log', '.map', '.sha256']:
                 shutil.copy2(path, out / 'receipts' / path.name)
+        shutil.copytree(args.candidate / 'receipts/audio-profile-extra', out / 'receipts/audio-profile-extra')
         shutil.copytree(args.candidate / 'notices', out / 'notices')
         shutil.copy2(args.candidate / 'build.log', out / 'receipts/build.log')
         shutil.copytree(BASE, args.artifact / 'recipe', ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
