@@ -1,5 +1,6 @@
 //! Owned generated HWND -> original Session -> original Completion -> public core import.
 use super::*;
+pub(in crate::recorder) mod cursor;
 use std::{cell::RefCell, thread};
 use ::windows::{core::w, Win32::{Foundation::{COLORREF,LRESULT,WPARAM},Graphics::Gdi::*,System::LibraryLoader::GetModuleHandleW,UI::{HiDpi::*,WindowsAndMessaging::*}}};
 use focusflow_core::{capture::{decode_windows,windows::*},ffmpeg::probe_cfr_grid,store::ProjectStore};
@@ -47,6 +48,9 @@ struct GeneratedWindow{hwnd:usize,dir:PathBuf,sequence:u32,closed:bool}
 impl GeneratedWindow{
  fn new(w:u32,h:u32,nonce:u16,animated:bool,dir:PathBuf)->TestResult<Self>{
   fixture_json(&dir.join("source-request.json"),&serde_json::json!({"width":w,"height":h,"nonce":nonce,"animated":animated}))?;
+  Self::observed(dir)
+ }
+ fn observed(dir:PathBuf)->TestResult<Self>{
   let ready=wait_fixture(&dir.join("source-observed.json"))?;
   let hwnd=ready["hwnd"].as_u64().ok_or("Missing source HWND")? as usize;
   let pid=u32::try_from(ready["pid"].as_u64().ok_or("Missing source PID")?)?;let mut owner=0;
@@ -57,7 +61,7 @@ impl GeneratedWindow{
   Ok(Self{hwnd,dir,sequence:0,closed:false})
  }
  fn command(&mut self,action:&str)->TestResult<()> {
-  self.sequence+=1;if self.sequence>2{return Err("Too many generated source commands".into());}
+  self.sequence+=1;let private=fixture_read(&self.dir.join("source-request.json"))?.get("privateProfile").is_some();if self.sequence>if private{12}else{2}{return Err("Too many generated source commands".into());}
   fixture_json(&self.dir.join(format!("source-command-{}.json",self.sequence)),&serde_json::json!({"sequence":self.sequence,"action":action}))?;
   let ack=wait_fixture(&self.dir.join(format!("source-ack-{}.json",self.sequence)))?;
   if ack!=serde_json::json!({"sequence":self.sequence,"action":action}){return Err("Generated source acknowledgement mismatch".into());}Ok(())
@@ -71,16 +75,19 @@ impl Drop for GeneratedWindow{fn drop(&mut self){let _=self.close();}}
 fn observation_qpc()->Option<i64> {
  let mut value=0;unsafe{::windows::Win32::System::Performance::QueryPerformanceCounter(&mut value).ok()?;}if value<0{None}else{Some(value)}
 }
-fn source_actions(dir:&Path,frequency:Option<i64>,records:&[serde_json::Value],overflow:bool)->TestResult<()> {
+fn source_actions(dir:&Path,frequency:Option<i64>,records:&[serde_json::Value],overflow:bool,limit:usize)->TestResult<()> {
  let value=serde_json::json!({"qpcFrequency":frequency,"records":records,"overflow":overflow});
- if records.len()>2||serde_json::to_vec(&value)?.len()>4096{return Err("Source action observation exceeds fixed budget".into());}
+ if records.len()>limit||serde_json::to_vec(&value)?.len()>4096{return Err("Source action observation exceeds fixed budget".into());}
  fixture_json(&dir.join("source-actions.json"),&value)
 }
-fn source(dir:&Path,w:u32,h:u32,nonce:u16,animated:bool)->TestResult<()> {
+fn source(dir:&Path,w:u32,h:u32,nonce:u16,animated:bool,private_profile:Option<&str>)->TestResult<()> {
+ let _fixture_cursor=if private_profile.is_some(){Some(cursor::FixtureCursor::new()?)}else{None};
+ let decorated=private_profile==Some("decorated");let action_limit=if private_profile.is_some(){12}else{2};let original_cursor=unsafe{GetCursor()};let mut cursor_variants=Vec::new();let mut occluder=None;
  if !(160..=1920).contains(&w)||!(120..=1080).contains(&h){return Err("Generated geometry outside fixture bounds".into());}
  // Only this process owns this HWND, its canvas and message loop; no input is sent to user windows.
- let hwnd=unsafe{let instance=GetModuleHandleW(None)?;let class=WNDCLASSW{lpfnWndProc:Some(wndproc),hInstance:instance.into(),lpszClassName:w!("FocusFlowOwnedQualification"),..Default::default()};let _=RegisterClassW(&class);
-  CreateWindowExW(WINDOW_EX_STYLE::default(),w!("FocusFlowOwnedQualification"),w!("FocusFlow generated owned content"),WS_POPUP|WS_VISIBLE,40,40,w as i32,h as i32,None,None,Some(instance.into()),None)?};
+ let hwnd=unsafe{let instance=GetModuleHandleW(None)?;let class=WNDCLASSW{lpfnWndProc:Some(wndproc),hCursor:_fixture_cursor.as_ref().map_or(HCURSOR::default(),|c|c.0),hInstance:instance.into(),lpszClassName:w!("FocusFlowOwnedQualification"),..Default::default()};let _=RegisterClassW(&class);
+  let style=if decorated{WS_OVERLAPPEDWINDOW|WS_VISIBLE}else{WS_POPUP|WS_VISIBLE};let mut r=RECT{left:0,top:0,right:w as i32,bottom:h as i32};if decorated{AdjustWindowRectExForDpi(&mut r,style,false,WINDOW_EX_STYLE::default(),96)?;}
+  CreateWindowExW(WINDOW_EX_STYLE::default(),w!("FocusFlowOwnedQualification"),w!("FocusFlow generated owned content"),style,40,40,r.right-r.left,r.bottom-r.top,None,None,Some(instance.into()),None)?};
  let mut paints=Vec::with_capacity(256);let mut close_ack=None;let mut actions=Vec::with_capacity(2);
  let frequency={let mut value=0;let ok=unsafe{::windows::Win32::System::Performance::QueryPerformanceFrequency(&mut value)};if ok.is_ok()&&value>0{Some(value)}else{None}};
  let result=(||->TestResult<()>{
@@ -91,14 +98,34 @@ fn source(dir:&Path,w:u32,h:u32,nonce:u16,animated:bool)->TestResult<()> {
   loop{
    let command=dir.join(format!("source-command-{sequence}.json"));
    if command.is_file(){
-    if sequence>2{return Err("Too many generated source commands".into());}
+    if sequence>action_limit{return Err("Too many generated source commands".into());}
     let read_before=observation_qpc();let read=fixture_read(&command);let read_after=observation_qpc();let value=read?;if value["sequence"]!=sequence{return Err("Generated source command sequence mismatch".into());}
     match value["action"].as_str(){
      Some("close")=>{close_ack=Some((sequence,value,read_before,read_after));break;},
      Some("resize")=>{
-      let before=observation_qpc();let resized=unsafe{SetWindowPos(hwnd,None,0,0,w as i32+2,h as i32+2,SWP_NOMOVE|SWP_NOZORDER)};let after=observation_qpc();
+      let (width,height)=if private_profile.is_some(){
+       // Grow the outer window so decorated fixtures retain the client fiducials.
+       let mut rect=RECT::default();unsafe{GetWindowRect(hwnd,&mut rect)?;}(rect.right-rect.left,rect.bottom-rect.top)
+      }else{(w as i32,h as i32)};
+      let before=observation_qpc();let resized=unsafe{SetWindowPos(hwnd,None,0,0,width+2,height+2,SWP_NOMOVE|SWP_NOZORDER)};let after=observation_qpc();
       actions.push(serde_json::json!({"sequence":sequence,"action":"resize","commandReadBeforeQpc":read_before,"commandReadAfterQpc":read_after,"operationBeforeQpc":before,"operationAfterQpc":after,"win32Succeeded":resized.is_ok(),"errorHresult":resized.as_ref().err().map(|e|e.code().0)}));
-      source_actions(dir,frequency,&actions,false)?;resized?;
+      source_actions(dir,frequency,&actions,false,action_limit)?;resized?;
+     },
+     Some(action @ ("alpha"|"hidden"|"restore-cursor"|"occlude"|"unocclude"|"move-away-back"|"move"|"move-back"|"minimize-restore")) if private_profile.is_some()=>{
+      cursor::require_disposable()?;let before=observation_qpc();
+      // These are source-owned fixture actions/checker truth, never inputs to the cursor observer.
+      unsafe{match action{
+       "alpha"=>{let c=cursor::FixtureCursor::color()?;SetClassLongPtrW(hwnd,GCLP_HCURSOR,c.0.0 as isize);SetCursor(Some(c.0));cursor_variants.push(c);},
+       "hidden"=>{SetClassLongPtrW(hwnd,GCLP_HCURSOR,0);SetCursor(None);},
+       "restore-cursor"=>{let c=_fixture_cursor.as_ref().ok_or("Missing owned cursor")?;SetClassLongPtrW(hwnd,GCLP_HCURSOR,c.0.0 as isize);SetCursor(Some(c.0));},
+       "occlude"=>{if occluder.is_some(){return Err("Duplicate occluder".into());}let mut p=::windows::Win32::Foundation::POINT::default();if !ClientToScreen(hwnd,&mut p).as_bool(){return Err("Occluder origin failed".into());}let instance=GetModuleHandleW(None)?;occluder=Some(CreateWindowExW(WS_EX_TOPMOST,w!("FocusFlowOwnedQualification"),w!("Owned generated occluder"),WS_POPUP|WS_VISIBLE,p.x+w as i32/4,p.y+h as i32/4,w as i32/2,h as i32/2,None,None,Some(instance.into()),None)?);},
+       "unocclude"=>{DestroyWindow(occluder.take().ok_or("Missing owned occluder")?)?;},
+       "move-away-back"=>{let mut r=RECT::default();GetWindowRect(hwnd,&mut r)?;SetWindowPos(hwnd,None,r.left+23,r.top+17,0,0,SWP_NOSIZE|SWP_NOZORDER)?;thread::sleep(Duration::from_millis(40));SetWindowPos(hwnd,None,r.left,r.top,0,0,SWP_NOSIZE|SWP_NOZORDER)?;},
+       "move"=>{SetWindowPos(hwnd,None,63,57,0,0,SWP_NOSIZE|SWP_NOZORDER)?;},
+       "move-back"=>{SetWindowPos(hwnd,None,40,40,0,0,SWP_NOSIZE|SWP_NOZORDER)?;},
+       "minimize-restore"=>{let _=ShowWindow(hwnd,SW_MINIMIZE);thread::sleep(Duration::from_millis(40));let _=ShowWindow(hwnd,SW_RESTORE);},
+       _=>unreachable!()
+      }}let after=observation_qpc();actions.push(serde_json::json!({"sequence":sequence,"action":action,"operationBeforeQpc":before,"operationAfterQpc":after,"win32Succeeded":true}));source_actions(dir,frequency,&actions,false,action_limit)?;
      },
      _=>return Err("Unknown generated source command".into())
     }
@@ -115,11 +142,14 @@ fn source(dir:&Path,w:u32,h:u32,nonce:u16,animated:bool)->TestResult<()> {
    let mut message=MSG::default();unsafe{while PeekMessageW(&mut message,None,0,0,PM_REMOVE).as_bool(){let _=TranslateMessage(&message);DispatchMessageW(&message);}}thread::sleep(Duration::from_millis(2));
   }Ok(())
  })();
+ if let Some(other)=occluder.take(){unsafe{let _=DestroyWindow(other);}}
+ if private_profile.is_some(){unsafe{SetClassLongPtrW(hwnd,GCLP_HCURSOR,0);SetCursor(Some(original_cursor));}}
  let before=observation_qpc();let destroyed=unsafe{DestroyWindow(hwnd)};let after=observation_qpc();
- let overflow=actions.len()>=2;
+ let overflow=actions.len()>=action_limit;
  if !overflow{actions.push(serde_json::json!({"sequence":close_ack.as_ref().map(|v|v.0),"action":if close_ack.is_some(){"close"}else{"cleanupDestroy"},"commandReadBeforeQpc":close_ack.as_ref().and_then(|v|v.2),"commandReadAfterQpc":close_ack.as_ref().and_then(|v|v.3),"operationBeforeQpc":before,"operationAfterQpc":after,"win32Succeeded":destroyed.is_ok(),"errorHresult":destroyed.as_ref().err().map(|e|e.code().0)}));}
- let observed=source_actions(dir,frequency,&actions,overflow);
+ let observed=source_actions(dir,frequency,&actions,overflow,action_limit);
  CANVAS.with(|s|s.borrow_mut().take());fs::write(dir.join("paint-history.json"),serde_json::to_vec(&paints)?)?;
+ if private_profile.is_some(){unsafe{UnregisterClassW(w!("FocusFlowOwnedQualification"),Some(GetModuleHandleW(None)?.into()))?;}}
  result?;observed?;if let Some((sequence,value,_,_))=close_ack{fixture_json(&dir.join(format!("source-ack-{sequence}.json")),&value)?;}Ok(())
 }
 fn incomplete(dir:&Path)->TestResult<()>{let m=decode_windows(&fs::read(dir.join("capture.json"))?,dir.file_name().unwrap().to_str().unwrap())?;assert!(matches!(m.state,WindowsCaptureStateV2::Incomplete{..}));assert!(!dir.join("project.json").exists());Ok(())}
@@ -313,13 +343,18 @@ fn platform(path:&Path)->TestResult<()> {
 }
 pub(crate) fn run()->TestResult<()>{
  let args:Vec<_>=std::env::args_os().skip(1).collect();
+ if args.len()==7&&args[0]=="--source-private"{
+  cursor::require_disposable()?;return cursor::source(Path::new(&args[1]),args[2].to_str().ok_or("width")?.parse()?,args[3].to_str().ok_or("height")?.parse()?,args[4].to_str().ok_or("nonce")?.parse()?,args[6].to_str().ok_or("profile")?);
+ }
  if args.len()==6&&args[0]=="--source"{
   unsafe{SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)?;}
-  return source(Path::new(&args[1]),args[2].to_str().ok_or("width")?.parse()?,args[3].to_str().ok_or("height")?.parse()?,args[4].to_str().ok_or("nonce")?.parse()?,args[5]=="1");
+  return source(Path::new(&args[1]),args[2].to_str().ok_or("width")?.parse()?,args[3].to_str().ok_or("height")?.parse()?,args[4].to_str().ok_or("nonce")?.parse()?,args[5]=="1",None);
  }
  if args.len()==2&&args[0]=="--platform"{return platform(Path::new(&args[1]));}if args.len()!=7{return Err("usage: harness ROOT MODE WIDTH HEIGHT NONCE FFMPEG WORKER".into());}
- let root=PathBuf::from(&args[0]);fs::create_dir(&root)?;let root=root.canonicalize()?;
  let mode=args[1].to_str().ok_or("mode")?;let w=args[2].to_str().ok_or("width")?.parse()?;let h=args[3].to_str().ok_or("height")?.parse()?;let nonce:u16=args[4].to_str().ok_or("nonce")?.parse()?;
+ if mode=="cursor-private"{cursor::require_disposable()?;}
+ let root=PathBuf::from(&args[0]);fs::create_dir(&root)?;let root=root.canonicalize()?;
+ if mode=="cursor-private"{return cursor::case(&root,w,h,nonce,Path::new(&args[5]),Path::new(&args[6]));}
  if !["normal","static","repeat","close","resize","admission-close","admission-resize","marker-failure","blocked","partial","exit7","lost-worker","parent-death","transfer-shutdown","stop-shutdown","close-stop"].contains(&mode){return Err("Unknown generated case".into());}
  unsafe{SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)?;}
  let state=RecorderState::new();for i in 0..if mode=="repeat"{3}else{1}{case(&root,&format!("session-{i}"),if mode=="repeat"{"normal"}else{mode},w,h,nonce+i,Path::new(&args[5]),Path::new(&args[6]),&state)?;assert!(!state.cleanup_runtime().starting);assert!(!state.cleanup_runtime().finalizing);}

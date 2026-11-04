@@ -11,6 +11,10 @@ MODES={'static','repeat','close','resize','admission-close','admission-resize','
 PIPE_NAMES={'valid','idle','stderr','stdout','closed','cancel-idle','cancel-stderr','exit7','hold-stdout','hold-stderr','rows5000'}
 COMMANDS={'driver','analyzer','native-platform','core-publication','core-import','mapping-debug','core-pipes','build-cfr_grid_windows','build-FocusFlow','build-windows_owned_qualification','build-windows_encoder_fixture'}|MODES
 
+CURSOR_MODES={'cursor-borderless-even','cursor-decorated-even','cursor-borderless-odd','cursor-decorated-odd'}
+PRIVATE_NAMES={'proof-with-cursor.mp4','proof-without-cursor.mp4','proof-summary.json','geometry.json','trace.json','owned.json','first-write-started.json','challenges.json','visibility.json','close-observation.json'}|{f'raw-{i}.pam' for i in range(2)}|{f'cursor-{i}.pam' for i in range(12)}|{f'raster-{i}-{j}.pam' for i in range(12) for j in range(4)}
+COMMANDS|=CURSOR_MODES|{'cursor-portable','cursor-renderer'}
+
 def package(evidence,setup,out):
     out.mkdir();total=0;omitted=[];hashes={}
     candidates=[]
@@ -25,14 +29,25 @@ def package(evidence,setup,out):
                 for name in CASE_NAMES:
                     p=session/name
                     if p.is_file():candidates.append((p,Path('cases')/mode/f'session-{i}'/name))
+        for mode in CURSOR_MODES:
+            session=evidence/mode/'session-0'
+            for p in session.rglob('*'):
+                if p.name in {'capture.json','capture.windows-v2','project.json','screen.mp4','session.json'}:omitted.append(p.relative_to(evidence).as_posix())
+            for name in (CASE_NAMES-{'capture.json','capture.windows-v2','project.json','screen.mp4','session.json'})|{'proof-result.json','cursor-analysis.json','native-topology.json','resource-paths.json'}|{f'source-{kind}-{i}.json' for kind in ['command','ack'] for i in range(3,13)}:
+                p=session/name
+                if p.is_file():candidates.append((p,Path('cases')/mode/'session-0'/name))
+            for proof in ['without','with','challenge','closed','visibility']:
+                for name in PRIVATE_NAMES:
+                    p=session/proof/name
+                    if p.is_file():candidates.append((p,Path('cases')/mode/'session-0'/proof/name))
         for mode in PIPE_NAMES:
             p=evidence/'core-pipes'/(mode+'.json')
             if p.is_file():candidates.append((p,Path('cases/core-pipes')/p.name))
         for p in (evidence/'fault-tools').glob('profile-relay-*.json'):
             if p.stem.removeprefix('profile-relay-').isdigit():candidates.append((p,Path('cases/relay')/p.name))
     # Diagnostics first; a cap failure remains explicit and never deletes original local evidence.
-    for p,relative in sorted(candidates,key=lambda pair:pair[0].name=='screen.mp4'):
-        limit=64*1024*1024 if p.name=='screen.mp4' else 4*1024*1024 if p.name=='trace.json' else 4096 if p.name=='source-actions.json' else 16*1024*1024
+    for p,relative in sorted(candidates,key=lambda pair:pair[0].suffix=='.mp4'):
+        limit=64*1024*1024 if p.name in {'screen.mp4','proof-with-cursor.mp4','proof-without-cursor.mp4'} else 4*1024*1024 if p.name=='trace.json' else 4096 if p.name=='source-actions.json' else 9*1024*1024 if p.suffix=='.pam' else 16*1024*1024
         n=p.stat().st_size
         if p.is_symlink() or n>limit or total+n>255*1024*1024:omitted.append(relative.as_posix());continue
         target=out/relative;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(p,target);total+=n

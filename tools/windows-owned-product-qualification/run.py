@@ -21,6 +21,20 @@ ALLOW_ROOTS=['FocusFlow/src-tauri/src','FocusFlow/src-tauri/tests','FocusFlow/sr
 ALLOW_FILES=['README.md','FocusFlow/src-tauri/Cargo.toml','FocusFlow/src-tauri/Cargo.lock','FocusFlow/src-tauri/build.rs','FocusFlow/src-tauri/tauri.conf.json','FocusFlow/crates/focusflow-core/Cargo.toml','FocusFlow/crates/focusflow-core/Cargo.lock','.superpowers/sdd/2026-10-27-windows-owned-product/fix-1-native-harness/Cargo.toml','.superpowers/sdd/2026-10-27-windows-owned-product/fix-1-native-harness/Cargo.lock','.github/workflows/windows-owned-product-qualification.yml']
 EXTENSIONS={'.rs','.toml','.lock','.md','.json','.png','.ico','.icns','.py','.yml','.txt','.orig'}
 
+def require_cursor_disposable_context():
+    expected=dict(GITHUB_ACTIONS='true',RUNNER_ENVIRONMENT='github-hosted',RUNNER_OS='Windows',
+                  GITHUB_REPOSITORY='UmarAlMukhtar/FocusFlow',GITHUB_REF='refs/heads/codex-windows-cursor-qualification',
+                  GITHUB_EVENT_NAME='push',GITHUB_WORKFLOW_REF='UmarAlMukhtar/FocusFlow/.github/workflows/windows-owned-product-qualification.yml@refs/heads/codex-windows-cursor-qualification')
+    for key,value in expected.items():assert os.getenv(key)==value,f'private cursor disposable context rejected {key}'
+    commit=os.getenv('GITHUB_SHA','');assert re.fullmatch('[0-9a-f]{40}',commit),'invalid run SHA'
+    assert os.getenv('FOCUSFLOW_CURSOR_REVIEWED_SHA')==commit,'private cursor SHA handshake rejected'
+    assert os.getenv('FOCUSFLOW_CURSOR_REVIEWED_REPOSITORY')==expected['GITHUB_REPOSITORY'],'repository handshake rejected'
+    assert os.getenv('FOCUSFLOW_CURSOR_REVIEWED_REF')==expected['GITHUB_REF'],'ref handshake rejected'
+    run_id=os.getenv('GITHUB_RUN_ID','');attempt=os.getenv('GITHUB_RUN_ATTEMPT','')
+    assert run_id.isdigit() and attempt.isdigit(),'run identity missing'
+    assert os.getenv('FOCUSFLOW_CURSOR_REVIEWED_RUN')==run_id+':'+attempt,'run handshake rejected'
+    return dict(repository=expected['GITHUB_REPOSITORY'],ref=expected['GITHUB_REF'],sha=commit,runId=run_id,attempt=attempt,runnerEnvironment='github-hosted')
+
 def sha(path):
     with path.open('rb') as f:return hashlib.file_digest(f,'sha256').hexdigest()
 
@@ -52,8 +66,9 @@ def bound(root):
     for p in root.rglob('*'):
         if p.is_file():
             n=p.stat().st_size;size+=n
-            if p.name=='screen.mp4':assert n<=64*1024*1024,'64MiB media cap reached'
+            if p.name in {'screen.mp4','proof-with-cursor.mp4','proof-without-cursor.mp4'}:assert n<=64*1024*1024,'64MiB media cap reached'
             elif p.name=='trace.json':assert n<=4*1024*1024,'4MiB trace cap reached'
+            elif p.suffix=='.pam':assert n<=9*1024*1024,'9MiB raw PAM cap reached'
             elif p.name=='source-actions.json':assert n<=4096,'4KiB source action cap reached'
             else:assert n<=16*1024*1024,f'16MiB evidence file cap reached: {p.name}'
     assert size<=256*1024*1024,'256MiB aggregate artifact cap reached'
@@ -98,11 +113,15 @@ class GeneratedSources:
             if case in self.children:continue
             assert not case.is_symlink() and case.name in {'session-0','session-1','session-2'} and len(self.children)<3,'unexpected source session'
             data=fixture_read(request)
-            assert set(data)=={'width','height','nonce','animated'}
+            private='privateProfile' in data
+            if private:require_cursor_disposable_context()
+            assert set(data)=={'width','height','nonce','animated'}|({'privateProfile'} if private else set())
+            if private:assert data['privateProfile'] in {'borderless','decorated'} and data['animated'] is False
             assert type(data['width']) is int and 160<=data['width']<=1920
             assert type(data['height']) is int and 120<=data['height']<=1080
             assert type(data['nonce']) is int and 0<=data['nonce']<=65535 and type(data['animated']) is bool
             argv=[str(self.harness),'--source',str(case),str(data['width']),str(data['height']),str(data['nonce']),str(int(data['animated']))]
+            if private:argv[1]='--source-private';argv.append(data['privateProfile'])
             with (case/'source.log').open('wb') as out:
                 proc=subprocess.Popen(argv,stdin=subprocess.DEVNULL,stdout=out,stderr=subprocess.STDOUT,env=self.env)
             # Retained Popen owns the exact process handle even before the HWND handshake succeeds.
@@ -156,7 +175,9 @@ def execute(argv,root,name,timeout=600,env=None,observe=None,parent_death=False)
                 assert time.monotonic()-started<timeout,'outer watchdog fired; never product success'
                 if observe:
                     sources.poll(proc.pid)
-                    for path in observe.glob('session-*/owned.json'):
+                    ownership_paths=list(observe.glob('session-*/owned.json'))
+                    ownership_paths+=list(observe.glob('session-*/without/owned.json'))+list(observe.glob('session-*/with/owned.json'))+list(observe.glob('session-*/challenge/owned.json'))+list(observe.glob('session-*/closed/owned.json'))
+                    for path in ownership_paths:
                         if path in opened:continue
                         try:data=json.loads(path.read_text(encoding='utf-8'))
                         except (OSError,ValueError):continue
@@ -245,16 +266,19 @@ def uninstrumented(case,ffmpeg,ffprobe):
 
 def run(a):
     assert sys.platform=='win32','native lane must run on Windows'
-    scope=getattr(a,'scope','full');assert scope in {'full','close-diagnostic'},'unknown qualification scope'
+    scope=getattr(a,'scope','full');assert scope in {'full','close-diagnostic','cursor-private'},'unknown qualification scope'
+    cursor_private=scope=='cursor-private'
+    disposable=require_cursor_disposable_context() if cursor_private else None
     diagnostic=scope=='close-diagnostic'
-    expected_branch='codex-windows-owned-close-diagnostic' if diagnostic else 'codex-windows-owned-product-qualification'
+    expected_branch='codex-windows-cursor-qualification' if cursor_private else 'codex-windows-owned-close-diagnostic' if diagnostic else 'codex-windows-owned-product-qualification'
     observed_ref=os.getenv('GITHUB_REF')
     assert observed_ref is None or observed_ref=='refs/heads/'+expected_branch,'qualification scope/ref mismatch'
     if diagnostic:print('DIAGNOSTIC SUBSET: close only; cannot establish full qualification PASS')
     repo=Path(__file__).resolve().parents[2];os.chdir(repo)
+    if cursor_private:assert subprocess.check_output(['git','rev-parse','HEAD'],text=True,encoding='ascii').strip()==disposable['sha'],'checkout/run SHA mismatch before native tools'
     evidence=a.evidence.resolve();evidence.mkdir();assert sha(a.ffmpeg)==FFMPEG_SHA and sha(a.ffprobe)==FFPROBE_SHA
     before=source_manifest(repo);write(evidence/'source-manifest.json',before)
-    write(evidence/'provenance.json',dict(scope=scope,diagnosticOnly=diagnostic,expectedBranch=expected_branch,observedRef=observed_ref,commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True,encoding='ascii').strip(),runnerImage=os.getenv('ImageVersion'),runnerOS=os.getenv('RUNNER_OS'),ffmpegSha256=sha(a.ffmpeg),ffprobeSha256=sha(a.ffprobe),archiveSha256=ARCHIVE_SHA,python=sys.version,platform=sys.platform,toolchain='1.89.0',profile='debug; H264 libx264 veryfast CRF23 yuv420p B0 30fps 30000-timescale',environment={k:os.getenv(k) for k in ['CARGO_TARGET_DIR','VCToolsVersion','WindowsSDKVersion','PROCESSOR_IDENTIFIER']}))
+    write(evidence/'provenance.json',dict(scope=scope,privateCursorProof=cursor_private,disposableContext=disposable,diagnosticOnly=diagnostic,expectedBranch=expected_branch,observedRef=observed_ref,commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True,encoding='ascii').strip(),runnerImage=os.getenv('ImageVersion'),runnerOS=os.getenv('RUNNER_OS'),ffmpegSha256=sha(a.ffmpeg),ffprobeSha256=sha(a.ffprobe),archiveSha256=ARCHIVE_SHA,python=sys.version,platform=sys.platform,toolchain='1.89.0',profile='debug; H264 libx264 veryfast CRF23 yuv420p B0 30fps 30000-timescale',environment={k:os.getenv(k) for k in ['CARGO_TARGET_DIR','VCToolsVersion','WindowsSDKVersion','PROCESSOR_IDENTIFIER']}))
     metadata=json.loads(subprocess.check_output(['cargo','+1.89.0','metadata','--locked','--manifest-path','FocusFlow/src-tauri/Cargo.toml','--format-version','1'],text=True,encoding='utf-8'))
     vendor=[x for x in metadata['packages'] if x['name']=='windows-capture'];assert len(vendor)==1 and vendor[0]['source'] is None
     assert Path(vendor[0]['manifest_path']).resolve()==repo/'FocusFlow/vendor/windows-capture/Cargo.toml'
@@ -268,23 +292,25 @@ def run(a):
     def require_tests(argv,name,count):
         log=execute(argv,evidence,name)
         require_test_count(log.read_text(encoding='utf-8',errors='replace'),count)
-    if not diagnostic:
+    if not diagnostic and not cursor_private:
         attempt('core-publication',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',core,'--lib','capture::windows::tests::','--','--test-threads=1','--nocapture'],'core-publication',10))
         attempt('core-import',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',core,'--test','windows_capture','--','--test-threads=1','--nocapture','--skip','common::child_writer'],'core-import',WINDOWS_IMPORT_TEST_COUNT))
         attempt('mapping-debug',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',mapping,'--lib','frame::mapping_tests::','--','--test-threads=1','--nocapture'],'mapping-debug',4))
     def pipes():
         exe=build_exe(repo,evidence,core,'cfr_grid_windows',True);env=os.environ.copy();env['CORE_QUAL_EVIDENCE']=str(evidence/'core-pipes')
         execute([exe],evidence,'core-pipes',90,env)
-    if not diagnostic:attempt('core-pipes',pipes)
+    if not diagnostic and not cursor_private:attempt('core-pipes',pipes)
+    if cursor_private:attempt('cursor-renderer',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',core,'--test','cursor_render','lossless_rgba_compositing_isolates_alpha_and_hotspot','--','--test-threads=1'],'cursor-renderer',1))
+    if cursor_private:attempt('cursor-portable',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',core,'--test','windows_cursor_private','--','--test-threads=1','--nocapture','--skip','common::child_writer'],'cursor-portable',6))
     def product():
         built={}
-        targets=[('windows_owned_qualification',True)] if diagnostic else [('FocusFlow',False),('windows_owned_qualification',True),('windows_encoder_fixture',True)]
+        targets=[('windows_owned_qualification',True)] if diagnostic or cursor_private else [('FocusFlow',False),('windows_owned_qualification',True),('windows_encoder_fixture',True)]
         for name,test in targets:
             attempt('build-'+name,lambda name=name,test=test:built.update({name:build_exe(repo,evidence,app,name,test)}))
         actual=built.get('FocusFlow');harness=built.get('windows_owned_qualification');fixture=built.get('windows_encoder_fixture')
         write(evidence/'executables.json',{str(p):sha(p) for p in built.values()})
         assert harness is not None,'instrumented harness unavailable; dependent native cases not run'
-        if not diagnostic:attempt('native-platform',lambda:execute([harness,'--platform',evidence/'native-platform.json'],evidence,'native-platform',20))
+        if not diagnostic and not cursor_private:attempt('native-platform',lambda:execute([harness,'--platform',evidence/'native-platform.json'],evidence,'native-platform',20))
         def one(label,mode,w,h,nonce,worker,encoder):
             root=evidence/label
             execute([harness,root,mode,w,h,nonce,encoder,worker],evidence,label,45,observe=root,parent_death=mode=='parent-death')
@@ -298,6 +324,15 @@ def run(a):
             for case in root.glob('session-*'):
                 if worker==actual:uninstrumented(case,a.ffmpeg,a.ffprobe)
                 else:analyze.analyze(case,a.ffmpeg,a.ffprobe)
+        if cursor_private:
+            import cursor_check
+            for label,w,h,nonce in [('cursor-borderless-even',320,240,500),('cursor-decorated-even',320,240,501),('cursor-borderless-odd',641,359,502),('cursor-decorated-odd',641,359,503)]:
+                def private_case(label=label,w=w,h=h,nonce=nonce):
+                    root=evidence/label;execute([harness,root,'cursor-private',w,h,nonce,a.ffmpeg,harness],evidence,label,45,observe=root)
+                    cursor_check.check(root/'session-0',a.ffmpeg,a.ffprobe)
+                attempt(label,private_case)
+                if failures:break # Required first profile failure is FAIL, never an unavailable/skip.
+            return
         if diagnostic:
             attempt('close',lambda:one('close','close',641,359,202,harness,a.ffmpeg));return
         for i,(w,h) in enumerate([(320,240),(641,359),(803,451),(960,540),(161,479)]):attempt(f'geometry-{w}x{h}',lambda w=w,h=h,i=i:one(f'geometry-{w}x{h}','normal',w,h,100+i,harness,a.ffmpeg))
@@ -316,8 +351,8 @@ def run(a):
     assert source_manifest(repo)==before,'build changed qualified source inputs'
     bound(evidence)
     write(evidence/'artifact-hashes.json',{p.relative_to(evidence).as_posix():sha(p) for p in evidence.rglob('*') if p.is_file()})
-    write(evidence/'result.json',dict(scope=scope,diagnosticOnly=diagnostic,passed=not failures and not diagnostic,diagnosticPassed=(not failures if diagnostic else None),failures=failures,nativeEquality='inspect each analysis; missing equality is an open coverage gate',geometryTransition='inspect resize analysis; old-pool/new-content may remain unobserved',limitations=['No actual Tauri/WebView2 Record Stop Edit Play','No microphone/pointer/device/packaging claim','WARP debug-layer failure is unqualified, never skipped']))
+    write(evidence/'result.json',dict(scope=scope,privateCursorProof=cursor_private,productionCursorQualified=False,diagnosticOnly=diagnostic,passed=not failures and not diagnostic and not cursor_private,cursorProofPassed=(not failures if cursor_private else None),diagnosticPassed=(not failures if diagnostic else None),failures=failures,nativeEquality='inspect each analysis; missing equality is an open coverage gate',geometryTransition='inspect resize analysis; old-pool/new-content may remain unobserved',limitations=['No actual Tauri/WebView2 Record Stop Edit Play','No microphone/pointer/device/packaging claim','WARP debug-layer failure is unqualified, never skipped']))
     if failures:raise RuntimeError(f'{len(failures)} required gates failed')
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--scope',choices=['full','close-diagnostic'],default='full');p.add_argument('--evidence',type=Path,required=True);p.add_argument('--ffmpeg',type=Path,required=True);p.add_argument('--ffprobe',type=Path,required=True);a=p.parse_args();a.ffmpeg=a.ffmpeg.resolve();a.ffprobe=a.ffprobe.resolve();run(a)
+    p=argparse.ArgumentParser();p.add_argument('--scope',choices=['full','close-diagnostic','cursor-private'],default='full');p.add_argument('--evidence',type=Path,required=True);p.add_argument('--ffmpeg',type=Path,required=True);p.add_argument('--ffprobe',type=Path,required=True);a=p.parse_args();a.ffmpeg=a.ffmpeg.resolve();a.ffprobe=a.ffprobe.resolve();run(a)

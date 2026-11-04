@@ -145,7 +145,7 @@ fn probe_profile(ffmpeg:&Path,job:&str)->Result<()> {
 #[derive(Clone,Default)]
 struct Shared {cutoff:Option<i64>,closed:bool,geometry_changed:bool,source_availability:Option<SourceAvailabilityEnd>,failure:Option<String>,#[cfg(test)] trace:qualification::Trace}
 #[derive(Clone)]
-struct Flags {tx:SyncSender<Source>,shared:Arc<Mutex<Shared>>,live:Arc<OwnedCount>,geometry:Geometry,#[cfg(test)] window:u64,#[cfg(test)] pid:u32}
+struct Flags {tx:SyncSender<Source>,shared:Arc<Mutex<Shared>>,live:Arc<OwnedCount>,geometry:Geometry,#[cfg(test)] window:u64,#[cfg(test)] pid:u32,#[cfg(test)] proof_path:Option<PathBuf>}
 struct Capture {flags:Flags,seq:u64,#[cfg(test)] rejected_seen:bool}
 impl GraphicsCaptureApiHandler for Capture {
  type Flags=Flags;type Error=Box<dyn std::error::Error+Send+Sync>;
@@ -163,7 +163,8 @@ impl GraphicsCaptureApiHandler for Capture {
    let mut buffer=frame.buffer().map_err(err)?;if buffer.color_format()!=ColorFormat::Bgra8{return Err("WGC frame is not BGRA".into());}
    let pitch=buffer.row_pitch() as usize;let owned=OwnedPixels::copy(buffer.as_raw_buffer(),pitch,self.flags.geometry,self.flags.live.clone())?;
    #[cfg(test)] let identity_before=qpc().ok();
-   #[cfg(test)] let (paint,nonce,corners)=match qualification::identity(&owned,self.flags.geometry){
+   #[cfg(test)] if let Some(path)=&self.flags.proof_path{qualification::proof::save_pixels(path,&owned,self.flags.geometry,self.seq)?;}
+   #[cfg(test)] let (paint,nonce,corners)=if self.flags.proof_path.is_some(){(0,0,[0;4])}else{match qualification::identity(&owned,self.flags.geometry){
     Ok(value)=>value,Err(error)=>{
      if !self.rejected_seen{self.rejected_seen=true;
       let observed=qualification::rejected(&owned,self.flags.geometry,self.seq,native,callback_qpc,identity_before,content,(frame.width(),frame.height()),self.flags.window,self.flags.pid,&error);
@@ -171,7 +172,7 @@ impl GraphicsCaptureApiHandler for Capture {
      }
      return Err(error);
     }
-   };
+   }};
    #[allow(unused_mut)] let mut state=self.flags.shared.lock().map_err(err)?;if state.cutoff.is_some(){return Ok(());}
    let published=qpc()?;self.flags.tx.try_send(Source{seq:self.seq,native,published,pixels:Arc::new(owned)}).map_err(|_|"Source snapshot queue overflow/disconnected")?;
    #[cfg(test)] state.trace.push(qualification::Event{kind:"source",seq:self.seq,native,qpc:published,paint,nonce,corners,content_width:content.0,content_height:content.1,texture_width:frame.width(),texture_height:frame.height(),..Default::default()})?;
@@ -207,8 +208,9 @@ impl Supervisor {
  fn finish(&self)->Result<()>{self.stop.store(true,Ordering::SeqCst);self.done.recv_timeout(STAGE).map_err(err)?}
 }
 impl Drop for Supervisor {fn drop(&mut self){self.stop.store(true,Ordering::SeqCst);}}
-fn worker(window:u64,pid:u32,path:&Path,ffmpeg:&Path,job:&str)->Result<()> {
+fn worker(window:u64,pid:u32,path:&Path,ffmpeg:&Path,job:&str,#[cfg(test)] proof:Option<bool>)->Result<()> {
  control(1)?;
+ #[cfg(test)] if proof.is_some(){crate::recorder::windows_qualification::cursor::require_disposable()?;}
  #[cfg(test)] qualification::initialize(path)?;
  let _apartment=Apartment::initialize()?;let owner=SourceOwner::prepare(window,pid)?;
  let captured:GraphicsCaptureItemType=verify_identity(window,pid)?.try_into().map_err(err)?;
@@ -226,7 +228,9 @@ fn worker(window:u64,pid:u32,path:&Path,ffmpeg:&Path,job:&str)->Result<()> {
  thread::Builder::new().name("wgc-raw-writer".into()).spawn(move||{let _=done_tx.send(write_outputs(pipe,writer_rx,writer_progress));}).map_err(err)?;
  let(control_tx,control_rx)=mpsc::sync_channel(1);thread::Builder::new().name("wgc-parent-control".into()).spawn(move||{let _=control_tx.send(control(3));}).map_err(err)?;
  let shared=Arc::new(Mutex::new(Shared{#[cfg(test)] trace:qualification::Trace::allocated(),..Default::default()}));let(tx,rx)=mpsc::sync_channel(8);let admission=qpc()?;
- let settings=Settings::new(item,CursorCaptureSettings::WithCursor,DrawBorderSettings::Default,SecondaryWindowSettings::Default,MinimumUpdateIntervalSettings::Default,DirtyRegionSettings::Default,ColorFormat::Bgra8,Flags{tx,shared:shared.clone(),live:Arc::new(OwnedCount::default()),geometry:g,#[cfg(test)] window,#[cfg(test)] pid});
+ #[cfg(not(test))] let cursor=CursorCaptureSettings::WithCursor;
+ #[cfg(test)] let cursor=if proof==Some(false){CursorCaptureSettings::WithoutCursor}else{CursorCaptureSettings::WithCursor};
+ let settings=Settings::new(item,cursor,DrawBorderSettings::Default,SecondaryWindowSettings::Default,MinimumUpdateIntervalSettings::Default,DirtyRegionSettings::Default,ColorFormat::Bgra8,Flags{tx,shared:shared.clone(),live:Arc::new(OwnedCount::default()),geometry:g,#[cfg(test)] window,#[cfg(test)] pid,#[cfg(test)] proof_path:proof.map(|_|path.to_owned())});
  let capture=Capture::start_free_threaded(settings).map_err(err)?;emit(Message::Ready{})?;
  let mut selector=Selector::new(admission,freq)?;let mut selected=0;let started=Instant::now();let mut handled=false;let mut state_at_end=Shared::default();
  let feed=(||->Result<()>{loop{
@@ -277,10 +281,14 @@ fn worker(window:u64,pid:u32,path:&Path,ffmpeg:&Path,job:&str)->Result<()> {
  emit(Message::Terminal{summary})
 }
 pub(crate) fn dispatch(mut args:impl Iterator<Item=OsString>)->Option<i32>{
- if args.next().as_deref()!=Some(OsStr::new(MODE)){return None;}
- let result=(||->Result<()>{let values:Vec<_>=args.take(6).collect();if values.len()!=5{return Err("Invalid owned WGC worker arguments".into());}
+ let mode=args.next();
+ #[cfg(test)] let private=mode.as_deref()==Some(OsStr::new(qualification::proof::MODE));
+ #[cfg(not(test))] let private=false;
+ if mode.as_deref()!=Some(OsStr::new(MODE))&&!private{return None;}
+ let result=(||->Result<()>{let values:Vec<_>=args.take(7).collect();if values.len()!=if private{6}else{5}{return Err("Invalid owned WGC worker arguments".into());}
   let number=|i:usize|->Result<u64>{values[i].to_str().ok_or("Invalid numeric worker argument")?.parse().map_err(err)};
   let window=number(0)?;let pid=u32::try_from(number(1)?).map_err(err)?;
-  worker(window,pid,&PathBuf::from(&values[2]),&PathBuf::from(&values[3]),values[4].to_str().ok_or("Invalid Job name")?)
+  #[cfg(test)] let proof=if private{Some(match values[5].to_str(){Some("with")=>true,Some("without")=>false,_=>return Err("Invalid private cursor choice".into())})}else{None};
+  worker(window,pid,&PathBuf::from(&values[2]),&PathBuf::from(&values[3]),values[4].to_str().ok_or("Invalid Job name")?,#[cfg(test)] proof)
  })();Some(match result{Ok(())=>0,Err(mut message)=>{while message.len()>1024{message.pop();}let _=emit(Message::Error{message});1}})
 }

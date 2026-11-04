@@ -1,0 +1,149 @@
+"""Bounded independent checker of private proof pixels, clocks and ownership receipts.
+No Rust selector/math import, fixture actions never establish a candidate stationary prefix.
+"""
+from fractions import Fraction
+import json
+from pathlib import Path
+import subprocess
+import threading
+import analyze
+
+FORBIDDEN={'capture.json','capture.windows-v2','project.json','screen.mp4','session.json'}
+def private_only(root):
+    assert not any(p.name in FORBIDDEN for p in root.rglob('*')),'private proof leaked capture/import authority'
+
+def pam(path):
+    assert path.is_file() and not path.is_symlink() and path.stat().st_size<=9*1024*1024,'PAM cap/regular-file failure'
+    data=path.read_bytes();header,body=data.split(b'ENDHDR\n',1);lines=header.splitlines()
+    assert lines[0]==b'P7';fields=dict(x.split(b' ',1) for x in lines[1:])
+    assert set(fields)=={b'WIDTH',b'HEIGHT',b'DEPTH',b'MAXVAL',b'TUPLTYPE'}
+    w,h=int(fields[b'WIDTH']),int(fields[b'HEIGHT'])
+    assert 0<w<=1920 and 0<h<=1080 and fields[b'DEPTH']==b'4' and fields[b'MAXVAL']==b'255' and fields[b'TUPLTYPE']==b'RGB_ALPHA'
+    assert len(body)==w*h*4,'truncated/raw overflow PAM'
+    return w,h,body
+
+def anchors(w,h,pixels):
+    result=[]
+    for value in (40,100,160):
+        points={(i%w,i//w) for i in range(w*h) if pixels[4*i:4*i+4]==bytes([value,value,value,255])}
+        components=[]
+        while points:
+            seed=points.pop();todo=[seed];region=[seed]
+            while todo:
+                x,y=todo.pop()
+                for n in [(x-1,y),(x+1,y),(x,y-1),(x,y+1)]:
+                    if n in points:points.remove(n);todo.append(n);region.append(n)
+            if len(region)==256:
+                left=min(x for x,y in region);top=min(y for x,y in region)
+                if max(x for x,y in region)==left+15 and max(y for x,y in region)==top+15:components.append([left+8,top+8])
+        assert len(components)==1,'missing/ambiguous native 16px fiducial'
+        result.append(components[0])
+    return result
+
+def unit_origin(raw,physical):
+    assert len(raw)==len(physical)>=3
+    a,b,c=raw[:3];assert (b[0]-a[0])*(c[1]-a[1])!=(b[1]-a[1])*(c[0]-a[0]),'collinear anchors'
+    offsets={(p[0]-r[0],p[1]-r[1]) for r,p in zip(raw,physical)}
+    assert len(offsets)==1,'shifted/scaled fiducials do not prove unit translation'
+    return list(offsets.pop())
+
+def bracket(row,clock):
+    q0,q1=row['q0'],row['q1'];f,e,a,s,n=(clock[k] for k in ['frequency','epoch','admission','cutoff','written'])
+    assert f>0 and 0<=a<=q0<=q1<s and 30*(q1-q0)<=f,'invalid/overwide QPC bracket'
+    lo=Fraction(q0*10000000-e*f,f*10000000);hi=Fraction(q1*10000000-e*f,f*10000000)
+    assert 0<=lo<=hi<Fraction(n,30),'cross-boundary QPC bracket'
+    mid=q0+(q1-q0)//2;at=(mid*10000000-e*f)*1000000//(f*10000000)
+    assert 0<=at<n*1000000//30
+    return dict(atUs=at,uncertaintyQpc=q1-q0,physicalLatencyClaim=False)
+
+def raster(directory,index,shape):
+    w,h,source=pam(directory/shape['path']);assert (w,h)==(shape['width'],shape['height']) and 0<=shape['hotspot'][0]<w and 0<=shape['hotspot'][1]<h
+    for bg in range(4):
+        rw,rh,got=pam(directory/f'raster-{index}-{bg}.pam');assert (rw,rh)==(w,h)
+        for i in range(w*h):
+            x,y=i%w,i//w;background=([0]*3 if bg==0 else [255]*3 if bg==1 else ([35]*3 if (x//4+y//4)%2==0 else [210]*3) if bg==2 else [37,91,173])
+            p=source[i*4:i*4+4]
+            assert p[3] or p[:3]==bytes(3),'zero alpha not canonical'
+            for c in range(3):assert abs(got[i*4+c]-(p[c]*p[3]+background[c]*(255-p[3])+127)//255)<=1,'native raster mismatch'
+    return source
+
+def overlay(before,after,w,h,shape,pixels,hotspot):
+    left,top=hotspot[0]-shape['hotspot'][0],hotspot[1]-shape['hotspot'][1]
+    assert len(before)==len(after)==w*h*4
+    changed=0
+    for i in range(w*h):
+        x,y=i%w,i//w;u,v=x-left,y-top;a=0;p=None
+        if 0<=u<shape['width'] and 0<=v<shape['height']:p=pixels[(v*shape['width']+u)*4:][:4];a=p[3]
+        for c in range(3):
+            expected=(p[c]*a+before[i*4+c]*(255-a)+127)//255 if p else before[i*4+c]
+            assert abs(after[i*4+c]-expected)<=1,'actual WGC cursor-free/embedded pixels disagree'
+        changed+=before[i*4:i*4+3]!=after[i*4:i*4+3]
+    assert changed>0,'WithCursor control has no actual cursor pixels'
+
+def movie(directory,info,ffmpeg,ffprobe,rawanchors,reference=None,crop=None):
+    summary=json.loads((directory/'proof-summary.json').read_text())
+    assert summary['privateProof'] is True and summary['neverImport'] is True and summary['workerExit']==0 and summary['encoderSignaled'] is True,'Private proof completion was not verified'
+    clock=summary['clock'];trace=json.loads((directory/'trace.json').read_text());picks=analyze.expected(trace)
+    assert all(clock[k]==trace[k] for k in ['frequency','admission','epoch','cutoff','selected','written'])
+    movie=directory/('proof-with-cursor.mp4' if info['withCursor'] else 'proof-without-cursor.mp4');assert movie.stat().st_size<=64*1024*1024
+    meta=json.loads(subprocess.check_output([str(ffprobe),'-v','error','-show_streams','-show_packets','-of','json',movie],timeout=20,text=True))
+    assert len(meta['streams'])==1;stream=meta['streams'][0];w,h=info['encodedSize'];assert (stream['width'],stream['height'])==(w,h) and stream['codec_name']=='h264' and stream['pix_fmt']=='yuv420p';analyze.packets(meta['packets'],stream['time_base'],len(picks))
+    proc=subprocess.Popen([str(ffmpeg),'-v','error','-i',movie,'-f','rawvideo','-pix_fmt','rgb24','pipe:1'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL);timer=threading.Timer(20,proc.kill);timer.start()
+    try:
+        for _ in picks:
+            pixels=proc.stdout.read(w*h*3);assert len(pixels)==w*h*3
+            for (x,y),color in zip(rawanchors,[40,100,160]):assert all(abs(pixels[(y*w+x)*3+c]-color)<=24 for c in range(3)),'decoded native fiducial lost'
+            if reference is not None:
+                left,top,right,bottom=crop;errors=[abs(pixels[(y*w+x)*3+c]-reference[(y*w+x)*4+c]) for y in range(max(0,top),min(h,bottom)) for x in range(max(0,left),min(w,right)) for c in range(3)]
+                assert errors and max(errors)<=48 and sum(errors)<=12*len(errors),'codec-tolerant static cursor crop mismatch'
+        assert proc.stdout.read(1)==b'' and proc.wait(timeout=5)==0
+    finally:
+        timer.cancel()
+        if proc.poll() is None:proc.kill();proc.wait(timeout=5)
+    return clock,len(picks)
+
+def check(case,ffmpeg,ffprobe):
+    private_only(case);results={};raw={};shape=None;shape_pixels=None;hotspot=None
+    for mode in ['without','with']:
+        d=case/mode;info=json.loads((d/'geometry.json').read_text());w,h,pixels=pam(d/'raw-0.pam');rw,rh=info['rawSize'];assert [w,h]==info['encodedSize']==[rw+rw%2,rh+rh%2]
+        native=anchors(w,h,pixels);origin=unit_origin(native,info['physicalAnchors']);g=info['geometry'];assert origin in [g['window'][:2],g['dwm'][:2],g['clientOrigin']],'no independently measured origin candidate matched'
+        # Validate padding once; no crop, fitted scale or DPI multiplication.
+        assert all(pixels[(y*w+x)*4:(y*w+x)*4+3]==bytes(3) for y in range(h) for x in range(w) if x>=rw or y>=rh),'right/bottom padding not black'
+        row0=info["observations"][0];s0=row0["shape"];assert s0 is not None;left=row0["position"][0]-origin[0]-s0["hotspot"][0];top=row0["position"][1]-origin[1]-s0["hotspot"][1];clock,frames=movie(d,info,ffmpeg,ffprobe,native,pixels,[left-2,top-2,left+s0["width"]+2,top+s0["height"]+2]);times=[]
+        assert info['telemetry']==[] and info['prefix']=='rejectedAll' and info['physicalLatencyClaim'] is False
+        for i,row in enumerate(info['observations']):
+            assert row['telemetryAccepted'] is False and row['before']==row['after']==g and row['consistent'] is True,'ambiguous stationary required profile'
+            assert row['position']==row['cursorInfoPosition'] and row['flags']==1 and row['hitRoot']==info['selectedHwnd'] and row['hitPid']==g['pid'] and row['hitThread']==g['thread'],'cursor not owned/visible'
+            assert row['shape'] is not None and row['imageError'] is None,'required static cursor extraction failed'
+            pixels_shape=raster(d,i,row['shape']);times.append(bracket(row,clock))
+            if mode=='with' and i==0:shape=row['shape'];shape_pixels=pixels_shape;hotspot=[row['position'][j]-origin[j] for j in [0,1]]
+        raw[mode]=pixels;results[mode]=dict(frames=frames,origin=origin,rawAnchors=native,times=times,normalization='physical hotspot minus proven unit origin divided by encoded dimensions once; no telemetry admitted')
+    assert results['with']['origin']==results['without']['origin'];overlay(raw['without'],raw['with'],w,h,shape,shape_pixels,hotspot)
+    challenge=case/'challenge';control=json.loads((challenge/'challenges.json').read_text());assert control['telemetry']==[] and control['prefix']=='rejectedAll' and control['noResumeAfterEqualPolls'] is True
+    rows=control['observations'];actions=json.loads((case/'source-actions.json').read_text());assert actions['overflow'] is False
+    expected_actions=['alpha','hidden','restore-cursor','occlude','unocclude','move-away-back','move','move-back','minimize-restore','resize','close']
+    assert [r['action'] for r in actions['records']]==expected_actions and all(r['win32Succeeded'] for r in actions['records'])
+    assert len(rows)==9 and all(r['telemetryAccepted'] is False and r['q0']<=r['q1'] for r in rows)
+    assert rows[0]['shape'] is not None and rows[0]['imageError'] is None;alpha=raster(challenge,0,rows[0]['shape']);assert any(0<a<255 for a in alpha[3::4]),'partial alpha fixture never observed'
+    assert rows[1]['flags']==0,'hidden cursor was not observed'
+    assert rows[3]['hitRoot']!=info['selectedHwnd'] and rows[3]['hitPid']==info['geometry']['pid'],'owned occluder was not observed'
+    assert rows[5]['before']==rows[5]['after'] and rows[5]['telemetryAccepted'] is False,'move-away/back equal polls resumed cursor'
+    assert rows[6]['before']['window']!=rows[7]['before']['window'],'same-size move not observed'
+    assert rows[7]['before']['window']==info['geometry']['window'],'move-back did not restore fixture geometry'
+    trace=json.loads((challenge/'trace.json').read_text());assert any(r['kind']=='geometry' for r in trace['events']),'resize cutoff not observed'
+    challenge_info=json.loads((case/'with/geometry.json').read_text());challenge_info['observations']=rows
+    _,challenge_frames=movie(challenge,challenge_info,ffmpeg,ffprobe,results['with']['rawAnchors'])
+    visibility=json.loads((case/'visibility/visibility.json').read_text());assert visibility['telemetry']==[] and visibility['prefix']=='rejectedAll';v=visibility['observations'];assert len(v)==3 and all(row['telemetryAccepted'] is False for row in v);assert v[2]['hitRoot']!=info['selectedHwnd'],'outside point still belongs to target'
+    closed=case/'closed';close=json.loads((closed/'close-observation.json').read_text());assert close['workerEndedBeforeFinish'] and close['manualStopRequested'] is False
+    trace_close=json.loads((closed/'trace.json').read_text());assert trace_close['sourceClosed'] is True or trace_close['sourceAvailabilityEnd']=='unavailable','close lacks automatic cause'
+    close_info=dict(withCursor=True,encodedSize=[trace_close['width']+trace_close['width']%2,trace_close['height']+trace_close['height']%2])
+    cw,ch,close_pixels=pam(closed/'raw-0.pam')
+    assert [cw,ch]==close_info['encodedSize'],'resized raw proof dimensions disagree'
+    _,closed_frames=movie(closed,close_info,ffmpeg,ffprobe,anchors(cw,ch,close_pixels))
+    results['automaticClose']=dict(frames=closed_frames,cause='wgcClosed' if trace_close['sourceClosed'] else 'sourceUnavailableStop')
+    resource=json.loads((case/'resource-paths.json').read_text());assert resource['iterations']==16 and resource['before']==resource['after'] and resource['partialAcquisitionsOwned'] is True and resource['afterDibitsFailure'] is True and resource['nativeXorRejected'] is True
+    topology=json.loads((case/'native-topology.json').read_text());assert topology['actualMonitors'] and topology['profileAwareness']=='PMv2 only'
+    results['challenges']=dict(frames=challenge_frames,actions=expected_actions,telemetryAccepted=0)
+    result=json.loads((case/'proof-result.json').read_text());assert result['gdiStart']==result['gdiEnd'] and result['positionRestored'] and result['dpiRestored'] and result['showCountMutated'] is False
+    results['scope']='private raw/clock/static cursor controls only';results['telemetryAccepted']=0;results['productionCursorQualified']=False
+    (case/'cursor-analysis.json').write_text(json.dumps(results,indent=2)+'\n');return results

@@ -1,0 +1,119 @@
+"""Private lane routing and independent mathematical/resource trust boundaries; no native calls."""
+import os
+from pathlib import Path
+import unittest
+from unittest.mock import patch
+import run
+
+class CursorQualification(unittest.TestCase):
+    def test_positive_hosted_binding_before_any_mutation(self):
+        # The existing lane allows absent GITHUB_REF. The private mutation lane must not.
+        good = dict(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted', RUNNER_OS='Windows',
+                    GITHUB_REPOSITORY='UmarAlMukhtar/FocusFlow', GITHUB_REF='refs/heads/codex-windows-cursor-qualification',
+                    GITHUB_EVENT_NAME='push', GITHUB_WORKFLOW_REF='UmarAlMukhtar/FocusFlow/.github/workflows/windows-owned-product-qualification.yml@refs/heads/codex-windows-cursor-qualification', GITHUB_SHA='a'*40, GITHUB_RUN_ID='123', GITHUB_RUN_ATTEMPT='1',
+                    FOCUSFLOW_CURSOR_REVIEWED_SHA='a'*40, FOCUSFLOW_CURSOR_REVIEWED_REPOSITORY='UmarAlMukhtar/FocusFlow',
+                    FOCUSFLOW_CURSOR_REVIEWED_REF='refs/heads/codex-windows-cursor-qualification',
+                    FOCUSFLOW_CURSOR_REVIEWED_RUN='123:1')
+        with patch.dict(os.environ,good,clear=True):
+            check = getattr(run, 'require_cursor_disposable_context', lambda: None)
+            self.assertIsNotNone(check(), 'baseline has no positive disposable-context handshake')
+        for key in good:
+            bad=good.copy();bad.pop(key)
+            with self.subTest(key=key),patch.dict(os.environ,bad,clear=True):
+                check=getattr(run,'require_cursor_disposable_context',lambda:None)
+                with self.assertRaises(AssertionError):check()
+
+if __name__=='__main__':unittest.main()
+
+class PrivateChecks(unittest.TestCase):
+    def test_independent_anchors_and_rational_boundary_negatives(self):
+        import cursor_check as c
+        raw=[[8,8],[633,8],[8,351]];physical=[[-92,-42],[533,-42],[-92,301]]
+        self.assertEqual(c.unit_origin(raw,physical),[-100,-50])
+        for bad in [[[9,8],[633,8],[8,351]],[[16,16],[1266,16],[16,702]],[[8,8],[9,9],[10,10]]]:
+            with self.assertRaises(AssertionError):c.unit_origin(bad,physical)
+        clock=dict(frequency=3000000,epoch=10000000,admission=2999000,cutoff=6000000,written=30)
+        self.assertEqual(c.bracket(dict(q0=3000000,q1=3000006),clock)['atUs'],1)
+        for q0,q1 in [(-1,0),(2999999,3000001),(5999999,6000001),(6000000,6000000),(3000000,3100001),(3000001,3000000)]:
+            with self.assertRaises(AssertionError):c.bracket(dict(q0=q0,q1=q1),clock)
+
+    def test_raw_upload_allowlist_includes_decisive_pams_and_rejects_authority_leaks(self):
+        import tempfile
+        from package_evidence import package
+        import cursor_check as c
+        workflow=(Path(__file__).resolve().parents[2]/'.github/workflows/windows-owned-product-qualification.yml').read_text()
+        globs=[line.strip() for line in workflow.splitlines() if line.strip().startswith('qualification-upload/')]
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);ev=root/'evidence';case=ev/'cursor-borderless-even/session-0';d=case/'with';d.mkdir(parents=True)
+            data=b'P7\nWIDTH 1\nHEIGHT 1\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n'+bytes([1,2,3,255])
+            for name in ['raw-0.pam','cursor-0.pam','raster-0-0.pam']:(d/name).write_bytes(data)
+            (d/'proof-with-cursor.mp4').write_bytes(b'private');(d/'geometry.json').write_text('{}');(d/'raw-999.pam').write_bytes(b'not named')
+            (case/'source-command-11.json').write_text('{}')
+            hashes=package(ev,root/'absent',root/'qualification-upload')
+            expected={f'cases/cursor-borderless-even/session-0/with/{n}' for n in ['raw-0.pam','cursor-0.pam','raster-0-0.pam','proof-with-cursor.mp4','geometry.json']}|{'cases/cursor-borderless-even/session-0/source-command-11.json'}
+            self.assertEqual(set(hashes),expected)
+            uploaded={p.relative_to(root/'qualification-upload').as_posix() for glob in globs for p in root.glob(glob) if p.is_file()};self.assertTrue(expected<=uploaded)
+            self.assertEqual(c.pam(d/'raw-0.pam'),(1,1,bytes([1,2,3,255])))
+            (d/'capture.json').write_text('{}')
+            with self.assertRaises(AssertionError):c.private_only(case)
+            with self.assertRaises(RuntimeError):package(ev,root/'absent',root/'leak')
+            (d/'capture.json').unlink();(d/'raw-0.pam').write_bytes(b'x'*(9*1024*1024+1))
+            with self.assertRaises(AssertionError):run.bound(ev)
+            with self.assertRaises(RuntimeError):package(ev,root/'absent',root/'cap')
+
+    def test_private_movie_requires_exact_worker_and_encoder_completion(self):
+        import json
+        import tempfile
+        import cursor_check as c
+
+        accepted = dict(privateProof=True, neverImport=True, workerExit=0, encoderSignaled=True, clock={})
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            for key, value in [('privateProof', False), ('neverImport', False),
+                               ('workerExit', 7), ('encoderSignaled', False)]:
+                with self.subTest(key=key):
+                    (directory/'proof-summary.json').write_text(json.dumps(accepted | {key: value}))
+                    with self.assertRaisesRegex(AssertionError, 'Private proof completion'):
+                        c.movie(directory, {}, None, None, [])
+
+    def test_private_lifecycle_never_calls_embedded_arm_publish_or_legacy_names(self):
+        repo=Path(__file__).resolve().parents[2]
+        proof=(repo/'FocusFlow/src-tauri/src/recorder/windows_capture/process/qualification/proof.rs').read_text()
+        # Structural guard supplements actual core import test and native private_only checker.
+        self.assertNotIn('publish_windows_incomplete(',proof);self.assertNotIn('Completion::',proof);self.assertNotIn('Session::prepare(',proof);self.assertNotIn('StartReservation',proof)
+        self.assertIn('manifest:None',proof);self.assertIn('proof-without-cursor.mp4',proof)
+        production=(repo/'FocusFlow/src-tauri/src/recorder/windows_capture/process.rs').read_text()
+        self.assertIn('#[cfg(not(test))] let cursor=CursorCaptureSettings::WithCursor;',production)
+
+class PrivateRouting(unittest.TestCase):
+    def test_private_scope_builds_one_harness_and_stops_on_first_required_failure(self):
+        import json,tempfile
+        from types import SimpleNamespace
+        for fail in [False,True]:
+            with self.subTest(fail=fail),tempfile.TemporaryDirectory() as tmp:
+                repo=Path(__file__).resolve().parents[2];root=Path(tmp);args=SimpleNamespace(evidence=root/'evidence',ffmpeg=root/'f',ffprobe=root/'p',scope='cursor-private')
+                metadata={'packages':[{'name':'windows-capture','source':None,'manifest_path':str(repo/'FocusFlow/vendor/windows-capture/Cargo.toml')}]};calls=[];builds=[]
+                def execute(argv,evidence,name,*unused,**kwargs):
+                    calls.append(name)
+                    if name in {'cursor-portable','cursor-renderer'}:
+                        log=evidence/(name+'.log');log.write_text('test result: ok. '+('6' if name=='cursor-portable' else '1')+' passed; 0 failed; 0 ignored;');return log
+                    self.assertTrue(name.startswith('cursor-'));self.assertEqual(argv[2],'cursor-private')
+                    if fail:raise RuntimeError('required first native profile failed')
+                def build(repo,evidence,manifest,name,test):builds.append((name,test));return root/'harness'
+                with patch('run.sys.platform','win32'),patch.dict(os.environ,{'GITHUB_REF':'refs/heads/codex-windows-cursor-qualification'}),patch('run.require_cursor_disposable_context',return_value={'sha':'a'*40}),patch('run.os.chdir'),patch('run.source_manifest',return_value={}),patch('run.sha',side_effect=lambda p:run.FFMPEG_SHA if p==args.ffmpeg else run.FFPROBE_SHA if p==args.ffprobe else 'fixture-hash'),patch('run.subprocess.check_output',side_effect=lambda argv,**kw:json.dumps(metadata) if argv[0]=='cargo' else 'a'*40),patch('run.execute',side_effect=execute),patch('run.build_exe',side_effect=build),patch('cursor_check.check') as checker:
+                    if fail:
+                        with self.assertRaises(RuntimeError):run.run(args)
+                    else:run.run(args)
+                self.assertEqual(builds,[('windows_owned_qualification',True)])
+                self.assertEqual(len(calls),3 if fail else 6);self.assertEqual(checker.call_count,0 if fail else 4)
+                result=json.loads((args.evidence/'result.json').read_text());self.assertFalse(result['passed']);self.assertFalse(result['productionCursorQualified']);self.assertEqual(result['cursorProofPassed'],not fail)
+                self.assertNotIn('core-publication',calls);self.assertNotIn('native-platform',calls)
+
+    def test_missing_or_mismatched_context_rejected_before_tools_and_output(self):
+        import tempfile
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);args=SimpleNamespace(evidence=root/'e',ffmpeg=root/'f',ffprobe=root/'p',scope='cursor-private')
+            with patch('run.sys.platform','win32'),patch.dict(os.environ,{},clear=True),patch('run.subprocess.check_output') as tool:
+                with self.assertRaises(AssertionError):run.run(args)
+                tool.assert_not_called();self.assertFalse(args.evidence.exists())

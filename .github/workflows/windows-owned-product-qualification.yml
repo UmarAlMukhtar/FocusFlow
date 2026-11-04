@@ -1,7 +1,7 @@
 name: Windows owned product qualification
 on:
   push:
-    branches: [codex-windows-owned-product-qualification, codex-windows-owned-close-diagnostic]
+    branches: [codex-windows-owned-product-qualification, codex-windows-owned-close-diagnostic, codex-windows-cursor-qualification]
 permissions:
   contents: read
 concurrency:
@@ -9,11 +9,17 @@ concurrency:
   cancel-in-progress: false
 jobs:
   generated-native:
-    if: github.ref == 'refs/heads/codex-windows-owned-product-qualification' || github.ref == 'refs/heads/codex-windows-owned-close-diagnostic'
+    if: github.ref == 'refs/heads/codex-windows-owned-product-qualification' || github.ref == 'refs/heads/codex-windows-owned-close-diagnostic' || github.ref == 'refs/heads/codex-windows-cursor-qualification'
     runs-on: windows-2022
     timeout-minutes: 45
     env:
-      FOCUSFLOW_QUAL_SCOPE: ${{ github.ref == 'refs/heads/codex-windows-owned-close-diagnostic' && 'close-diagnostic' || 'full' }}
+      FOCUSFLOW_QUAL_SCOPE: ${{ github.ref == 'refs/heads/codex-windows-cursor-qualification' && 'cursor-private' || github.ref == 'refs/heads/codex-windows-owned-close-diagnostic' && 'close-diagnostic' || 'full' }}
+      # Positive hosted-run binding is checked by Python, source, observer and proof worker before mutation.
+      RUNNER_ENVIRONMENT: ${{ runner.environment }}
+      FOCUSFLOW_CURSOR_REVIEWED_SHA: ${{ github.sha }}
+      FOCUSFLOW_CURSOR_REVIEWED_REPOSITORY: UmarAlMukhtar/FocusFlow
+      FOCUSFLOW_CURSOR_REVIEWED_REF: refs/heads/codex-windows-cursor-qualification
+      FOCUSFLOW_CURSOR_REVIEWED_RUN: ${{ github.run_id }}:${{ github.run_attempt }}
       PYTHONDONTWRITEBYTECODE: 1
       CARGO_TERM_COLOR: never
       CARGO_BUILD_JOBS: 2
@@ -95,6 +101,12 @@ jobs:
         run: |
           python -m unittest discover -s tools/windows-owned-product-qualification -p test_diagnostic.py -v 2>&1 | Tee-Object qualification-setup/analyzer.log
           if ($LASTEXITCODE -ne 0) { throw 'Diagnostic controls failed' }
+      - name: Private cursor routing, arithmetic and evidence controls
+        if: github.ref == 'refs/heads/codex-windows-cursor-qualification'
+        shell: pwsh
+        run: |
+          python -m unittest discover -s tools/windows-owned-product-qualification -p test_cursor_qualification.py -v 2>&1 | Tee-Object qualification-setup/analyzer.log
+          if ($LASTEXITCODE -ne 0) { throw 'Private cursor controls failed' }
       - name: Actual native modules and generated fixtures
         if: ${{ !cancelled() && steps.pinned_tools.outcome == 'success' }}
         shell: pwsh
@@ -119,3 +131,8 @@ jobs:
             qualification-upload/cases/**/capture.windows-v2
             qualification-upload/cases/**/screen.mp4
             qualification-upload/cases/**/source.log
+            qualification-upload/cases/**/proof-with-cursor.mp4
+            qualification-upload/cases/**/proof-without-cursor.mp4
+            qualification-upload/cases/**/raw-*.pam
+            qualification-upload/cases/**/cursor-*.pam
+            qualification-upload/cases/**/raster-*.pam
