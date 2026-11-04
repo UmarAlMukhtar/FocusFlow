@@ -49,13 +49,21 @@ class PrivateChecks(unittest.TestCase):
             for name in ['raw-0.pam','cursor-0.pam','raster-0-0.pam','native-color-0.pam','native-color-11.pam']:(d/name).write_bytes(data)
             (d/'proof-with-cursor.mp4').write_bytes(b'private');(d/'geometry.json').write_text('{}');(d/'raw-999.pam').write_bytes(b'not named')
             (case/'source-command-13.json').write_text('{}')
+            probe=case/'alpha-probe';probe.mkdir()
+            for name in ['cursor-10.pam','native-color-10.pam']+[f'raster-10-{i}.pam' for i in range(4)]:(probe/name).write_bytes(data)
+            (probe/'native-color-12.pam').write_bytes(data)
             alpha=case/'alpha-with';alpha.mkdir();(alpha/'native-color-0.pam').write_bytes(data)
             (alpha/'native-color-12.pam').write_bytes(data);(case/'source-command-17.json').write_text('{}')
             hashes=package(ev,root/'absent',root/'qualification-upload')
             expected={f'cases/cursor-borderless-even/session-0/with/{n}' for n in ['raw-0.pam','cursor-0.pam','raster-0-0.pam','native-color-0.pam','native-color-11.pam','proof-with-cursor.mp4','geometry.json']}|{'cases/cursor-borderless-even/session-0/source-command-13.json','cases/cursor-borderless-even/session-0/alpha-with/native-color-0.pam'}
+            expected|={f'cases/cursor-borderless-even/session-0/alpha-probe/{n}' for n in ['cursor-10.pam','native-color-10.pam']+[f'raster-10-{i}.pam' for i in range(4)]}
             self.assertEqual(set(hashes),expected)
             uploaded={p.relative_to(root/'qualification-upload').as_posix() for glob in globs for p in root.glob(glob) if p.is_file()};self.assertTrue(expected<=uploaded)
             self.assertEqual(c.pam(d/'raw-0.pam'),(1,1,bytes([1,2,3,255])))
+            (probe/'capture.json').write_text('{}')
+            with self.assertRaises(AssertionError):c.private_only(case)
+            with self.assertRaises(RuntimeError):package(ev,root/'absent',root/'probe-leak')
+            (probe/'capture.json').unlink()
             (d/'capture.json').write_text('{}')
             with self.assertRaises(AssertionError):c.private_only(case)
             with self.assertRaises(RuntimeError):package(ev,root/'absent',root/'leak')
@@ -198,7 +206,7 @@ class AlphaObserverPaths(unittest.TestCase):
         driver_code="""import json,os,sys,time
 from pathlib import Path
 root=Path(sys.argv[1]);gates=[]
-for i,name in enumerate(['without','with','alpha-without','alpha-with','challenge','closed','unexpected','nested/alpha-with']):
+for i,name in enumerate(['without','with','alpha-without','alpha-with','challenge','closed','alpha-probe','unexpected','nested/alpha-with']):
     d=root/'session-0'/name;d.mkdir(parents=True,exist_ok=True)
     (d/'owned.json').write_text(json.dumps(dict(parent=os.getpid(),worker=100+i*2,encoder=101+i*2)))
     if i<6:gates.append(d/'handles-open')

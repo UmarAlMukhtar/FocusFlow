@@ -90,9 +90,9 @@ pub(super) fn case(root:&Path,w:u32,h:u32,nonce:u16,ffmpeg:&Path,worker:&Path)->
  let fixture=root.join("session-0");fs::create_dir(&fixture)?;fixture_json(&fixture.join("source-request.json"),&serde_json::json!({"width":w,"height":h,"nonce":nonce,"animated":false,"privateProfile":profile}))?;let mut window=GeneratedWindow::observed(fixture.clone())?;let hwnd=HWND(window.hwnd as *mut _);let g=geometry(hwnd)?;
  let mut physical=Vec::with_capacity(3);for [x,y] in [[8,8],[w as i32-8,8],[8,h as i32-8]]{let mut point=POINT{x,y};unsafe{if !ClientToScreen(hwnd,&mut point).as_bool(){return Err("Physical fiducial query failed".into());}}physical.push([point.x,point.y]);}
  fixture_json(&fixture.join("native-topology.json"),&topology()?)?;fixture_json(&fixture.join("resource-paths.json"),&resource_paths(&fixture)?)?;
- let challenges=fixture.join("challenge");fs::create_dir(&challenges)?;
+ let alpha_probe=fixture.join("alpha-probe");fs::create_dir(&alpha_probe)?;
  // Diagnose the required alpha oracle before replaying successful capture controls.
- {let alpha=FixtureCursor::color()?;copied_shape(alpha.0,&challenges,10,0)?;}
+ {let alpha=FixtureCursor::color()?;copied_shape(alpha.0,&alpha_probe,10,0)?;}
  let start_handles=unsafe{GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS)};
  let p=[g.client_origin[0]+w as i32/2,g.client_origin[1]+h as i32/2];position.place(p)?;
  require_disposable()?;
@@ -116,6 +116,7 @@ pub(super) fn case(root:&Path,w:u32,h:u32,nonce:u16,ffmpeg:&Path,worker:&Path)->
   fixture_json(&dir.join("geometry.json"),&serde_json::json!({"selectedHwnd":window.hwnd,"space":"NativeRaw fiducials versus PMv2 independently measured physical client points","physicalAnchors":physical,"clientAnchors":[[8,8],[w-8,8],[8,h-8]],"geometry":g,"rawSize":raw,"encodedSize":[raw[0]+raw[0]%2,raw[1]+raw[1]%2],"withCursor":with_cursor,"profile":profile,"observations":observations,"telemetry":[],"prefix":"rejectedAll","physicalLatencyClaim":false}))?;
  }
  window.command("restore-cursor")?;thread::sleep(Duration::from_millis(100));
+ let challenges=fixture.join("challenge");fs::create_dir(&challenges)?;
  let mut proof=Proof::prepare(&challenges,window.hwnd as u64,g.pid,true,ffmpeg,worker)?;proof.arm(&challenges)?;thread::sleep(Duration::from_millis(150));let mut challenge_rows=Vec::with_capacity(10);
  for (i,action) in ["alpha","hidden","restore-cursor","occlude","unocclude","move-away-back","move","move-back","minimize-restore"].into_iter().enumerate(){window.command(action)?;thread::sleep(Duration::from_millis(40));challenge_rows.push(observe(hwnd,&challenges,i)?);}
  window.resize()?;thread::sleep(Duration::from_millis(100));proof.finish(&challenges)?;fixture_json(&challenges.join("challenges.json"),&serde_json::json!({"observations":challenge_rows,"telemetry":[],"prefix":"rejectedAll","noResumeAfterEqualPolls":true,"observerInputs":"native queries only; independent source actions are checker truth"}))?;

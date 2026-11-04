@@ -36,7 +36,7 @@ def package(evidence,setup,out):
             for name in (CASE_NAMES-{'capture.json','capture.windows-v2','project.json','screen.mp4','session.json'})|{'proof-result.json','cursor-analysis.json','native-topology.json','resource-paths.json'}|{f'source-{kind}-{i}.json' for kind in ['command','ack'] for i in range(3,17)}:
                 p=session/name
                 if p.is_file():candidates.append((p,Path('cases')/mode/'session-0'/name))
-            for proof in ['without','with','alpha-without','alpha-with','challenge','closed','visibility']:
+            for proof in ['without','with','alpha-without','alpha-with','alpha-probe','challenge','closed','visibility']:
                 for name in PRIVATE_NAMES:
                     p=session/proof/name
                     if p.is_file():candidates.append((p,Path('cases')/mode/'session-0'/proof/name))
