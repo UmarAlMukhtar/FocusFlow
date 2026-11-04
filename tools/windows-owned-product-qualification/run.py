@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
+import traceback
 import analyze
 
 ARCHIVE_SHA='e2aaeaa0fdbc397d4794828086424d4aaa2102cef1fb6874f6ffd29c0b88b673'
@@ -64,13 +65,22 @@ def require_exit7(case):
 def bound(root):
     size=0
     for p in root.rglob('*'):
-        if p.is_file():
-            n=p.stat().st_size;size+=n
-            if p.name in {'screen.mp4','proof-with-cursor.mp4','proof-without-cursor.mp4'}:assert n<=64*1024*1024,'64MiB media cap reached'
-            elif p.name=='trace.json':assert n<=4*1024*1024,'4MiB trace cap reached'
-            elif p.suffix=='.pam':assert n<=9*1024*1024,'9MiB raw PAM cap reached'
-            elif p.name=='source-actions.json':assert n<=4096,'4KiB source action cap reached'
-            else:assert n<=16*1024*1024,f'16MiB evidence file cap reached: {p.name}'
+        is_link=False
+        try:
+            is_link=p.is_symlink()
+            if not p.is_file():continue
+            n=p.stat().st_size
+        except FileNotFoundError:
+            # The owned initial handshake atomically renames this one transient file.
+            relative=p.relative_to(root).parts
+            if len(relative)==3 and relative[0] in {'cursor-borderless-even','cursor-decorated-even','cursor-borderless-odd','cursor-decorated-odd'} and relative[1:]==('session-0','source-request.pending') and not is_link:continue
+            raise
+        size+=n
+        if p.name in {'screen.mp4','proof-with-cursor.mp4','proof-without-cursor.mp4'}:assert n<=64*1024*1024,'64MiB media cap reached'
+        elif p.name=='trace.json':assert n<=4*1024*1024,'4MiB trace cap reached'
+        elif p.suffix=='.pam':assert n<=9*1024*1024,'9MiB raw PAM cap reached'
+        elif p.name=='source-actions.json':assert n<=4096,'4KiB source action cap reached'
+        else:assert n<=16*1024*1024,f'16MiB evidence file cap reached: {p.name}'
     assert size<=256*1024*1024,'256MiB aggregate artifact cap reached'
 
 class ExactHandle:
@@ -164,7 +174,7 @@ class GeneratedSources:
         assert not failures,failures
 
 def execute(argv,root,name,timeout=600,env=None,observe=None,parent_death=False):
-    started=time.monotonic();opened={};media={};killed_at=None;kill_qpc=None;receipts=[];error=None
+    started=time.monotonic();opened={};media={};killed_at=None;kill_qpc=None;receipts=[];error=None;error_filename=None;error_traceback=None
     log=root/(name+'.log');receipt=root/(name+'-command.json')
     sources=GeneratedSources(argv[0],observe,env) if observe else None
     with log.open('wb') as out:
@@ -220,17 +230,18 @@ def execute(argv,root,name,timeout=600,env=None,observe=None,parent_death=False)
                 assert before==after,'publication/import changed media bytes'
             if not parent_death:assert code==0,f'command exit {code}'
         except BaseException as exc:
-            error=repr(exc)
+            error=repr(exc);error_filename=str(exc.filename)[:1024] if isinstance(exc,OSError) and exc.filename is not None else None;error_traceback=traceback.format_exc(limit=8)[-8192:]
             if proc.poll() is None:proc.kill();proc.wait(timeout=5)
         finally:
             if sources:
                 try:sources.cleanup(error is not None,parent_death=parent_death and error is None)
-                except BaseException as exc:error=error or repr(exc)
+                except BaseException as exc:
+                    if error is None:error=repr(exc);error_filename=str(exc.filename)[:1024] if isinstance(exc,OSError) and exc.filename is not None else None;error_traceback=traceback.format_exc(limit=8)[-8192:]
             for _,handles in opened.values():
                 for h in handles:
                     if not h.signaled():h.kill()
                     h.close()
-            write(receipt,dict(argv=[str(x) for x in argv],exitCode=proc.returncode,seconds=time.monotonic()-started,error=error,logSha256=sha(log),ownership=receipts))
+            write(receipt,dict(argv=[str(x) for x in argv],exitCode=proc.returncode,seconds=time.monotonic()-started,error=error,errorFilename=error_filename,errorTraceback=error_traceback,logSha256=sha(log),ownership=receipts))
     if error:raise RuntimeError(error)
     return log
 

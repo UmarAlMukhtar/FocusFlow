@@ -227,3 +227,56 @@ while not all(p.exists() for p in gates):time.sleep(.005)
             self.assertEqual(len(receipt['ownership']),6);self.assertIsNone(receipt['error'])
             self.assertTrue(all(r['signaled']==[True,True] and r['fallback'] is False for r in receipt['ownership']))
 
+
+class PendingFileBounds(unittest.TestCase):
+    def test_atomic_pending_rename_during_bound_scan_is_not_a_native_failure(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);case=root/'cursor-borderless-even/session-0';case.mkdir(parents=True);pending=case/'source-request.pending';pending.write_text('{}');published=pending.with_suffix('.json')
+            original=Path.is_file
+            def is_file(path,*args,**kwargs):
+                result=original(path,*args,**kwargs)
+                if path==pending and result:pending.rename(published)
+                return result
+            # Real rename after is_file's successful check reproduces the observer's two-read race.
+            with patch.object(Path,'is_file',is_file):run.bound(root)
+            self.assertEqual(published.read_text(),'{}');self.assertFalse(pending.exists())
+            oversized=root/'trace.json'
+            with oversized.open('wb') as out:out.truncate(4*1024*1024+1)
+            with self.assertRaisesRegex(AssertionError,'4MiB trace cap'):run.bound(root)
+
+    def test_disappearing_permanent_evidence_still_fails_bound_scan(self):
+        import tempfile
+        for name in ['owned.json','unknown.pending']:
+            with self.subTest(name=name),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);receipt=root/name;receipt.write_text('{}');original=Path.is_file
+                def is_file(path,*args,**kwargs):
+                    result=original(path,*args,**kwargs)
+                    if path==receipt and result:receipt.unlink()
+                    return result
+                with patch.object(Path,'is_file',is_file),self.assertRaises(FileNotFoundError):run.bound(root)
+
+    def test_pending_symlink_does_not_hide_disappearing_target(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);case=root/'cursor-borderless-even/session-0';case.mkdir(parents=True);target=root/'target.json';target.write_text('{}');pending=case/'source-request.pending';pending.symlink_to(target);original=Path.is_file
+            def is_file(path,*args,**kwargs):
+                result=original(path,*args,**kwargs)
+                if path==pending and result:target.unlink()
+                return result
+            with patch.object(Path,'is_file',is_file),self.assertRaises(FileNotFoundError):run.bound(root)
+
+    def test_execute_retains_missing_filename_and_bounded_traceback(self):
+        import json,sys,tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);receipt=root/'owned.json';receipt.write_text('{}');original=Path.is_file
+            def is_file(path,*args,**kwargs):
+                result=original(path,*args,**kwargs)
+                if path==receipt and result:receipt.unlink()
+                return result
+            with patch.object(Path,'is_file',is_file),self.assertRaises(RuntimeError):
+                run.execute([sys.executable,'-c','import time;time.sleep(5)'],root,'bound-failure',3)
+            failure=json.loads((root/'bound-failure-command.json').read_text())
+            self.assertIn('FileNotFoundError',failure['error']);self.assertEqual(failure.get('errorFilename'),str(receipt))
+            self.assertIn('bound',failure.get('errorTraceback',''));self.assertIn('owned.json',failure.get('errorTraceback',''))
+            self.assertLessEqual(len(failure['errorTraceback']),8192);self.assertIsNotNone(failure['exitCode'])
