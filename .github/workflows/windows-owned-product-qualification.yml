@@ -134,4 +134,5 @@ jobs:
             qualification-upload/cases/**/proof-without-cursor.mp4
             qualification-upload/cases/**/raw-*.pam
             qualification-upload/cases/**/cursor-*.pam
+            qualification-upload/cases/**/native-color-*.pam
             qualification-upload/cases/**/raster-*.pam

@@ -61,7 +61,7 @@ impl GeneratedWindow{
   Ok(Self{hwnd,dir,sequence:0,closed:false})
  }
  fn command(&mut self,action:&str)->TestResult<()> {
-  self.sequence+=1;let private=fixture_read(&self.dir.join("source-request.json"))?.get("privateProfile").is_some();if self.sequence>if private{12}else{2}{return Err("Too many generated source commands".into());}
+  self.sequence+=1;let private=fixture_read(&self.dir.join("source-request.json"))?.get("privateProfile").is_some();if self.sequence>if private{16}else{2}{return Err("Too many generated source commands".into());}
   fixture_json(&self.dir.join(format!("source-command-{}.json",self.sequence)),&serde_json::json!({"sequence":self.sequence,"action":action}))?;
   let ack=wait_fixture(&self.dir.join(format!("source-ack-{}.json",self.sequence)))?;
   if ack!=serde_json::json!({"sequence":self.sequence,"action":action}){return Err("Generated source acknowledgement mismatch".into());}Ok(())
@@ -82,7 +82,7 @@ fn source_actions(dir:&Path,frequency:Option<i64>,records:&[serde_json::Value],o
 }
 fn source(dir:&Path,w:u32,h:u32,nonce:u16,animated:bool,private_profile:Option<&str>)->TestResult<()> {
  let _fixture_cursor=if private_profile.is_some(){Some(cursor::FixtureCursor::new()?)}else{None};
- let decorated=private_profile==Some("decorated");let action_limit=if private_profile.is_some(){12}else{2};let original_cursor=unsafe{GetCursor()};let mut cursor_variants=Vec::new();let mut occluder=None;
+ let decorated=private_profile==Some("decorated");let action_limit=if private_profile.is_some(){16}else{2};let original_cursor=unsafe{GetCursor()};let mut cursor_variants=Vec::new();let mut occluder=None;
  if !(160..=1920).contains(&w)||!(120..=1080).contains(&h){return Err("Generated geometry outside fixture bounds".into());}
  // Only this process owns this HWND, its canvas and message loop; no input is sent to user windows.
  let hwnd=unsafe{let instance=GetModuleHandleW(None)?;let class=WNDCLASSW{lpfnWndProc:Some(wndproc),hCursor:_fixture_cursor.as_ref().map_or(HCURSOR::default(),|c|c.0),hInstance:instance.into(),lpszClassName:w!("FocusFlowOwnedQualification"),..Default::default()};let _=RegisterClassW(&class);

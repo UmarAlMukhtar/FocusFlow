@@ -51,15 +51,25 @@ fn bitmap(bitmap:HBITMAP)->TestResult<(u32,u32,Vec<u8>)>{
  let lines=unsafe{GetDIBits(dc.0,bitmap,0,h,Some(pixels.as_mut_ptr().cast()),&mut info,DIB_RGB_COLORS)};if lines!=h as i32{return Err("GetDIBits scan count incomplete".into());}Ok((w,h,pixels))
 }
 fn copied_shape(cursor:HCURSOR,dir:&Path,index:usize,fail_stage:u8)->TestResult<math::Shape>{
+ if index>=12{return Err("Cursor diagnostic index cap".into());}
  // CURSORINFO supplies a borrowed cursor. CopyIcon owns a separate reference; only that copy is destroyed.
  let icon=Icon(unsafe{CopyIcon(HICON(cursor.0))?});if fail_stage==1{return Err("Injected failure after owned copy".into());}let mut info=Bitmaps(ICONINFO::default());let result=unsafe{GetIconInfo(icon.0,&mut info.0)};result?;if fail_stage==2{return Err("Injected failure after owned GetIconInfo bitmaps".into());}
  if info.0.fIcon.as_bool()||info.0.hbmMask.is_invalid(){return Err("Not a cursor or missing mask".into());}let hotspot=[info.0.xHotspot,info.0.yHotspot];let(mw,mh,mask)=bitmap(info.0.hbmMask)?;if fail_stage==3{return Err("Injected failure after complete mask DIB read".into());}
  let shape=if info.0.hbmColor.is_invalid(){if mh%2!=0{return Err("Odd monochrome mask height".into());}let half=mh as usize/2*mw as usize;let bits:Vec<bool>=mask.chunks_exact(4).map(|p|p[0]!=0||p[1]!=0||p[2]!=0).collect();math::monochrome(mw,mh/2,hotspot,&bits[..half],&bits[half..])?}else{
-  let(w,h,bgra)=bitmap(info.0.hbmColor)?;if(w,h)!=(mw,mh){return Err("Mask/color dimensions disagree".into());}math::color(w,h,hotspot,&bgra)?
+  let(w,h,bgra)=bitmap(info.0.hbmColor)?;if(w,h)!=(mw,mh){return Err("Mask/color dimensions disagree".into());}
+  if !bgra.chunks_exact(4).any(|p|p[3]!=0){return Err("Missing or ambiguous raw alpha; legacy color/mask cursor unsupported".into());}
+  let raster=Raster::new(w,h)?;if fail_stage==4{return Err("Injected failure after color raster allocation".into());}
+  // Draw the owned copy into zeroed owned DIB storage; raw GetDIBits has no proven premultiplication contract.
+  unsafe{std::slice::from_raw_parts_mut(raster.bits,raster.len)}.fill(0);
+  unsafe{DrawIconEx(raster.dc,0,0,icon.0,w as i32,h as i32,0,None,DI_NORMAL)?;GdiFlush().ok()?;}
+  let pixels=unsafe{std::slice::from_raw_parts(raster.bits,raster.len)};
+  let native:Vec<u8>=pixels.chunks_exact(4).flat_map(|p|[p[2],p[1],p[0],p[3]]).collect();
+  pam(&dir.join(format!("native-color-{index}.pam")),w,h,&native)?;
+  if fail_stage==5{return Err("Injected failure after color draw/flush".into());}math::color(w,h,hotspot,pixels)?
  };
  // Keep failed candidates for diagnosis; only the successful caller publishes shape metadata.
  pam(&dir.join(format!("cursor-{index}.pam")),shape.width,shape.height,&shape.rgba)?;
- native_raster(icon.0,&shape,dir,index)?;Ok(shape)
+ native_raster(HICON(cursor.0),&shape,dir,index)?;Ok(shape)
 }
 fn pam(path:&Path,w:u32,h:u32,pixels:&[u8])->TestResult<()>{if w==0||h==0||w>1920||h>1080||pixels.len()!=w as usize*h as usize*4{return Err("Invalid PAM budget".into());}let mut out=format!("P7\nWIDTH {w}\nHEIGHT {h}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n").into_bytes();out.extend_from_slice(pixels);fs::write(path,out)?;Ok(())}
 #[derive(serde::Serialize)]
@@ -83,7 +93,7 @@ pub(super) fn case(root:&Path,w:u32,h:u32,nonce:u16,ffmpeg:&Path,worker:&Path)->
  let challenges=fixture.join("challenge");fs::create_dir(&challenges)?;
  // Diagnose the required alpha oracle before replaying successful capture controls.
  {let alpha=FixtureCursor::color()?;copied_shape(alpha.0,&challenges,10,0)?;}
- let mut observations=Vec::with_capacity(8);let start_handles=unsafe{GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS)};
+ let start_handles=unsafe{GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS)};
  let p=[g.client_origin[0]+w as i32/2,g.client_origin[1]+h as i32/2];position.place(p)?;
  require_disposable()?;
  // A hosted VM may suppress the pointer until actual mouse input reaches its desktop.
@@ -97,13 +107,15 @@ pub(super) fn case(root:&Path,w:u32,h:u32,nonce:u16,ffmpeg:&Path,worker:&Path)->
  thread::sleep(Duration::from_millis(100));
  position.place(p)?;thread::sleep(Duration::from_millis(150));
  let visibility=fixture.join("visibility");fs::create_dir(&visibility)?;let mut visibility_rows=Vec::with_capacity(3);for(i,point)in [[g.client_origin[0],g.client_origin[1]],[g.client_origin[0]+w as i32-1,g.client_origin[1]+h as i32-1],[g.client_origin[0]+w as i32+10,g.client_origin[1]+h as i32+10]].into_iter().enumerate(){position.place(point)?;thread::sleep(Duration::from_millis(40));visibility_rows.push(observe(hwnd,&visibility,i)?);}fixture_json(&visibility.join("visibility.json"),&serde_json::json!({"observations":visibility_rows,"telemetry":[],"prefix":"rejectedAll","selectedHwnd":window.hwnd}))?;position.place(p)?;thread::sleep(Duration::from_millis(100));
- for (i,with_cursor) in [false,true].into_iter().enumerate(){
-  let dir=fixture.join(if with_cursor{"with"}else{"without"});fs::create_dir(&dir)?;
+ for (name,with_cursor) in [("without",false),("with",true),("alpha-without",false),("alpha-with",true)]{
+  if name=="alpha-without"{window.command("alpha")?;thread::sleep(Duration::from_millis(150));}
+  let dir=fixture.join(name);fs::create_dir(&dir)?;let mut observations=Vec::with_capacity(3);
   let mut proof=Proof::prepare(&dir,window.hwnd as u64,g.pid,with_cursor,ffmpeg,worker)?;let raw=[proof.width,proof.height];proof.arm(&dir)?;
   for j in 0..3{observations.push(observe(hwnd,&dir,j)?);thread::sleep(Duration::from_millis(5));}
   thread::sleep(Duration::from_millis(400));proof.finish(&dir)?;
-  fixture_json(&dir.join("geometry.json"),&serde_json::json!({"selectedHwnd":window.hwnd,"space":"NativeRaw fiducials versus PMv2 independently measured physical client points","physicalAnchors":physical,"clientAnchors":[[8,8],[w-8,8],[8,h-8]],"geometry":g,"rawSize":raw,"encodedSize":[raw[0]+raw[0]%2,raw[1]+raw[1]%2],"withCursor":with_cursor,"profile":profile,"observations":&observations[i*3..],"telemetry":[],"prefix":"rejectedAll","physicalLatencyClaim":false}))?;
+  fixture_json(&dir.join("geometry.json"),&serde_json::json!({"selectedHwnd":window.hwnd,"space":"NativeRaw fiducials versus PMv2 independently measured physical client points","physicalAnchors":physical,"clientAnchors":[[8,8],[w-8,8],[8,h-8]],"geometry":g,"rawSize":raw,"encodedSize":[raw[0]+raw[0]%2,raw[1]+raw[1]%2],"withCursor":with_cursor,"profile":profile,"observations":observations,"telemetry":[],"prefix":"rejectedAll","physicalLatencyClaim":false}))?;
  }
+ window.command("restore-cursor")?;thread::sleep(Duration::from_millis(100));
  let mut proof=Proof::prepare(&challenges,window.hwnd as u64,g.pid,true,ffmpeg,worker)?;proof.arm(&challenges)?;thread::sleep(Duration::from_millis(150));let mut challenge_rows=Vec::with_capacity(10);
  for (i,action) in ["alpha","hidden","restore-cursor","occlude","unocclude","move-away-back","move","move-back","minimize-restore"].into_iter().enumerate(){window.command(action)?;thread::sleep(Duration::from_millis(40));challenge_rows.push(observe(hwnd,&challenges,i)?);}
  window.resize()?;thread::sleep(Duration::from_millis(100));proof.finish(&challenges)?;fixture_json(&challenges.join("challenges.json"),&serde_json::json!({"observations":challenge_rows,"telemetry":[],"prefix":"rejectedAll","noResumeAfterEqualPolls":true,"observerInputs":"native queries only; independent source actions are checker truth"}))?;
@@ -130,14 +142,16 @@ impl Raster{
    let previous=SelectObject(dc,bitmap.into());if previous.is_invalid()||bits.is_null(){let _=DeleteObject(bitmap.into());let _=DeleteDC(dc);return Err("Raster selection failed".into());}Ok(Self{dc,bitmap,previous,bits:bits.cast(),len:w as usize*h as usize*4})}
  }
 }
-fn native_raster(icon:HICON,shape:&math::Shape,dir:&Path,index:usize)->TestResult<()> {
- let raster=Raster::new(shape.width,shape.height)?;
+fn native_raster(original:HICON,shape:&math::Shape,dir:&Path,index:usize)->TestResult<()> {
+ // original is borrowed synchronously; the source/fixture retains its lifetime and ownership.
+ let raster=Raster::new(shape.width,shape.height)?;let mut first_mismatch=None;
  for background in 0..4{
   let mut colors=Vec::with_capacity(shape.rgba.len());
   // The DIB memory belongs to raster until its Drop; no external bitmap is selected or accessed.
-  let pixels=unsafe{std::slice::from_raw_parts_mut(raster.bits,raster.len)};
-  for (i,p) in pixels.chunks_exact_mut(4).enumerate(){let x=i%shape.width as usize;let y=i/shape.width as usize;let rgb=match background{0=>[0,0,0],1=>[255,255,255],2=>if(x/4+y/4)%2==0{[35,35,35]}else{[210,210,210]},_=>[37,91,173]};colors.push(rgb);p.copy_from_slice(&[rgb[2],rgb[1],rgb[0],255]);}
-  unsafe{DrawIconEx(raster.dc,0,0,icon,shape.width as i32,shape.height as i32,0,None,DI_NORMAL)?;GdiFlush().ok()?;}
+  {let pixels=unsafe{std::slice::from_raw_parts_mut(raster.bits,raster.len)};
+  for (i,p) in pixels.chunks_exact_mut(4).enumerate(){let x=i%shape.width as usize;let y=i/shape.width as usize;let rgb=match background{0=>[0,0,0],1=>[255,255,255],2=>if(x/4+y/4)%2==0{[35,35,35]}else{[210,210,210]},_=>[37,91,173]};colors.push(rgb);p.copy_from_slice(&[rgb[2],rgb[1],rgb[0],255]);}}
+  unsafe{DrawIconEx(raster.dc,0,0,original,shape.width as i32,shape.height as i32,0,None,DI_NORMAL)?;GdiFlush().ok()?;}
+  let pixels=unsafe{std::slice::from_raw_parts(raster.bits,raster.len)};
   let mut rgba=Vec::with_capacity(raster.len);let mut mismatch=None;
   for (pixel,((got,source),bg)) in pixels.chunks_exact(4).zip(shape.rgba.chunks_exact(4)).zip(colors).enumerate(){
    for c in 0..3{
@@ -148,8 +162,8 @@ fn native_raster(icon:HICON,shape:&math::Shape,dir:&Path,index:usize)->TestResul
    rgba.extend_from_slice(&[got[2],got[1],got[0],255]);
   }
   pam(&dir.join(format!("raster-{index}-{background}.pam")),shape.width,shape.height,&rgba)?;
-  if let Some(error)=mismatch{return Err(error.into());}
- }Ok(())
+  if first_mismatch.is_none(){first_mismatch=mismatch;}
+ }if let Some(error)=first_mismatch{return Err(error.into());}Ok(())
 }
 pub(super) fn source(dir:&Path,w:u32,h:u32,nonce:u16,profile:&str)->TestResult<()> {
  require_disposable()?;if !["borderless","decorated"].contains(&profile){return Err("Invalid private fixture profile".into());}let mut dpi=DpiScope::enter()?;super::source(dir,w,h,nonce,false,Some(profile))?;dpi.restore()
@@ -168,9 +182,9 @@ impl FixtureCursor{
  }
 }
 fn resource_paths(dir:&Path)->TestResult<serde_json::Value>{
- let cursor=FixtureCursor::new()?;let inverted=FixtureCursor::xor()?;for stage in [1,2,3]{let _=copied_shape(cursor.0,dir,0,stage);}let count=||unsafe{[GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS),GetGuiResources(GetCurrentProcess(),GR_USEROBJECTS)]};let before=count();
- for _ in 0..16{for stage in [1,2,3]{if copied_shape(cursor.0,dir,0,stage).is_ok(){return Err("Injected resource path did not fail".into());}}if copied_shape(inverted.0,dir,0,0).err().is_none_or(|e|!e.to_string().contains("Destination-dependent XOR")){return Err("Native XOR cursor was not rejected explicitly".into());}if copied_shape(HCURSOR::default(),dir,0,0).is_ok(){return Err("Invalid borrowed cursor copy succeeded".into());}}
- let after=count();if before!=after{return Err("Copy/GetIconInfo failure path leaked native resources".into());}Ok(serde_json::json!({"iterations":16,"copyFailure":true,"afterCopyFailure":true,"afterIconInfoFailure":true,"afterDibitsFailure":true,"nativeXorRejected":true,"before":before,"after":after,"partialAcquisitionsOwned":true}))
+ let alpha=FixtureCursor::color()?;let inverted=FixtureCursor::xor()?;for stage in 1..=5{let _=copied_shape(alpha.0,dir,0,stage);}let count=||unsafe{[GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS),GetGuiResources(GetCurrentProcess(),GR_USEROBJECTS)]};let before=count();
+ for _ in 0..16{for stage in 1..=5{let error=copied_shape(alpha.0,dir,0,stage).err().ok_or("Injected resource path did not fail")?;if !error.to_string().starts_with("Injected failure after"){return Err(error);}}if copied_shape(inverted.0,dir,0,0).err().is_none_or(|e|!e.to_string().contains("Destination-dependent XOR")){return Err("Native XOR cursor was not rejected explicitly".into());}if copied_shape(HCURSOR::default(),dir,0,0).is_ok(){return Err("Invalid borrowed cursor copy succeeded".into());}}
+ let after=count();if before!=after{return Err("Copy/GetIconInfo failure path leaked native resources".into());}Ok(serde_json::json!({"iterations":16,"copyFailure":true,"afterCopyFailure":true,"afterIconInfoFailure":true,"afterDibitsFailure":true,"afterColorRasterFailure":true,"afterColorDrawFailure":true,"nativeXorRejected":true,"before":before,"after":after,"partialAcquisitionsOwned":true}))
 }
 fn topology()->TestResult<serde_json::Value>{
  unsafe extern "system" fn monitor(h:HMONITOR,_:HDC,_:*mut RECT,data:LPARAM)->BOOL{

@@ -176,7 +176,7 @@ def execute(argv,root,name,timeout=600,env=None,observe=None,parent_death=False)
                 if observe:
                     sources.poll(proc.pid)
                     ownership_paths=list(observe.glob('session-*/owned.json'))
-                    ownership_paths+=list(observe.glob('session-*/without/owned.json'))+list(observe.glob('session-*/with/owned.json'))+list(observe.glob('session-*/challenge/owned.json'))+list(observe.glob('session-*/closed/owned.json'))
+                    ownership_paths+=list(observe.glob('session-*/without/owned.json'))+list(observe.glob('session-*/with/owned.json'))+list(observe.glob('session-*/alpha-without/owned.json'))+list(observe.glob('session-*/alpha-with/owned.json'))+list(observe.glob('session-*/challenge/owned.json'))+list(observe.glob('session-*/closed/owned.json'))
                     for path in ownership_paths:
                         if path in opened:continue
                         try:data=json.loads(path.read_text(encoding='utf-8'))

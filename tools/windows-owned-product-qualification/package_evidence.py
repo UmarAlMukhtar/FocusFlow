@@ -12,7 +12,7 @@ PIPE_NAMES={'valid','idle','stderr','stdout','closed','cancel-idle','cancel-stde
 COMMANDS={'driver','analyzer','native-platform','core-publication','core-import','mapping-debug','core-pipes','build-cfr_grid_windows','build-FocusFlow','build-windows_owned_qualification','build-windows_encoder_fixture'}|MODES
 
 CURSOR_MODES={'cursor-borderless-even','cursor-decorated-even','cursor-borderless-odd','cursor-decorated-odd'}
-PRIVATE_NAMES={'proof-with-cursor.mp4','proof-without-cursor.mp4','proof-summary.json','geometry.json','trace.json','owned.json','first-write-started.json','challenges.json','visibility.json','close-observation.json'}|{f'raw-{i}.pam' for i in range(2)}|{f'cursor-{i}.pam' for i in range(12)}|{f'raster-{i}-{j}.pam' for i in range(12) for j in range(4)}
+PRIVATE_NAMES={'proof-with-cursor.mp4','proof-without-cursor.mp4','proof-summary.json','geometry.json','trace.json','owned.json','first-write-started.json','challenges.json','visibility.json','close-observation.json'}|{f'raw-{i}.pam' for i in range(2)}|{f'cursor-{i}.pam' for i in range(12)}|{f'native-color-{i}.pam' for i in range(12)}|{f'raster-{i}-{j}.pam' for i in range(12) for j in range(4)}
 COMMANDS|=CURSOR_MODES|{'cursor-portable','cursor-renderer'}
 
 def package(evidence,setup,out):
@@ -33,10 +33,10 @@ def package(evidence,setup,out):
             session=evidence/mode/'session-0'
             for p in session.rglob('*'):
                 if p.name in {'capture.json','capture.windows-v2','project.json','screen.mp4','session.json'}:omitted.append(p.relative_to(evidence).as_posix())
-            for name in (CASE_NAMES-{'capture.json','capture.windows-v2','project.json','screen.mp4','session.json'})|{'proof-result.json','cursor-analysis.json','native-topology.json','resource-paths.json'}|{f'source-{kind}-{i}.json' for kind in ['command','ack'] for i in range(3,13)}:
+            for name in (CASE_NAMES-{'capture.json','capture.windows-v2','project.json','screen.mp4','session.json'})|{'proof-result.json','cursor-analysis.json','native-topology.json','resource-paths.json'}|{f'source-{kind}-{i}.json' for kind in ['command','ack'] for i in range(3,17)}:
                 p=session/name
                 if p.is_file():candidates.append((p,Path('cases')/mode/'session-0'/name))
-            for proof in ['without','with','challenge','closed','visibility']:
+            for proof in ['without','with','alpha-without','alpha-with','challenge','closed','visibility']:
                 for name in PRIVATE_NAMES:
                     p=session/proof/name
                     if p.is_file():candidates.append((p,Path('cases')/mode/'session-0'/proof/name))
