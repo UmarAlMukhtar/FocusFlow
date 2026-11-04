@@ -15,7 +15,6 @@ jobs:
     env:
       FOCUSFLOW_QUAL_SCOPE: ${{ github.ref == 'refs/heads/codex-windows-cursor-qualification' && 'cursor-private' || github.ref == 'refs/heads/codex-windows-owned-close-diagnostic' && 'close-diagnostic' || 'full' }}
       # Positive hosted-run binding is checked by Python, source, observer and proof worker before mutation.
-      RUNNER_ENVIRONMENT: ${{ runner.environment }}
       FOCUSFLOW_CURSOR_REVIEWED_SHA: ${{ github.sha }}
       FOCUSFLOW_CURSOR_REVIEWED_REPOSITORY: UmarAlMukhtar/FocusFlow
       FOCUSFLOW_CURSOR_REVIEWED_REF: refs/heads/codex-windows-cursor-qualification
