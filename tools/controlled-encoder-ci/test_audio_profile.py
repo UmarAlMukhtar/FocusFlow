@@ -69,6 +69,44 @@ class AudioProfileControls(unittest.TestCase):
             with self.subTest(actual=actual), self.assertRaises(ValueError):
                 audio.check_pcm(actual, (.0625, -.125, .125, -.25))
 
+    def test_rate_smoke_accepts_polyphase_ripple_and_rejects_signal_errors(self):
+        # Execute the real rate assertion against the retained two-phase float32 values.
+        tree = ast.parse((validate.BASE / 'windows-audio-profile.py').read_text())
+        call = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name) and node.func.id == 'check_pcm'
+                    and isinstance(node.args[0], ast.Subscript)
+                    and isinstance(node.args[0].value, ast.Name) and node.args[0].value.id == 'rated')
+        assertion = compile(ast.Expression(call), 'rate-smoke-assertion', 'eval')
+        rated = (.25, -.5, .24999728798866272, -.49999457597732544) * 1024
+        try:
+            eval(assertion, vars(audio), {'rated': rated})
+        except ValueError as error:
+            self.fail(str(error))
+        wrong = [tuple(value * 1.001 for value in rated),
+                 tuple(value for left, right in zip(rated[::2], rated[1::2]) for value in (right, left)),
+                 rated[:-1], rated + (.25,)]
+        for value in [float('nan'), float('inf'), -float('inf'), .25002, .24998]:
+            wrong.append(rated[:256] + (value,) + rated[257:])
+        for actual in wrong:
+            with self.subTest(sample_count=len(actual), first_interior=actual[256]), self.assertRaises(ValueError):
+                eval(assertion, vars(audio), {'rated': actual})
+
+    def test_nonresampled_pcm_keeps_strict_amplitude_tolerance(self):
+        # A 2e-6 drift must still fail each real roundtrip, mix and fade assertion.
+        tree = ast.parse((validate.BASE / 'windows-audio-profile.py').read_text())
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name) and node.func.id == 'check_pcm'
+                 and not isinstance(node.args[0], ast.Subscript)]
+        self.assertEqual(len(calls), 3)
+        for drift in [2e-6, -2e-6]:
+            context = dict(vars(audio), first=None, inp=lambda _: [],
+                           render=lambda *args: (.25 + drift, -.5) * 1024,
+                           mixed=(.0625 + drift, -.125) * 512 + (.125, -.25) * 512,
+                           faded=(.25 + drift, -.5) * 1024)
+            for call in calls:
+                with self.subTest(line=call.lineno, drift=drift), self.assertRaises(ValueError):
+                    eval(compile(ast.Expression(call), 'strict-pcm-assertion', 'eval'), context)
+
     def test_pcm_float_frame_and_channel_bounds(self):
         self.assertEqual(audio.pcm_samples(struct.pack('<4f', .25, -.5, 0, 1), 2, 2),
                          (.25, -.5, 0, 1))

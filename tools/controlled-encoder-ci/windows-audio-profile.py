@@ -20,8 +20,8 @@ def pcm_samples(data, frames, channels):
     return samples
 
 
-def check_pcm(actual, expected):
-    if len(actual) != len(expected) or any(not math.isfinite(a) or abs(a - b) > 1e-6
+def check_pcm(actual, expected, *, tolerance=1e-6):
+    if len(actual) != len(expected) or any(not math.isfinite(a) or abs(a - b) > tolerance
                                           for a, b in zip(actual, expected)):
         raise ValueError('PCM amplitude/channel mismatch')
 
@@ -96,7 +96,8 @@ def main():
         check_pcm(faded, (.25, -.5) * 1024)
         # Simple 2x rate smoke only; this does not implement the fixed-Q mapper.
         rated = render('rate-smoke', inp(first), '[0:a]asetrate=24000,aresample=48000[a]', 2048)
-        check_pcm(rated[256:-256], (.25, -.5) * (2048 - 256))
+        # Default SWR finite phase filters have DC ripple in this fixed 2x smoke.
+        check_pcm(rated[256:-256], (.25, -.5) * (2048 - 256), tolerance=1e-5)
         passed = True
     finally:
         result = {'passed': passed, 'candidate_sha256': hashlib.sha256(binary.read_bytes()).hexdigest(),
