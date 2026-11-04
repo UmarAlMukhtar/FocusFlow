@@ -22,7 +22,7 @@ tree and exact resulting tar hash. It never follows a moving branch.
 
 The Fedora44 AMD64 image digest and download-artifact action commit were verified
 by root using official registry/GitHub metadata. The build container installs
-host helpers and the exact RPM-header-derived host ELF library capabilities only from Fedora's `fedora`/`updates` repositories. Exact installed
+host helpers (including native GCC for FFmpeg's host generators) and the exact RPM-header-derived host ELF library capabilities only from Fedora's `fedora`/`updates` repositories. Exact installed
 NVR, source RPM, header/payload SHA256, cached RPM SHA256 and tool executable
 SHA256 identities are recorded at job time. This explicit root-approved host
 helper policy allows repository drift; it does not claim historical host-tool
@@ -103,7 +103,7 @@ python encoder-handoff/recipe/windows-smoke.py --candidate encoder-handoff/candi
 Preparation has not executed the container, DNF, download routes, extraction,
 rebuild, static inspector against a rebuilt PE, or Windows smoke. Those remain
 first-run compatibility/runtime checks, including normal-policy zlib signature
-acceptance. On acquisition failure, the error names the file, received count and exact byte limit; the explicit acquisition-failure.json receipt and completed acquisition.json are uploaded by the failure path. The signed source RPM byte/hash/URL identities are checked against FIX1 final receipts before network work.
+acceptance. On acquisition failure, the error names the file, received count and exact byte limit; the explicit acquisition-failure.json receipt and completed acquisition.json are uploaded by the failure path. Build failures also retain the exact FFmpeg `build/ffmpeg/ffbuild/config.log`; the failure upload does not include the whole build tree. The signed source RPM byte/hash/URL identities are checked against FIX1 final receipts before network work.
 
 No command-only smoke success can qualify hardware recording,
 installed product behavior or distribution/legal closure.

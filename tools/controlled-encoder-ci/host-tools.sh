@@ -4,7 +4,7 @@ set -euo pipefail
 recipe=$(cd -- "$(dirname -- "$0")" && pwd)
 setup=$1
 mkdir -p "$setup"
-dnf -y --setopt=keepcache=True --disablerepo='*' --enablerepo=fedora --enablerepo=updates install python3 make pkgconf-pkg-config rpm-build cpio gnupg2 git diffutils findutils tar xz gawk sed grep 'libc.so.6()(64bit)' 'libgcc_s.so.1()(64bit)' 'libgmp.so.10()(64bit)' 'libm.so.6()(64bit)' 'libmpc.so.3()(64bit)' 'libmpfr.so.6()(64bit)' 'libstdc++.so.6()(64bit)' 'libz.so.1()(64bit)' > "$setup/host-install.log" 2>&1
+dnf -y --setopt=keepcache=True --disablerepo='*' --enablerepo=fedora --enablerepo=updates install python3 make gcc pkgconf-pkg-config rpm-build cpio gnupg2 git diffutils findutils tar xz gawk sed grep 'libc.so.6()(64bit)' 'libgcc_s.so.1()(64bit)' 'libgmp.so.10()(64bit)' 'libm.so.6()(64bit)' 'libmpc.so.3()(64bit)' 'libmpfr.so.6()(64bit)' 'libstdc++.so.6()(64bit)' 'libz.so.1()(64bit)' > "$setup/host-install.log" 2>&1
 python3 "$recipe/validate.py" --host
 python3 - "$setup" <<'PY'
 import hashlib,json,pathlib,shutil,subprocess,sys
@@ -22,7 +22,7 @@ for path in sorted(pathlib.Path('/var/cache').rglob('*.rpm')):
  cache.append({'name':path.name,'bytes':path.stat().st_size,'sha256':sha(path),'identity':subprocess.check_output(['rpm','-qp','--qf',query,str(path)],text=True,timeout=30).strip()})
 (out/'host-cached-rpms.json').write_text(json.dumps(cache,indent=2)+'\n')
 tools=[]
-for name in ['bash','python3','make','pkg-config','rpm','rpmkeys','rpm2cpio','cpio','gpg','git','awk','sed','grep','tar','xz']:
+for name in ['bash','python3','make','gcc','pkg-config','rpm','rpmkeys','rpm2cpio','cpio','gpg','git','awk','sed','grep','tar','xz']:
  path=pathlib.Path(shutil.which(name)).resolve()
  tools.append({'name':name,'path':str(path),'sha256':sha(path),'rpm':subprocess.check_output(['rpm','-qf','--qf',query,str(path)],text=True,timeout=30).strip()})
 (out/'host-executables.json').write_text(json.dumps(tools,indent=2)+'\n')

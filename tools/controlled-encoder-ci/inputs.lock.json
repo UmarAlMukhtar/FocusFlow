@@ -220,6 +220,7 @@
     "host_helper_packages": [
       "python3",
       "make",
+      "gcc",
       "pkgconf-pkg-config",
       "rpm-build",
       "cpio",

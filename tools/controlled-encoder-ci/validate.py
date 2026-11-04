@@ -59,7 +59,7 @@ def main():
     args = parser.parse_args()
     lock = validate(platform=args.platform or args.host)
     if args.host:
-        for tool in ['bash', 'python3', 'make', 'pkg-config', 'rpm', 'rpmkeys', 'rpm2cpio', 'cpio', 'gpg', 'git']:
+        for tool in ['bash', 'python3', 'make', 'gcc', 'pkg-config', 'rpm', 'rpmkeys', 'rpm2cpio', 'cpio', 'gpg', 'git']:
             if not __import__('shutil').which(tool):
                 raise ValueError('Required host tool missing: ' + tool)
     print(json.dumps({'status':'PASS', 'platform_checked':args.platform or args.host,

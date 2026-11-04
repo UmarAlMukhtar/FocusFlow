@@ -60,6 +60,17 @@ class PreparationControls(unittest.TestCase):
         with patch.object(pathlib.Path, 'read_text', read), self.assertRaisesRegex(ValueError, 'host helper policy'):
             validate.validate(platform=True)
 
+    def test_host_gate_rejects_missing_native_compiler(self):
+        for missing in ['gcc', None]:
+            with self.subTest(missing=missing), patch.object(sys, 'argv', ['validate.py', '--host']), \
+                    patch('shutil.which', side_effect=lambda tool: None if tool == missing else '/usr/bin/' + tool), \
+                    patch('sys.stdout', new_callable=io.StringIO):
+                if missing:
+                    with self.assertRaisesRegex(ValueError, 'Required host tool missing: gcc'):
+                        validate.main()
+                else:
+                    validate.main()
+
     def test_tar_rejects_traversal_and_escaping_link(self):
         for name, target in [('../escape', None), ('safe/link', '/tmp/escape')]:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:

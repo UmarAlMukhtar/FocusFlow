@@ -102,6 +102,7 @@ jobs:
             encoder-setup/*.json
             encoder-setup/host-install.log
             encoder-work/target/release-encoder-experiment/candidate/build.log
+            encoder-work/target/release-encoder-experiment/candidate/build/ffmpeg/ffbuild/config.log
             encoder-work/target/release-encoder-experiment/candidate/inspect.log
             encoder-work/target/release-encoder-experiment/candidate/receipts/*.json
             encoder-work/target/release-encoder-experiment/candidate/receipts/*.txt
