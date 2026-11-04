@@ -170,7 +170,7 @@ class AlphaPairChecks(unittest.TestCase):
     def test_connected_alpha_pair_requires_real_partial_pixels_and_both_exemplars(self):
         import json,tempfile,shutil
         import cursor_check as c
-        for fault in [None,'missing-pair','missing-diagnostic','missing-exemplar','wrong-alpha','doubled-candidate','wrong-placement','second-exemplar','changed-observation','opaque-alpha','unchanged-wgc']:
+        for fault in [None,'missing-pair','missing-diagnostic','missing-exemplar','wrong-alpha','doubled-candidate','wrong-placement','second-exemplar','changed-observation','opaque-alpha','unchanged-wgc','wrong-geometry']:
             with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp:
                 root=Path(tmp);clock=self.fixture(root)
                 if fault=='missing-pair':shutil.rmtree(root/'alpha-with')
@@ -181,10 +181,12 @@ class AlphaPairChecks(unittest.TestCase):
                     p=root/'alpha-with/cursor-0.pam';data=p.read_bytes();p.write_bytes(data[:-4]+bytes({'wrong-alpha':[128,64,0,64],'doubled-candidate':[255,128,0,128],'opaque-alpha':[128,64,0,255]}[fault]))
                 if fault in ['wrong-placement','second-exemplar']:
                     p=root/f'alpha-with/raw-{1 if fault=="second-exemplar" else 0}.pam';w,h,data=c.pam(p);data=bytearray(data);data[(48*w+48)*4:(48*w+48)*4+4]=bytes([15,25,35,255]);data[(48*w+49)*4:(48*w+49)*4+4]=bytes([72,45,17,255]);p.write_bytes(p.read_bytes()[:-len(data)]+data)
+                if fault=='wrong-geometry':
+                    p=root/'alpha-with/geometry.json';info=json.loads(p.read_text());info['geometry']['window']=[1,1,97,97];info['geometry']['dwm']=[1,1,97,97];info['geometry']['clientOrigin']=[1,1];p.write_text(json.dumps(info))
                 if fault=='changed-observation':
                     p=root/'alpha-with/geometry.json';info=json.loads(p.read_text());info['observations'][1]['position']=[49,48];info['observations'][1]['cursorInfoPosition']=[49,48];p.write_text(json.dumps(info))
                 # Only the external FFmpeg decode is substituted; native raster, geometry, alpha and raw overlay checks run.
-                with patch('cursor_check.movie',return_value=(clock,30)):
+                with patch('cursor_check.movie',return_value=(clock,30,{})):
                     if fault is None:
                         result=c.check(root,None,None);self.assertIn('alpha-with',result);self.assertFalse(result['productionCursorQualified'])
                     else:
@@ -280,3 +282,31 @@ class PendingFileBounds(unittest.TestCase):
             self.assertIn('FileNotFoundError',failure['error']);self.assertEqual(failure.get('errorFilename'),str(receipt))
             self.assertIn('bound',failure.get('errorTraceback',''));self.assertIn('owned.json',failure.get('errorTraceback',''))
             self.assertLessEqual(len(failure['errorTraceback']),8192);self.assertIsNotNone(failure['exitCode'])
+
+class Codec420Crop(unittest.TestCase):
+    def test_full_coded_planes_keep_odd_crop_chroma_phase(self):
+        import cursor_check as c
+        check=c.codec_crop
+        # 6x4 coded frame:24 Y samples, six distinct U cells, six distinct V cells.
+        expected=bytes([64]*24+[16,100,200,32,110,210]+[220,120,30,230,130,40]);actual=bytearray(expected);actual[0]=255
+        metrics=check(actual,expected,6,4,[1,1,5,3]);self.assertEqual([metrics[p]['samples'] for p in ['Y','U','V']],[8,6,6]);self.assertTrue(all(metrics[p]['max']==0 for p in ['Y','U','V']))
+        for index in [7,24,35]:
+            with self.subTest(index=index):
+                actual=bytearray(expected);actual[index]+=49
+                with self.assertRaisesRegex(AssertionError,'codec-tolerant 420'):check(actual,expected,6,4,[1,1,5,3])
+
+    def test_existing_numeric_codec_limits_apply_to_each_plane(self):
+        import cursor_check as c
+        check=c.codec_crop
+        expected=bytes([64]*36)
+        for start,end in [(0,24),(24,30),(30,36)]:
+            actual=bytearray(expected);actual[start+7 if start==0 else start]=112
+            check(actual,expected,6,4,[1,1,5,3]) # maximum48 with mean below12 passes.
+            actual=bytearray(expected);actual[start:end]=bytes([77])*(end-start)
+            with self.subTest(plane=(start,end)),self.assertRaisesRegex(AssertionError,'codec-tolerant 420'):check(actual,expected,6,4,[1,1,5,3]) # mean13 fails, despite max13.
+
+    def test_planar_size_even_dimensions_and_crop_are_required(self):
+        import cursor_check as c
+        check=c.codec_crop
+        for actual,expected,w,h,crop in [(bytes(35),bytes(36),6,4,[1,1,5,3]),(bytes(36),bytes(35),6,4,[1,1,5,3]),(bytes(36),bytes(36),5,4,[1,1,4,3]),(bytes(36),bytes(36),6,4,[2,1,2,3]),(bytes(36),bytes(36),6,4,[-1,1,5,3]),(bytes(36),bytes(36),6,4,[1,1,7,3])]:
+            with self.subTest(w=w,h=h,crop=crop),self.assertRaises(AssertionError):check(actual,expected,w,h,crop)

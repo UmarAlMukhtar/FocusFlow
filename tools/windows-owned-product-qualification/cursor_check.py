@@ -89,6 +89,17 @@ def overlay(before,after,w,h,shape,pixels,hotspot):
         changed+=before[i*4:i*4+3]!=after[i*4:i*4+3]
     assert changed>0,'WithCursor control has no actual cursor pixels'
 
+def codec_crop(actual,expected,w,h,crop):
+    assert 0<w<=1920 and 0<h<=1080 and w%2==h%2==0,'420 coded dimensions must be bounded and even'
+    assert len(actual)==len(expected)==w*h*3//2,'420 native plane byte count mismatch'
+    left,top,right,bottom=crop;assert 0<=left<right<=w and 0<=top<bottom<=h,'invalid measured codec crop'
+    chroma=[left//2,top//2,(right+1)//2,(bottom+1)//2];metrics={}
+    for name,stride,offset,bounds in [('Y',w,0,crop),('U',w//2,w*h,chroma),('V',w//2,w*h*5//4,chroma)]:
+        x0,y0,x1,y1=bounds;errors=[abs(actual[offset+y*stride+x]-expected[offset+y*stride+x]) for y in range(y0,y1) for x in range(x0,x1)]
+        metrics[name]=dict(max=max(errors),mean=sum(errors)/len(errors),samples=len(errors),bounds=list(bounds))
+        assert max(errors)<=48 and sum(errors)<=12*len(errors),f'codec-tolerant 420 {name} crop mismatch: max={max(errors)}, mean={sum(errors)/len(errors)}'
+    return metrics
+
 def movie(directory,info,ffmpeg,ffprobe,rawanchors,reference=None,crop=None):
     summary=json.loads((directory/'proof-summary.json').read_text())
     assert summary['privateProof'] is True and summary['neverImport'] is True and summary['workerExit']==0 and summary['encoderSignaled'] is True,'Private proof completion was not verified'
@@ -97,19 +108,36 @@ def movie(directory,info,ffmpeg,ffprobe,rawanchors,reference=None,crop=None):
     movie=directory/('proof-with-cursor.mp4' if info['withCursor'] else 'proof-without-cursor.mp4');assert movie.stat().st_size<=64*1024*1024
     meta=json.loads(subprocess.check_output([str(ffprobe),'-v','error','-show_streams','-show_packets','-of','json',movie],timeout=20,text=True))
     assert len(meta['streams'])==1;stream=meta['streams'][0];w,h=info['encodedSize'];assert (stream['width'],stream['height'])==(w,h) and stream['codec_name']=='h264' and stream['pix_fmt']=='yuv420p';analyze.packets(meta['packets'],stream['time_base'],len(picks))
-    proc=subprocess.Popen([str(ffmpeg),'-v','error','-i',movie,'-f','rawvideo','-pix_fmt','rgb24','pipe:1'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL);timer=threading.Timer(20,proc.kill);timer.start()
+    diagnostics=dict(ffmpegVersion=subprocess.check_output([str(ffmpeg),'-version'],timeout=5,text=True).splitlines()[0],comparison='fiducials for dynamic proof',frames=[])
+    if reference is not None:
+        assert 0<w<=1920 and 0<h<=1080 and w%2==h%2==0 and len(reference)==w*h*4,'invalid full coded RGBA reference'
+        assert stream.get('color_space') in {None,'unknown'} and stream.get('color_range') in {None,'unknown','tv'},'unsupported tagged movie color conversion'
+        left,top,right,bottom=crop;crop=[max(0,left),max(0,top),min(w,right),min(h,bottom)]
+        bgra=bytearray(reference);bgra[0::4]=reference[2::4];bgra[2::4]=reference[0::4]
+        # Match the existing untagged BGRA->420 encoder conversion on the full frame; no reference x264 encode.
+        command=[str(ffmpeg),'-v','error','-nostdin','-f','rawvideo','-pixel_format','bgra','-video_size',f'{w}x{h}','-framerate','30','-i','pipe:0','-map','0:v:0','-an','-frames:v','1','-pix_fmt','yuv420p','-f','rawvideo','pipe:1']
+        converted=subprocess.run(command,input=bgra,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=20)
+        assert converted.returncode==0 and len(converted.stdout)==w*h*3//2,'full-frame reference format conversion failed'
+        expected=converted.stdout;diagnostics.update(comparison='native yuv420p planes; full coded reference converted before aligned cell crop',converterCommand=command,crop=crop)
+    proc=subprocess.Popen([str(ffmpeg),'-v','error','-i',movie,'-f','rawvideo','-pix_fmt','rgb24','pipe:1'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL);timer=threading.Timer(20,proc.kill);timer.start();planar=None;planar_timer=None
     try:
-        for _ in picks:
+        if reference is not None:
+            planar=subprocess.Popen([str(ffmpeg),'-v','error','-i',movie,'-f','rawvideo','-pix_fmt','yuv420p','pipe:1'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL);planar_timer=threading.Timer(20,planar.kill);planar_timer.start()
+        for index in range(len(picks)):
             pixels=proc.stdout.read(w*h*3);assert len(pixels)==w*h*3
             for (x,y),color in zip(rawanchors,[40,100,160]):assert all(abs(pixels[(y*w+x)*3+c]-color)<=24 for c in range(3)),'decoded native fiducial lost'
             if reference is not None:
-                left,top,right,bottom=crop;errors=[abs(pixels[(y*w+x)*3+c]-reference[(y*w+x)*4+c]) for y in range(max(0,top),min(h,bottom)) for x in range(max(0,left),min(w,right)) for c in range(3)]
-                assert errors and max(errors)<=48 and sum(errors)<=12*len(errors),'codec-tolerant static cursor crop mismatch'
+                left,top,right,bottom=crop;errors=[abs(pixels[(y*w+x)*3+c]-reference[(y*w+x)*4+c]) for y in range(top,bottom) for x in range(left,right) for c in range(3)];assert errors,'empty static cursor crop'
+                planes=codec_crop(planar.stdout.read(w*h*3//2),expected,w,h,crop)
+                diagnostics['frames'].append(dict(index=index,rawRgbMax=max(errors),rawRgbMean=sum(errors)/len(errors),legacyRgbPassed=max(errors)<=48 and sum(errors)<=12*len(errors),planes=planes))
         assert proc.stdout.read(1)==b'' and proc.wait(timeout=5)==0
+        if planar is not None:assert planar.stdout.read(1)==b'' and planar.wait(timeout=5)==0
     finally:
-        timer.cancel()
-        if proc.poll() is None:proc.kill();proc.wait(timeout=5)
-    return clock,len(picks)
+        for child,deadline in [(proc,timer),(planar,planar_timer)]:
+            if child is not None:
+                deadline.cancel()
+                if child.poll() is None:child.kill();child.wait(timeout=5)
+    return clock,len(picks),diagnostics
 
 def check(case,ffmpeg,ffprobe):
     private_only(case);results={};raw={};controls={}
@@ -119,7 +147,7 @@ def check(case,ffmpeg,ffprobe):
         # Validate padding once; no crop, fitted scale or DPI multiplication.
         assert all(pixels[(y*w+x)*4:(y*w+x)*4+3]==bytes(3) for y in range(h) for x in range(w) if x>=rw or y>=rh),'right/bottom padding not black'
         assert info['withCursor'] is (mode in ['with','alpha-with']) and len(info['observations'])==3,'stationary pair mode/observation count mismatch'
-        row0=info["observations"][0];s0=row0["shape"];assert s0 is not None;left=row0["position"][0]-origin[0]-s0["hotspot"][0];top=row0["position"][1]-origin[1]-s0["hotspot"][1];clock,frames=movie(d,info,ffmpeg,ffprobe,native,pixels,[left-2,top-2,left+s0["width"]+2,top+s0["height"]+2]);times=[]
+        row0=info["observations"][0];s0=row0["shape"];assert s0 is not None;left=row0["position"][0]-origin[0]-s0["hotspot"][0];top=row0["position"][1]-origin[1]-s0["hotspot"][1];clock,frames,movie_diagnostics=movie(d,info,ffmpeg,ffprobe,native,pixels,[left-2,top-2,left+s0["width"]+2,top+s0["height"]+2]);times=[]
         assert info['telemetry']==[] and info['prefix']=='rejectedAll' and info['physicalLatencyClaim'] is False
         for i,row in enumerate(info['observations']):
             assert row['telemetryAccepted'] is False and row['before']==row['after']==g and row['consistent'] is True,'ambiguous stationary required profile'
@@ -135,7 +163,7 @@ def check(case,ffmpeg,ffprobe):
         for index in range(2):
             ew,eh,exemplar=pam(d/f'raw-{index}.pam');assert (ew,eh)==(w,h) and anchors(w,h,exemplar)==native,'stationary raw geometry changed'
             exemplars.append(exemplar)
-        raw[mode]=exemplars;results[mode]=dict(frames=frames,origin=origin,rawAnchors=native,times=times,normalization='physical hotspot minus proven unit origin divided by encoded dimensions once; no telemetry admitted')
+        raw[mode]=exemplars;results[mode]=dict(frames=frames,movieDiagnostics=movie_diagnostics,origin=origin,rawAnchors=native,times=times,normalization='physical hotspot minus proven unit origin divided by encoded dimensions once; no telemetry admitted')
         if mode in ['with','alpha-with']:
             without='alpha-without' if mode=='alpha-with' else 'without'
             assert controls[without]==controls[mode],'cursor pair geometry, placement or shape changed'
@@ -154,18 +182,18 @@ def check(case,ffmpeg,ffprobe):
     assert rows[7]['before']['window']==info['geometry']['window'],'move-back did not restore fixture geometry'
     trace=json.loads((challenge/'trace.json').read_text());assert any(r['kind']=='geometry' for r in trace['events']),'resize cutoff not observed'
     challenge_info=json.loads((case/'with/geometry.json').read_text());challenge_info['observations']=rows
-    _,challenge_frames=movie(challenge,challenge_info,ffmpeg,ffprobe,results['with']['rawAnchors'])
+    _,challenge_frames,challenge_diagnostics=movie(challenge,challenge_info,ffmpeg,ffprobe,results['with']['rawAnchors'])
     visibility=json.loads((case/'visibility/visibility.json').read_text());assert visibility['telemetry']==[] and visibility['prefix']=='rejectedAll';v=visibility['observations'];assert len(v)==3 and all(row['telemetryAccepted'] is False for row in v);assert v[2]['hitRoot']!=info['selectedHwnd'],'outside point still belongs to target'
     closed=case/'closed';close=json.loads((closed/'close-observation.json').read_text());assert close['workerEndedBeforeFinish'] and close['manualStopRequested'] is False
     trace_close=json.loads((closed/'trace.json').read_text());assert trace_close['sourceClosed'] is True or trace_close['sourceAvailabilityEnd']=='unavailable','close lacks automatic cause'
     close_info=dict(withCursor=True,encodedSize=[trace_close['width']+trace_close['width']%2,trace_close['height']+trace_close['height']%2])
     cw,ch,close_pixels=pam(closed/'raw-0.pam')
     assert [cw,ch]==close_info['encodedSize'],'resized raw proof dimensions disagree'
-    _,closed_frames=movie(closed,close_info,ffmpeg,ffprobe,anchors(cw,ch,close_pixels))
-    results['automaticClose']=dict(frames=closed_frames,cause='wgcClosed' if trace_close['sourceClosed'] else 'sourceUnavailableStop')
+    _,closed_frames,closed_diagnostics=movie(closed,close_info,ffmpeg,ffprobe,anchors(cw,ch,close_pixels))
+    results['automaticClose']=dict(frames=closed_frames,movieDiagnostics=closed_diagnostics,cause='wgcClosed' if trace_close['sourceClosed'] else 'sourceUnavailableStop')
     resource=json.loads((case/'resource-paths.json').read_text());assert resource['iterations']==16 and resource['before']==resource['after'] and resource['partialAcquisitionsOwned'] is True and resource['afterDibitsFailure'] is True and resource['afterColorRasterFailure'] is True and resource['afterColorDrawFailure'] is True and resource['nativeXorRejected'] is True
     topology=json.loads((case/'native-topology.json').read_text());assert topology['actualMonitors'] and topology['profileAwareness']=='PMv2 only'
-    results['challenges']=dict(frames=challenge_frames,actions=expected_actions,telemetryAccepted=0)
+    results['challenges']=dict(frames=challenge_frames,movieDiagnostics=challenge_diagnostics,actions=expected_actions,telemetryAccepted=0)
     result=json.loads((case/'proof-result.json').read_text());assert result['gdiStart']==result['gdiEnd'] and result['positionRestored'] and result['dpiRestored'] and result['showCountMutated'] is False
     results['scope']='private raw/clock/static cursor controls only';results['telemetryAccepted']=0;results['productionCursorQualified']=False
     (case/'cursor-analysis.json').write_text(json.dumps(results,indent=2)+'\n');return results
