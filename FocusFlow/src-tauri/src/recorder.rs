@@ -900,7 +900,10 @@ async fn start_prepared_recording(state:&RecorderState, reservation:&mut StartRe
         log,
     };
 
-    if let Err((error, active)) = transfer_active(state, active) {
+    if let Err((error, mut active)) = transfer_active(state, active) {
+        if let Some(audio) = active.audio_recorder.as_mut() {
+            audio.request_stop();
+        }
         active.click_tracker.request_stop();
         match active.capture {
             ActiveCapture::Ffmpeg { child, .. } => crate::capture_guard::close_and_reap(child),
@@ -1051,7 +1054,7 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
         notice,
         capture,
         mut video_clock,
-        audio_recorder,
+        mut audio_recorder,
         mic_device_name,
         click_tracker,
         output_path,
@@ -1066,6 +1069,10 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
 
     #[cfg(windows)]
     let mut notice = notice;
+    // Stop sampling before waiting on the video encoder to close.
+    if let Some(audio) = audio_recorder.as_mut() {
+        audio.request_stop();
+    }
     click_tracker.request_stop();
 
     let backend = capture.backend();
@@ -1077,9 +1084,7 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
 
     // ── Stop microphone recording ─────────────────────────────────────────
     //
-    // Stop audio after video so we don't hold the WASAPI stream open while
-    // the video finalizes.  Audio stop failure is non-fatal: the video
-    // session is still saved and `has_mic_audio` is set to false in metadata.
+    // Join the already-stopping microphone owner. Audio failure is non-fatal.
     let has_mic_audio = stop_audio_recorder(audio_recorder, &output_path);
     // ── End microphone stop ───────────────────────────────────────────────
 

@@ -190,8 +190,11 @@ impl AudioRecorder {
         Err(startup_error)
     }
     pub fn stop(mut self) -> AudioResult<()> { self.finish() }
-    fn finish(&mut self) -> AudioResult<()> {
+    pub(crate) fn request_stop(&mut self) {
         if let Some(stop) = self.stop.take() { let _ = stop.send(()); }
+    }
+    fn finish(&mut self) -> AudioResult<()> {
+        self.request_stop();
         match self.owner.take() {
             Some(owner) => owner.join().map_err(|_| AudioError::new("audio_thread_panicked", "Audio owner stopped unexpectedly", true))?,
             None => Ok(()),
@@ -467,6 +470,36 @@ mod tests {
         fn check<T: Send + Sync>() {}
         check::<AudioRecorder>();
     }
+    #[test]
+    fn stop_signal_reaches_owner_while_finalization_is_still_pending() {
+        let (stop, stop_rx) = mpsc::channel();
+        let (ack, ack_rx) = mpsc::channel();
+        let (finish, finish_rx) = mpsc::channel();
+        let owner = thread::spawn(move || {
+            stop_rx.recv().unwrap();
+            ack.send(()).unwrap();
+            finish_rx.recv().unwrap();
+            assert!(matches!(stop_rx.try_recv(), Err(mpsc::TryRecvError::Disconnected)));
+            Ok(())
+        });
+        let mut recorder = AudioRecorder { stop: Some(stop), owner: Some(owner) };
+
+        recorder.request_stop();
+        let acknowledged = ack_rx.recv_timeout(std::time::Duration::from_secs(1));
+        let finalized_before_release = recorder.owner.as_ref().unwrap().is_finished();
+        recorder.request_stop();
+        let signal_removed = recorder.stop.is_none();
+        drop(recorder.stop.take());
+        let released = finish.send(());
+        let stopped = recorder.stop();
+
+        acknowledged.unwrap();
+        assert!(!finalized_before_release);
+        assert!(signal_removed);
+        released.unwrap();
+        stopped.unwrap();
+    }
+
     #[test]
     fn unavailable_device_fails_before_returning_a_recording() {
         let path = std::env::temp_dir().join("focusflow-nonexistent-device.wav");

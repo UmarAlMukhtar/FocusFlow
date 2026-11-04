@@ -77,7 +77,18 @@ pub(super) fn case(root:&Path,w:u32,h:u32,nonce:u16,ffmpeg:&Path,worker:&Path)->
  let fixture=root.join("session-0");fs::create_dir(&fixture)?;fixture_json(&fixture.join("source-request.json"),&serde_json::json!({"width":w,"height":h,"nonce":nonce,"animated":false,"privateProfile":profile}))?;let mut window=GeneratedWindow::observed(fixture.clone())?;let hwnd=HWND(window.hwnd as *mut _);let g=geometry(hwnd)?;
  let mut physical=Vec::with_capacity(3);for [x,y] in [[8,8],[w as i32-8,8],[8,h as i32-8]]{let mut point=POINT{x,y};unsafe{if !ClientToScreen(hwnd,&mut point).as_bool(){return Err("Physical fiducial query failed".into());}}physical.push([point.x,point.y]);}
  fixture_json(&fixture.join("native-topology.json"),&topology()?)?;fixture_json(&fixture.join("resource-paths.json"),&resource_paths(&fixture)?)?;let mut observations=Vec::with_capacity(8);let start_handles=unsafe{GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS)};
- let p=[g.client_origin[0]+w as i32/2,g.client_origin[1]+h as i32/2];position.place(p)?;thread::sleep(Duration::from_millis(150));
+ let p=[g.client_origin[0]+w as i32/2,g.client_origin[1]+h as i32/2];position.place(p)?;
+ require_disposable()?;
+ // A hosted VM may suppress the pointer until actual mouse input reaches its desktop.
+ unsafe {
+  use ::windows::Win32::UI::Input::KeyboardAndMouse::*;
+  let inputs=[1,-1].map(|dx|INPUT{r#type:INPUT_MOUSE,Anonymous:INPUT_0{mi:MOUSEINPUT{dx,dy:0,dwFlags:MOUSEEVENTF_MOVE,..Default::default()}}});
+  if SendInput(&inputs,std::mem::size_of::<INPUT>() as i32)!=inputs.len() as u32{
+   return Err("Hosted cursor wake input was rejected".into());
+  }
+ }
+ thread::sleep(Duration::from_millis(100));
+ position.place(p)?;thread::sleep(Duration::from_millis(150));
  let visibility=fixture.join("visibility");fs::create_dir(&visibility)?;let mut visibility_rows=Vec::with_capacity(3);for(i,point)in [[g.client_origin[0],g.client_origin[1]],[g.client_origin[0]+w as i32-1,g.client_origin[1]+h as i32-1],[g.client_origin[0]+w as i32+10,g.client_origin[1]+h as i32+10]].into_iter().enumerate(){position.place(point)?;thread::sleep(Duration::from_millis(40));visibility_rows.push(observe(hwnd,&visibility,i)?);}fixture_json(&visibility.join("visibility.json"),&serde_json::json!({"observations":visibility_rows,"telemetry":[],"prefix":"rejectedAll","selectedHwnd":window.hwnd}))?;position.place(p)?;thread::sleep(Duration::from_millis(100));
  for (i,with_cursor) in [false,true].into_iter().enumerate(){
   let dir=fixture.join(if with_cursor{"with"}else{"without"});fs::create_dir(&dir)?;
