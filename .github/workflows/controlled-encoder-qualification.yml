@@ -1,15 +1,15 @@
-name: Controlled encoder qualification
+name: Controlled encoder audio profile qualification
 on:
   push:
-    branches: [codex-controlled-encoder-qualification]
+    branches: [codex-controlled-encoder-audio-qualification]
 permissions:
   contents: read
 concurrency:
-  group: controlled-encoder-qualification
+  group: controlled-encoder-audio-qualification
   cancel-in-progress: false
 jobs:
   reviewed-inputs:
-    if: github.ref == 'refs/heads/codex-controlled-encoder-qualification'
+    if: github.ref == 'refs/heads/codex-controlled-encoder-audio-qualification'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -146,6 +146,11 @@ jobs:
         run: |
           python encoder-handoff/recipe/windows-smoke.py --candidate encoder-handoff/candidate/ffmpeg.exe --ffmpeg-reference $env:ENCODER_REFERENCE --ffprobe-reference $env:ENCODER_PROBE --output encoder-evidence 2>&1 | Tee-Object encoder-setup/smoke.log
           if ($LASTEXITCODE -ne 0) { throw 'Controlled candidate consumer qualification incomplete' }
+      - name: Bounded private PCM audio profile
+        shell: pwsh
+        run: |
+          python encoder-handoff/recipe/windows-audio-profile.py --candidate encoder-handoff/candidate/ffmpeg.exe --output encoder-audio-evidence 2>&1 | Tee-Object encoder-setup/audio-profile.log
+          if ($LASTEXITCODE -ne 0) { throw 'Controlled audio profile qualification incomplete' }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -161,3 +166,7 @@ jobs:
             encoder-evidence/smoke/*.mp4
             encoder-evidence/smoke/*.png
             encoder-evidence/smoke/*.txt
+            encoder-audio-evidence/*.json
+            encoder-audio-evidence/*.stdout
+            encoder-audio-evidence/*.stderr
+            encoder-audio-evidence/*.f32le

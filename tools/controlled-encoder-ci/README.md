@@ -1,4 +1,4 @@
-# Controlled Windows encoder CI
+# Controlled Windows encoder audio profile CI
 
 This dedicated qualification lane builds a **new** controlled PE and runs that
 PE's bounded generated consumer commands on Windows. It does not replace a
@@ -6,7 +6,7 @@ FocusFlow sidecar or run desktop capture, microphone capture, Tauri, installers,
 or the product's Rust lifecycle. WAV fallback is explicitly modeled by the
 existing command smoke harness; no product fallback integration claim is made.
 
-The workflow listens only to `codex-controlled-encoder-qualification`. Publication
+The workflow listens only to `codex-controlled-encoder-audio-qualification`. Publication
 of this staged payload requires root review. Run permissions are contents-read;
 there is no push, release, tag, repository upload, or credential setup step.
 
@@ -36,7 +36,10 @@ are checked in and hash-pinned; signature verification uses private temporary
 RPM/GnuPG databases and never imports into the host's key stores. zlib retains
 its historical DSA1024/SHA1 authentication limit; no policy override is permitted.
 
-The original build flags and two-job commands are reused. The original recipe's
+The original two-job commands are reused. The profile adds only filters
+`amix`, `asetrate`, `afade`, encoder `pcm_f32le`, and demuxer/muxer
+`pcm_f32le` (runtime format `f32le`) for private sequential float PCM I/O.
+No source version, target tool, library, capture input or dependency is added. The original recipe's
 full environment dump is replaced by an explicit build-variable allowlist, and
 the recipe is invoked under `env -i`. The inspector reuses the existing config,
 PE, imports, symbol, static-link and notice checks. Its baseline config is a
@@ -52,7 +55,7 @@ this CI input artifact is not a repack of the older full source bundle.
 
 ## Flow and artifact boundaries
 
-1. Ubuntu runs eight offline controls and checks pinned metadata.
+1. Ubuntu runs 15 offline controls and checks pinned metadata.
 2. The pinned disposable Fedora44 container installs/records official host
    helpers, downloads exact inputs, validates hashes/signatures, and extracts
    target RPM payloads into a new owned root without running RPM scriptlets.
@@ -107,3 +110,24 @@ acceptance. On acquisition failure, the error names the file, received count and
 
 No command-only smoke success can qualify hardware recording,
 installed product behavior or distribution/legal closure.
+
+
+## Additional audio profile boundary
+
+The existing 50 Windows consumer commands remain in the lane. A separate
+`windows-audio-profile.py` runs nine candidate commands: startup/version and
+capability listings, raw-float write/reopen, distinguishable stereo fixed
+0.5/0.5 mixing across sibling EOF, complementary 256-sample triangular fades,
+and a simple 2x rate smoke. Output is at most 2048 stereo frames per raw file;
+commands have 20-second deadlines and use explicit generated owned paths.
+Python checks exact frame/channel byte counts, finite float samples, expected
+amplitude and unchanged fixed gain. Receipts and file hashes include failures.
+No independent tool encodes fixtures. The new script is not the fixed-Q mapper
+and does not qualify mapper context/seek/short-segment policy or native capture.
+
+This is a preparation candidate. The script has not run on Windows here; no
+new binary has been built. The unchanged selected-member gate may reject a
+new build if additional filters/PCM support change the 394 external members.
+Resolve such a failure by separately reviewing exact new contributions, never
+by weakening/removing that gate. Historical pending header/legal/source-delivery
+limits remain open. Root review precedes publication on the separate branch.

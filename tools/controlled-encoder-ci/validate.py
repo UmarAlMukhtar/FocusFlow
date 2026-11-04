@@ -5,6 +5,7 @@ import json
 import pathlib
 import re
 import subprocess
+import shlex
 
 BASE = pathlib.Path(__file__).resolve().parent
 
@@ -20,8 +21,23 @@ def validate_source_receipts(lock, receipts):
                 raise ValueError(f"Signed source receipt mismatch: {name} {field}: lock={row[field]} signed={signed[field]}")
 
 
+def validate_audio_profile(recipe):
+    # Configure uses pcm_f32le; the CLI raw format is named f32le.
+    command = next(line for line in recipe.splitlines() if '/configure" --disable-autodetect' in line)
+    options = dict(token[2:].split('=', 1) for token in shlex.split(command)
+                   if token.startswith('--enable-') and '=' in token)
+    required = {'filter': {'amix', 'asetrate', 'afade'}, 'encoder': {'pcm_f32le'},
+                'demuxer': {'pcm_f32le'}, 'muxer': {'pcm_f32le'}}
+    for kind, features in required.items():
+        enabled = set(options.get('enable-' + kind, '').split(','))
+        if not features <= enabled or 'f32le' in enabled:
+            raise ValueError('Incomplete audio profile: ' + kind)
+    return required
+
+
 def validate(platform=False):
     lock = json.loads((BASE / 'inputs.lock.json').read_text())
+    validate_audio_profile((BASE / 'build.sh').read_text())
     validate_source_receipts(lock, json.loads((BASE / 'provenance/source-rpm-acquisition.json').read_text()))
     names = []
     for row in lock['files']:

@@ -263,5 +263,5 @@
     "signature ownertrust is undefined",
     "Host helper versions are selected by official Fedora44 repos at job time and recorded, unlike exact pinned target RPMs; no historical PE hash reproduction claim."
   ],
-  "adapted_recipe_sha256": "873753e1fe4dadbbe102e30af3757f325746d2fd3bacbb992a63509e81817a82"
+  "adapted_recipe_sha256": "a629ec115ef22e52ebba71e5cfc66afe909f2046317ac682dd57f2f5038809c4"
 }

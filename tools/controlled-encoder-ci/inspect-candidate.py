@@ -10,6 +10,8 @@ sets={}
 for kind in kinds:
  enabled=lambda x:sorted(re.findall(r'^#define CONFIG_(\w+)_'+kind+r' 1$',x,re.M))
  expected=enabled(linux) if kind!='INDEV' else ['GDIGRAB','LAVFI']
+ additions={'FILTER':['AMIX','ASETRATE','AFADE'],'ENCODER':['PCM_F32LE'],'DEMUXER':['PCM_F32LE'],'MUXER':['PCM_F32LE']}
+ expected=sorted(set(expected)|set(additions.get(kind,[])))
  actual=enabled(config);assert actual==expected,(kind,actual,expected);sets[kind]=actual
 for token in ['CONFIG_NETWORK','CONFIG_NONFREE','CONFIG_VERSION3','CONFIG_SHARED','HAVE_PTHREADS']:
  assert f'#define {token} 0' in general,token
@@ -24,7 +26,7 @@ assert not re.search(r'-march=native|-mtune=native',flags)
 assert '-march=x86-64 -mtune=generic' in flags
 # config component tables + linked component symbols substantiate static allowlist (no PE executed).
 nm=cmd([m/'bin/x86_64-w64-mingw32-nm',c/'build/ffmpeg/ffmpeg_g.exe'],'pe-symbols.txt')
-for symbol in ['ff_libx264_encoder','ff_aac_encoder','ff_png_encoder','ff_rawvideo_demuxer','ff_gdigrab_demuxer','ff_h264_decoder','ff_vf_format','x264_encoder_open_165']:
+for symbol in ['ff_libx264_encoder','ff_aac_encoder','ff_png_encoder','ff_rawvideo_demuxer','ff_gdigrab_demuxer','ff_h264_decoder','ff_vf_format','x264_encoder_open_165','ff_af_amix','ff_af_asetrate','ff_af_afade','ff_pcm_f32le_encoder','ff_pcm_f32le_demuxer','ff_pcm_f32le_muxer']:
  assert symbol in nm,symbol
 pe=cmd([m/'bin/x86_64-w64-mingw32-objdump','-p',binary],'pe-private-header.txt')
 headers=cmd([m/'bin/x86_64-w64-mingw32-objdump','-f',binary],'pe-file-header.txt')
@@ -55,7 +57,7 @@ archives=sorted(set(re.findall(r'([^\s()]+\.a)\(([^)]+)\)',linkmap)))
 save('link-inputs.json',{'files':inputs,'linker_synthetic_labels':[x for x in loads if x=='dll stuff']})
 save('archive-members.json',[{'archive':a,'member':b} for a,b in archives])
 save('pe-imports.json',{'format':'pei-x86-64','imports':imports,'executed':False,'os_resolution_tested':False,'compiler_runtime_dlls':[]})
-save('feature-assertions.json',{'all_assertions_passed':True,'method':'static generated config and linked unstripped PE symbols; no executable run','exact_enabled_component_sets':sets,'baseline':'accepted Linux candidate ee4cbd38b7ecf22071a93596f3521b06bb35cc4ededc9a85dfa105e29465180a; replace XCBGRAB with GDIGRAB','runtime_cpu_dispatch':True,'generic_x86_64_c_flags':True,'x264_win32_threads':True,'ffmpeg_win32_threads':True,'network':False,'future_amix':False})
+save('feature-assertions.json',{'all_assertions_passed':True,'method':'static generated config and linked unstripped PE symbols; no executable run','exact_enabled_component_sets':sets,'baseline':'accepted Linux candidate ee4cbd38b7ecf22071a93596f3521b06bb35cc4ededc9a85dfa105e29465180a; replace XCBGRAB with GDIGRAB; explicit audio profile additions','runtime_cpu_dispatch':True,'generic_x86_64_c_flags':True,'x264_win32_threads':True,'ffmpeg_win32_threads':True,'network':False,'audio_profile_additions':additions,'mapper_algorithm_qualified':False})
 for name,src in [('ffmpeg-config.h','build/ffmpeg/config.h'),('ffmpeg-config_components.h','build/ffmpeg/config_components.h'),('ffmpeg-config.mak','build/ffmpeg/ffbuild/config.mak'),('ffmpeg-config.log','build/ffmpeg/ffbuild/config.log'),('x264-config.h','build/x264/config.h'),('x264-config.mak','build/x264/config.mak'),('x264-config.log','build/x264/config.log')]:shutil.copy2(c/src,out/name)
 for name,root,patterns in [('ffmpeg',c/'sources/ffmpeg-8.0.3',['COPYING*','LICENSE.md']),('x264',c/'sources/x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55',['COPYING']),('zlib',c/'sources/zlib-1.3.2',['LICENSE'])]:
  dest=c/'notices'/name;dest.mkdir(exist_ok=True)
