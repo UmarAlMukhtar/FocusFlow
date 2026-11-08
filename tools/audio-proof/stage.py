@@ -371,7 +371,7 @@ def build(root, observed):
     if head != observed['source_sha']:
         raise ValueError('Checkout differs from observed source SHA')
     before = source_inputs(root)
-    checked(directory, 'rustup-install', ['rustup', 'toolchain', 'install', '1.89.0', '--profile', 'minimal'], env)
+    checked(directory, 'rustup-install', ['rustup', 'toolchain', 'install', '1.89.0', '--profile', 'minimal', '--no-self-update'], env)
     sysroot = Path(checked(directory, 'sysroot', ['rustc', '+1.89.0', '--print', 'sysroot'], env, 30))
     rustc = sysroot / 'bin/rustc.exe'
     cargo = sysroot / 'bin/cargo.exe'
