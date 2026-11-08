@@ -87,6 +87,95 @@ class VisualStudioTests(unittest.TestCase):
     def summary(self):
         return json.loads((self.directory / 'vswhere-summary.json').read_text())
 
+    def test_build_forwards_only_literal_observed_programdata_without_changing_safe_environment(self):
+        self.ambient['ProgramData'] = 'D:/Observed Common Data'
+        ambient_before = self.ambient.copy()
+        safe_before = stage.safe_environment()
+        self.outputs['vswhere'] = b'C:/VS\r\n'
+        self.directory.rmdir()  # build owns creation
+        commands = []
+        real_identity = stage.identity
+        def identity(path, root=None):
+            if path.name == 'vswhere.exe':
+                return dict(real_identity(self.tool), path=str(path))
+            return real_identity(path, root)
+        def checked(directory, label, argv, env, seconds=600):
+            commands.append((label, env.copy()))
+            if label == 'git-head': return 'source-sha'
+            if label == 'sysroot': return 'C:/rust'
+            return ''
+        with patch.object(stage, 'active_job', return_value=1), \
+             patch.object(stage, 'source_inputs', return_value=[]), \
+             patch.object(stage, 'checked', checked), \
+             patch.object(stage, 'identity', identity), \
+             patch.object(Path, 'iterdir', side_effect=ValueError('fixture stops before compiler selection')):
+            with self.assertRaisesRegex(ValueError, 'fixture stops before compiler selection'):
+                stage.build(self.root, {'source_sha': 'source-sha'})
+        expected = {'PATH': 'safe-path', 'ProgramData': 'D:/Observed Common Data',
+                    'CARGO_HOME': str(self.root / stage.CARGO),
+                    'CARGO_TARGET_DIR': str(self.root / stage.TARGET),
+                    'CARGO_BUILD_JOBS': '2', 'CARGO_TERM_COLOR': 'never'}
+        self.assertEqual([label for label, _ in commands],
+                         ['git-head', 'rustup-install', 'sysroot', 'rustc-version', 'cargo-version'])
+        for _, env in commands:
+            self.assertEqual(env, expected)
+        self.assertEqual([call[0] for call in self.calls], ['vswhere'])
+        self.assertEqual(self.calls[0][2], expected)
+        self.assertEqual(safe_before, {'PATH': 'safe-path'})
+        self.assertEqual(stage.safe_environment(), safe_before)
+        self.assertEqual(self.ambient, ambient_before)
+
+    def test_build_rejects_missing_invalid_or_nonliteral_programdata_before_commands(self):
+        self.directory.rmdir()
+        invalid = [None, '', ' ', 'relative', r'\\server\share', 'C:/missing',
+                   'C:/linked/data', 'C:/Data/../Other', ' C:/ProgramData',
+                   'C:/ProgramData ', 'C:/ProgramData\n', 'C:/ProgramData\r\n',
+                   'C:/ProgramData\nC:/Other', 'C:/ProgramData\x00']
+        with patch.object(stage, 'active_job', side_effect=AssertionError('job query reached')), \
+             patch.object(stage, 'checked', side_effect=AssertionError('tool command reached')):
+            for index, value in enumerate(invalid):
+                with self.subTest(candidate=value):
+                    case_root = self.root / ('case-' + str(index))
+                    case_root.mkdir()
+                    if value is None: self.ambient.pop('ProgramData', None)
+                    else: self.ambient['ProgramData'] = value
+                    with self.assertRaisesRegex(ValueError, 'ProgramData'):
+                        stage.build(case_root, {'source_sha': 'source-sha'})
+                    self.assertEqual(list((case_root / stage.STAGE).iterdir()), [])
+
+    def test_discovery_controller_does_not_receive_build_only_programdata(self):
+        for name in ['GITHUB_REPOSITORY', 'GITHUB_REF', 'GITHUB_WORKFLOW_REF', 'GITHUB_WORKFLOW_SHA',
+                     'GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_JOB', 'RUNNER_NAME',
+                     'ImageOS', 'RUNNER_ARCH', 'RUNNER_OS', 'RUNNER_ENVIRONMENT', 'GITHUB_ACTIONS']:
+            self.ambient[name] = 'fixture-observation'
+        build_request = {}
+        for name, filename in [('executable', 'private_audio_proof.exe'),
+                               ('source_input_map', 'source-input-map.json'),
+                               ('compiler_input_map', 'compiler-input-map.json'),
+                               ('tool_identities', 'tool-identities.json')]:
+            path = self.directory / filename
+            path.write_bytes(stage.encoded({'inputs': []}))
+            build_request[name] = stage.identity(path, self.root)
+        build_raw = stage.encoded(build_request)
+        stage.write_new(self.directory / 'build-request.json', build_raw)
+        request_raw = stage.encoded({'job_id': 1,
+                                    'request_sha256': stage.hashlib.sha256(build_raw).hexdigest()})
+        stage.write_new(self.directory / 'approval-request.json', request_raw)
+        captured = []
+        def controller(directory, argv, env, stdin):
+            captured.append(env)
+            raise ValueError('fixture controller boundary')
+        with patch.object(stage, 'active_job', return_value=1), \
+             patch.object(stage, 'controller_workspace', return_value=r'C:\fixture'), \
+             patch.object(stage, 'run_controller', controller):
+            with self.assertRaisesRegex(ValueError, 'fixture controller boundary'):
+                stage.discover(self.root, {})
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0]['PATH'], 'safe-path')
+        self.assertEqual(captured[0]['FOCUSFLOW_AUDIO_JOB_ID'], '1')
+        for name in ['ProgramData', 'ALLUSERSPROFILE', 'GH_TOKEN']:
+            self.assertNotIn(name, captured[0])
+
     def test_build_rejects_empty_selection_before_msvc_cargo_or_admission(self):
         self.outputs['vswhere-programdata'] = b'C:/VariantVS\n'
         self.directory.rmdir()  # build owns creation

@@ -444,6 +444,11 @@ def build(root, observed):
     directory = root / STAGE
     directory.mkdir()
     env = safe_environment()
+    program_data = os.environ.get('ProgramData')
+    if (program_data is None or windows_directory_status(program_data) != 'valid'
+            or program_data != program_data.strip()):
+        raise ValueError('Build requires a valid observed literal ProgramData directory')
+    env['ProgramData'] = program_data
     env.update(CARGO_HOME=str(root / CARGO), CARGO_TARGET_DIR=str(root / TARGET),
                CARGO_BUILD_JOBS='2', CARGO_TERM_COLOR='never')
     observed['job_id'] = active_job(observed)
