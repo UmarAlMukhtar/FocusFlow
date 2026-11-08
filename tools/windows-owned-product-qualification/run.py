@@ -180,6 +180,12 @@ def production_file(path,root):
 def production_stat(info):
     return (info.st_dev,info.st_ino,info.st_mode,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
 
+def production_snapshot_stable(snapshot):
+    before,after,current,_,initial=snapshot
+    # Windows path ctime is creation time; handle ctime is change time (Python 3.12).
+    # Preserve both providers' full metadata; only join fields with common semantics.
+    return before==after and initial==current and before[:5]==current[:5]
+
 def production_read(path,root):
     production_file(path,root);initial=production_stat(path.lstat())
     assert stat.S_ISREG(initial[2]) and initial[3]<=4096,'production control must be a regular file <=4KiB'
@@ -201,8 +207,8 @@ def production_read(path,root):
         production_file(path,root);current=production_stat(path.lstat())
         assert initial[:3]==before[:3]==after[:3]==current[:3],'production control replaced during read'
         assert after[3]<=4096 and current[3]<=4096,'production control cap'
-        if before==after==current:assert len(raw)==after[3],'production control byte count changed'
-        snapshot=(before,after,current,hashlib.sha256(raw).hexdigest())
+        snapshot=(before,after,current,hashlib.sha256(raw).hexdigest(),initial)
+        if production_snapshot_stable(snapshot):assert len(raw)==after[3],'production control byte count changed'
     if error is not None:
         error.production_snapshot=snapshot
         raise error
@@ -210,7 +216,7 @@ def production_read(path,root):
 
 def production_remember(path,root,value,snapshot,controls):
     production_file(path,root)
-    assert snapshot[0]==snapshot[1]==snapshot[2]==production_stat(path.lstat()),'production control changed before observation'
+    assert production_snapshot_stable(snapshot) and snapshot[2]==production_stat(path.lstat()),'production control changed before observation'
     assert path not in controls or controls[path]==snapshot,'production control replaced'
     controls[path]=snapshot
     return value
@@ -227,7 +233,7 @@ def initial_owned_snapshot(state,snapshot):
     identity=snapshot[0][:3]
     assert state.setdefault('initialOwnedIdentity',identity)==identity,'initial production ownership control replaced'
     assert time.monotonic()-state['initialOwnedAt']<2,'initial ownership publication deadline'
-    return snapshot[0]==snapshot[1]==snapshot[2]
+    return production_snapshot_stable(snapshot)
 
 def production_payload(data,expected):
     return type(data) is dict and set(data)==set(expected) and all(type(data[k]) is type(v) and data[k]==v for k,v in expected.items())

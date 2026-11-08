@@ -364,3 +364,73 @@ class ProductionFinalRouting(unittest.TestCase):
                     with patch.object(Path,'stat',disappearing):run.bound(root,production_parent=(case.name,11))
                 else:
                     with self.assertRaises(AssertionError):run.bound(root,production_parent=(case.name,11))
+
+class ProductionProviderStability(unittest.TestCase):
+    def test_distinct_stable_provider_ctimes_keep_single_handle_bytes(self):
+        # Linux cannot produce Windows' creation-time/path vs change-time/handle split.
+        # Only fstat metadata is adapted; path checks, one open/read, JSON and digest are real.
+        import hashlib,os
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);path=root/'control.json';raw=b'{"value":7}';path.write_bytes(raw)
+            original=os.fstat;opens=Path.open;opened=[]
+            def handle_stat(fd):
+                info=original(fd)
+                return SimpleNamespace(**{key:getattr(info,key) for key in ['st_dev','st_ino','st_mode','st_size','st_mtime_ns']},st_ctime_ns=info.st_ctime_ns+100)
+            def opening(candidate,*args,**kwargs):
+                if candidate==path:opened.append(candidate)
+                return opens(candidate,*args,**kwargs)
+            with patch('run.os.fstat',side_effect=handle_stat),patch.object(Path,'open',opening):
+                value,snapshot=run.production_read(path,root)
+                self.assertEqual(value,{'value':7});self.assertEqual(snapshot[3],hashlib.sha256(raw).hexdigest())
+                self.assertEqual(run.production_remember(path,root,value,snapshot,{}),value)
+                with patch('run.time.monotonic',return_value=10.):
+                    self.assertTrue(run.initial_owned_snapshot({'initialOwnedAt':10.},snapshot))
+            self.assertEqual(len(opened),1)
+
+    def test_partial_owned_uses_same_provider_stability_without_authorizing(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);path=root/'owned.json';path.write_bytes(b'{"encoder":');original=os.fstat
+            def handle_stat(fd):
+                info=original(fd)
+                return SimpleNamespace(**{key:getattr(info,key) for key in ['st_dev','st_ino','st_mode','st_size','st_mtime_ns']},st_ctime_ns=info.st_ctime_ns+100)
+            with patch('run.os.fstat',side_effect=handle_stat),patch('run.time.monotonic',return_value=10.):
+                with self.assertRaises(json.JSONDecodeError) as caught:run.production_read(path,root)
+                self.assertTrue(run.incomplete_owned_json(caught.exception))
+                self.assertTrue(run.initial_owned_snapshot({'initialOwnedAt':10.},caught.exception.production_snapshot))
+            self.assertFalse((root/'handles-open').exists())
+
+    def test_each_provider_change_and_cross_provider_join_stays_strict(self):
+        # Alter only the metadata observation boundary; the actual bounded file read stays real.
+        for observation,field in [(0,5),(1,5),(2,5),(3,5),(4,5),(2,3),(3,3),(2,4),(3,4),(2,1),(3,1)]:
+            with self.subTest(observation=observation,field=field),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);path=root/'control.json';path.write_bytes(b'{"value":7}');base=run.production_stat(path.stat())
+                observations=[list(base) for _ in range(5)];observations[observation][field]+=1
+                with patch('run.production_stat',side_effect=[tuple(x) for x in observations]):
+                    with self.assertRaises(AssertionError):run.production_control(path,root,{})
+        for field in [3,4]:
+            with self.subTest(cross_provider_field=field),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);path=root/'control.json';path.write_bytes(b'{"value":7}');base=run.production_stat(path.stat())
+                handle=list(base);handle[field]+=1
+                with patch('run.production_stat',side_effect=[base,tuple(handle),tuple(handle),base,base]):
+                    with self.assertRaises(AssertionError):run.production_control(path,root,{})
+
+    def test_stable_provider_ctime_difference_does_not_bypass_byte_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);path=root/'control.json';path.write_bytes(b'{"value":7}');base=list(run.production_stat(path.stat()));base[3]+=1
+            handle=base.copy();handle[5]+=100
+            with patch('run.production_stat',side_effect=[tuple(base),tuple(handle),tuple(handle),tuple(base)]):
+                with self.assertRaisesRegex(AssertionError,'byte count'):run.production_read(path,root)
+
+    def test_cached_digest_and_each_provider_ctime_are_immutable(self):
+        for change in ['bytes','path-ctime','handle-ctime']:
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);path=root/'control.json';path.write_bytes(b'{"value":7}');base=run.production_stat(path.stat());cache={}
+                with patch('run.production_stat',return_value=base):run.production_control(path,root,cache)
+                path_meta=list(base);handle=list(base)
+                if change=='bytes':path.write_bytes(b'{"value":8}')
+                elif change=='path-ctime':path_meta[5]+=1
+                else:handle[5]+=1
+                observations=[path_meta,handle,handle,path_meta,path_meta]
+                with patch('run.production_stat',side_effect=[tuple(x) for x in observations]):
+                    with self.assertRaisesRegex(AssertionError,'production control replaced'):run.production_control(path,root,cache)

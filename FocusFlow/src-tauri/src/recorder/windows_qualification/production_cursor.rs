@@ -1,5 +1,8 @@
 //! Source-only production qualification entry. No release-family switch; separate native approval required.
 use super::*;
+#[path = "production_failure.rs"]
+mod production_failure;
+use production_failure::{report, Stage};
 use focusflow_core::cursor_observation::ModelProfile;
 pub(in crate::recorder) const MODE: &str = "--focusflow-owned-production-cursor-fixture";
 /// Only this owned-fixture module constructs candidate access. It never changes release admission.
@@ -172,11 +175,11 @@ pub(super) fn case(
     fixture_json(
         &root.join("production-geometry.json"),
         &serde_json::json!({"profile":profile,"physicalAnchors":physical,"initialPointerPosition":[initial_pointer.x,initial_pointer.y],"clientSize":[w,h],"originPolicy":"dwmExtendedFrameTranslationV1; reject disagreement; never fit"}),
-    )?;
+    ).map_err(|error| report(Stage::Geometry, error))?;
     let (window_capture, bounds) = window_capture_plan_from_hwnd(
         HWND(window.hwnd as *mut _),
         "FocusFlow generated owned content",
-    )?;
+    ).map_err(|error| report(Stage::Plan, error))?;
     let plan = CapturePlan {
         source: RecordingSource::Window {
             hwnd: window.hwnd.to_string(),
@@ -195,9 +198,11 @@ pub(super) fn case(
         ffmpeg_args: vec![],
         window_capture: Some(window_capture),
     };
-    let defaults = crate::export::ExportSettings::default().legacy_defaults()?;
+    let defaults = crate::export::ExportSettings::default().legacy_defaults()
+        .map_err(|error| report(Stage::Defaults, error))?;
     let state = RecorderState::new();
-    let mut reservation = StartReservation::acquire(&state)?;
+    let mut reservation = StartReservation::acquire(&state)
+        .map_err(|error| report(Stage::Reservation, error))?;
     let mut recording = windows_capture::Session::prepare_fixture(
         &session,
         &plan,
@@ -205,9 +210,11 @@ pub(super) fn case(
         ffmpeg,
         worker,
         &permission,
-    )?;
-    recording.arm(&session, &mut reservation)?;
-    let owned = windows_capture::qualification::Handles::observe(&recording)?;
+    ).map_err(|error| report(Stage::Prepare, error))?;
+    recording.arm(&session, &mut reservation)
+        .map_err(|error| report(Stage::Arm, error))?;
+    let owned = windows_capture::qualification::Handles::observe(&recording)
+        .map_err(|error| report(Stage::Observe, error))?;
     if fs::symlink_metadata(root.join("production-actions-complete.json")).is_ok() {
         return Err("Premature production hold completion".into());
     }
