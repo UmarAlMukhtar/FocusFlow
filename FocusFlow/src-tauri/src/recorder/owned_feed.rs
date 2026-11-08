@@ -14,6 +14,37 @@ impl Geometry {
   Ok(Self{width:width as usize,height:height as usize,encoded_width:ew,encoded_height:eh,bytes})
  }
 }
+pub enum CaptureGate {
+ Warming {deadline:std::time::Instant},
+ Frozen {geometry:Geometry},
+ Armed {geometry:Geometry,admission:i64},
+}
+#[derive(Clone,Copy,Debug)]
+pub enum FrameAction {Discard,GeometryChanged,Copy{geometry:Geometry,admission:i64}}
+impl CaptureGate {
+ pub fn new(deadline:std::time::Instant)->Self {Self::Warming{deadline}}
+ pub fn observe(&mut self,content:(i32,i32),texture:(u32,u32),now:std::time::Instant)->Result<FrameAction,&'static str> {
+  match self {
+   Self::Warming{deadline}=>{
+    if now>=*deadline{return Err("Timed out waiting for matching window dimensions");}
+    let geometry=Geometry::new(u32::try_from(content.0).map_err(|_|"Invalid window content width")?,u32::try_from(content.1).map_err(|_|"Invalid window content height")?)?;
+    Geometry::new(texture.0,texture.1)?;
+    if geometry.matches(content,texture){*self=Self::Frozen{geometry};}
+    Ok(FrameAction::Discard)
+   },
+   Self::Frozen{geometry}=>Ok(if geometry.matches(content,texture){FrameAction::Discard}else{FrameAction::GeometryChanged}),
+   Self::Armed{geometry,admission}=>Ok(if geometry.matches(content,texture){FrameAction::Copy{geometry:*geometry,admission:*admission}}else{FrameAction::GeometryChanged}),
+  }
+ }
+ pub fn geometry(&self)->Option<Geometry> {
+  match self {Self::Warming{..}=>None,Self::Frozen{geometry}|Self::Armed{geometry,..}=>Some(*geometry)}
+ }
+ pub fn arm(&mut self,admission:i64)->Result<(),&'static str> {
+  if admission<0{return Err("Invalid native clock admission");}
+  let Self::Frozen{geometry}=self else {return Err("Window capture must be frozen before admission");};
+  *self=Self::Armed{geometry:*geometry,admission};Ok(())
+ }
+}
 #[derive(Default)]
 pub struct OwnedCount {pub live:AtomicUsize}
 pub struct OwnedPixels {pub bytes:Vec<u8>,live:Arc<OwnedCount>}
@@ -63,6 +94,66 @@ pub fn write_frame(writer:&mut impl Write,bytes:&[u8],written:&mut usize)->io::R
 mod tests {
  use super::*;
  fn source(seq:u64,t:i64,p:i64)->Source {Source{seq,native:t,published:p,pixels:Arc::new(OwnedPixels::copy(&[seq as u8;16],8,Geometry::new(2,2).unwrap(),Arc::new(OwnedCount::default())).unwrap())}}
+ #[test] fn startup_geometry_freezes_first_equal_callback_without_pixels() {
+  use std::time::{Duration,Instant};
+  let t0=Instant::now();let mut gate=CaptureGate::new(t0+Duration::from_secs(2));
+  assert!(matches!(gate.observe((322,272),(336,279),t0+Duration::from_millis(1)),Ok(FrameAction::Discard)));
+  assert!(gate.geometry().is_none());
+  assert!(matches!(gate.observe((322,272),(322,272),t0+Duration::from_millis(2)),Ok(FrameAction::Discard)));
+  let frozen=gate.geometry().unwrap();assert_eq!((frozen.width,frozen.height),(322,272));
+  assert!(matches!(gate.observe((322,272),(322,272),t0+Duration::from_millis(3)),Ok(FrameAction::Discard)));
+  gate.arm(123).unwrap();
+  assert!(matches!(gate.observe((322,272),(322,272),t0+Duration::from_millis(4)),Ok(FrameAction::Copy{geometry,admission:123}) if (geometry.width,geometry.height)==(322,272)));
+ }
+ #[test] fn startup_geometry_deadline_invalid_and_postfreeze_changes_fail() {
+  use std::time::{Duration,Instant};
+  let t0=Instant::now();let deadline=t0+Duration::from_secs(2);
+  for bad in [(0,272),(-1,272),(1,272),(16385,272),(3840,2160),(322,0),(322,-1),(322,1),(322,16385)] {
+   let mut gate=CaptureGate::new(deadline);
+   assert!(gate.observe(bad,(322,272),t0).is_err(),"invalid content: {bad:?}");
+   assert!(gate.geometry().is_none());
+  }
+  for bad in [(0,272),(1,272),(16385,272),(3840,2160),(322,0),(322,1),(322,16385),(u32::MAX,272)] {
+   let mut gate=CaptureGate::new(deadline);
+   assert!(gate.observe((322,272),bad,t0).is_err(),"invalid texture: {bad:?}");
+   assert!(gate.geometry().is_none());
+  }
+  for now in [deadline,deadline+Duration::from_nanos(1)] {
+   for texture in [(322,272),(336,279)] {
+    let mut gate=CaptureGate::new(deadline);
+    assert!(gate.observe((322,272),texture,now).is_err());assert!(gate.geometry().is_none());
+   }
+  }
+  for arm in [false,true] {
+   for (content,texture) in [((323,272),(322,272)),((322,272),(323,272)),((323,272),(323,272)),((-1,272),(322,272))] {
+    let mut gate=CaptureGate::new(deadline);
+    assert!(matches!(gate.observe((322,272),(322,272),deadline-Duration::from_nanos(1)),Ok(FrameAction::Discard)));
+    if arm {gate.arm(123).unwrap();}
+    assert!(matches!(gate.observe(content,texture,deadline),Ok(FrameAction::GeometryChanged)));
+    let frozen=gate.geometry().unwrap();assert_eq!((frozen.width,frozen.height),(322,272));
+   }
+  }
+  let mut gate=CaptureGate::new(deadline);
+  assert!(gate.arm(123).is_err());assert!(gate.geometry().is_none());
+  gate.observe((322,272),(322,272),t0).unwrap();
+  assert!(gate.arm(-1).is_err());
+  assert!(matches!(gate.observe((322,272),(322,272),deadline),Ok(FrameAction::Discard)));
+  gate.arm(0).unwrap();assert!(gate.arm(123).is_err());
+  assert!(matches!(gate.observe((322,272),(322,272),deadline),Ok(FrameAction::Copy{admission:0,..})));
+ }
+ #[test] fn startup_gate_action_is_not_upgraded_by_later_arm() {
+  use std::time::{Duration,Instant};
+  let t0=Instant::now();let mut gate=CaptureGate::new(t0+Duration::from_secs(2));
+  gate.observe((322,272),(322,272),t0).unwrap();
+  let entered_frozen=gate.observe((322,272),(322,272),t0+Duration::from_millis(1)).unwrap();
+  gate.arm(3_000_000).unwrap();assert!(matches!(entered_frozen,FrameAction::Discard));
+  let FrameAction::Copy{admission,..}=gate.observe((322,272),(322,272),t0).unwrap() else {panic!("armed callback must authorize copy")};
+  let mut selector=Selector::new(admission,3_000_000).unwrap();
+  assert!(!admitted(9_999_999,admission,3_000_000).unwrap());
+  assert!(!selector.push(source(0,9_999_999,3_000_000)).unwrap());assert_eq!(selector.epoch,None);
+  assert!(selector.push(source(1,10_000_001,3_000_001)).unwrap());assert_eq!(selector.epoch,Some(10_000_001));
+  assert_eq!(selector.select(0,3_100_001).unwrap().seq,1);
+ }
  #[test] fn admission_and_non_10mhz_cutoff_are_exact() {
   for (t,a,f,want) in [(9_999_999,3_000_000,3_000_000,false),(10_000_000,3_000_000,3_000_000,true),(10_000_001,3_000_000,3_000_000,true)] {assert_eq!(admitted(t,a,f).unwrap(),want);}
   for (s,want) in [(3_099_999,0),(3_100_000,1),(3_100_001,1),(3_200_000,2),(2_000_000,0)] {assert_eq!(complete_cells(10_000_000,s,3_000_000).unwrap(),want);}

@@ -40,7 +40,7 @@ fn rejects_bad_time_or_schema() {
     for bad in [-0.1, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 86400.000001, u64::MAX as f64] { assert!(seconds_to_us(bad).is_err(),"{bad}"); }
     assert_eq!(seconds_to_us(86400.0).unwrap(),86_400_000_000);
     let good=fixture_project(); validate(&good).unwrap();
-    let mut doc=good.clone(); doc.schema_version=5; assert_eq!(validate(&doc).unwrap_err().code,ErrorCode::UnsupportedSchema);
+    let mut doc=good.clone(); doc.schema_version=6; assert_eq!(validate(&doc).unwrap_err().code,ErrorCode::UnsupportedSchema);
     let mut doc=good.clone(); doc.clips.clear(); assert_eq!(validate(&doc).unwrap_err().field.as_deref(),Some("clips"));
     let mut doc=good.clone(); doc.timing.audio_offset_us=Some(0); assert!(validate(&doc).is_err());
     let mut doc=good.clone(); doc.clips[0].out_us=6_000_000; assert_eq!(validate(&doc).unwrap_err().field.as_deref(),Some("clips[0].outUs"));

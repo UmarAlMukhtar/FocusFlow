@@ -43,7 +43,7 @@ fn doc(bounds:CaptureBounds,duration_us:u64)->ProjectDocument {
     ProjectDocument{schema_version:3,project_id:"fixture".into(),revision:0,frame_style:Default::default(),
         video:VideoAsset{cursor:CursorMode::Separate,path:"screen.mp4".into(),width:bounds.width,height:bounds.height,duration_us},
         cursor:Some(CursorAsset{index_path:"cursor/index.json".into()}),cursor_settings:CursorSettings{enabled:true,style:CursorStyle::Arrow,..Default::default()},
-        microphone:None,timing:Timing{provenance:TimingProvenance::LegacyUnknown,audio_offset_us:None},camera:CameraDefaults{pan_transition_us:0,settle_us:0},
+        audio_tracks: None, microphone:None,timing:Timing{provenance:TimingProvenance::LegacyUnknown,audio_offset_us:None},camera:CameraDefaults{pan_transition_us:0,settle_us:0},
         clips:vec![Clip{id:"clip-0".into(),in_us:0,out_us:duration_us}],zooms:vec![],clicks:vec![],warnings:vec![]}
 }
 fn consumer(f:&Fixture)->std::sync::Arc<cursor::PreparedCursor> {

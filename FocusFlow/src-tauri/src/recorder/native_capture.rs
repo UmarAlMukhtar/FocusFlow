@@ -118,7 +118,7 @@ fn complete_snapshot(manifest:&mut CaptureManifestV1,defaults:LegacyDefaults,sav
             schema_version:3,revision:0,project_id:manifest.capture_id.clone(),frame_style:Default::default(),
             video:VideoAsset {path:"screen.mp4".into(),width:saved.video.width,height:saved.video.height,duration_us:saved.video.duration_us,cursor:mode},
             cursor:separate.then_some(CursorAsset {index_path:"cursor/index.json".into()}),cursor_settings:CursorSettings {enabled:separate&&!drawing_disabled,..Default::default()},
-            microphone:has_mic.then_some(AudioAsset {path:"mic.wav".into()}),timing:Timing {provenance:TimingProvenance::LegacyUnknown,audio_offset_us:None},
+            audio_tracks: None, microphone:has_mic.then_some(AudioAsset {path:"mic.wav".into()}),timing:Timing {provenance:TimingProvenance::LegacyUnknown,audio_offset_us:None},
             camera:CameraDefaults {pan_transition_us:defaults.pan_transition_us,settle_us:defaults.settle_us},
             clips:vec![Clip {id:"clip-0".into(),in_us:0,out_us:saved.video.duration_us}],zooms:converted.zooms,clicks:converted.clicks,warnings,
         },

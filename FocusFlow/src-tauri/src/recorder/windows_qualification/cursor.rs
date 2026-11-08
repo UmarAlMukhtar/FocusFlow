@@ -12,7 +12,8 @@ pub(in crate::recorder) fn require_disposable()->Result<(),String>{
 }
 struct DpiScope{previous:DPI_AWARENESS_CONTEXT,restored:bool}
 impl DpiScope{
- fn enter()->TestResult<Self>{require_disposable()?;
+ fn enter()->TestResult<Self>{require_disposable()?;Self::enter_checked()}
+ fn enter_checked()->TestResult<Self>{
   // Only this observer thread changes context; the previous opaque value is restored on every exit.
   unsafe{let previous=SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);if previous.0.is_null(){return Err("PMv2 context switch failed".into());}let scope=Self{previous,restored:false};if !AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(),DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2).as_bool(){return Err("Observer is not PMv2".into());}Ok(scope)}
  }
@@ -174,6 +175,10 @@ fn native_raster(original:HICON,shape:&math::Shape,dir:&Path,index:usize)->TestR
   pam(&dir.join(format!("raster-{index}-{background}.pam")),shape.width,shape.height,&rgba)?;
   if first_mismatch.is_none(){first_mismatch=mismatch;}
  }if let Some(error)=first_mismatch{return Err(error.into());}Ok(())
+}
+pub(super) fn metadata_source(dir:&Path,w:u32,h:u32,nonce:u16)->TestResult<()> {
+ crate::recorder::windows_capture::qualification::startup::require_disposable()?;
+ if(w,h,nonce)!=(320,240,601){return Err("Unexpected metadata source fixture".into());}let mut dpi=DpiScope::enter_checked()?;super::source(dir,w,h,nonce,false,Some("startup-metadata"))?;dpi.restore()
 }
 pub(super) fn source(dir:&Path,w:u32,h:u32,nonce:u16,profile:&str)->TestResult<()> {
  require_disposable()?;if !["borderless","decorated"].contains(&profile){return Err("Invalid private fixture profile".into());}let mut dpi=DpiScope::enter()?;super::source(dir,w,h,nonce,false,Some(profile))?;dpi.restore()

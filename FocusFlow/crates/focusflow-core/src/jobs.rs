@@ -117,6 +117,7 @@ impl JobManager {
             // Check the aggregate decoder/input budget before creating a job or spawning a child.
             crate::preview::inputs(&snapshot, &plan, selection, kind != JobKind::PreviewStill)?;
         }
+        if snapshot.document.schema_version==5 {crate::audio::compile_audio(&snapshot,&plan,selection.as_ref(),kind!=JobKind::PreviewStill)?;}
         let g = crate::frame::geometry(&snapshot.document.frame_style, snapshot.document.video.width, snapshot.document.video.height)?;
         let (width, height) = if selection.is_some() { crate::preview::dimensions(g.width, g.height) } else { (g.width,g.height) };
         let fps = preset.fps();
@@ -259,11 +260,19 @@ fn lock_status(control: &Control) -> std::sync::MutexGuard<'_, JobStatus> {
 fn encode(dir: &Path, snapshot: &RenderSnapshot, plan: &render::RenderPlan, selection: Option<&crate::preview::PreviewSelection>, control: &Control,
     current: &mut JobStatus, launch: &impl Fn(&Path, Vec<OsString>) -> Command) -> CoreResult<()> {
     let cancelled = || Ok(control.cancel.load(Ordering::Acquire) || cancel_requested(dir)?);
+    let prepared_audio=if snapshot.document.schema_version==5 && current.kind!=JobKind::PreviewStill {
+        let audio=crate::audio::compile_audio(snapshot,plan,selection,true)?;
+        match crate::audio::normalize::normalize(&audio,dir,&cancelled,launch) {
+            Ok(prepared)=>prepared,
+            Err(error) if error.code==ErrorCode::EncoderFailed=>{current.warnings.push(format!("Audio export failed; retrying once without audio: {error}"));None},
+            Err(error)=>return Err(error),
+        }
+    }else{None};
+    let mut audio = if snapshot.document.schema_version==5{prepared_audio.is_some()}else{snapshot.document.microphone.is_some() && current.kind!=JobKind::PreviewStill};
     if snapshot.document.cursor_settings.enabled || plan.follow.is_some() {
-        encode_cursor(dir,snapshot,plan,selection,control,current,launch)?;
+        encode_cursor(dir,snapshot,plan,selection,control,current,launch,audio)?;
         return publish(dir,current,&cancelled);
     }
-    let mut audio = snapshot.document.microphone.is_some() && current.kind != JobKind::PreviewStill;
     let mut last_save = Instant::now();
     loop {
         if cancelled()? { return Err(ffmpeg::cancel_error()); }
@@ -943,12 +952,83 @@ mod tests {
         }
     }
 
+
+    fn wait_audio_stage(manager:&JobManager,job:&JobStatus,dir:&Path){
+        let deadline=Instant::now()+Duration::from_secs(30);
+        while !dir.join("stage-started").exists(){
+            let status=manager.status("fixture",&job.job_id).unwrap();
+            assert_eq!(status.state,JobState::Running,"Audio job terminated before the targeted stage: {status:?}");
+            assert!(Instant::now()<deadline,"Audio job did not reach its stage within30s: {status:?}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    fn add_schema5_audio(project:&Path,route:&str){
+        use crate::project::*;
+        if route!="ordinary"{add_cursor(project);}
+        let mut doc:ProjectDocument=serde_json::from_slice(&fs::read(project.join("project.json")).unwrap()).unwrap();
+        doc.schema_version=5;doc.video.duration_us=21_000_000;doc.clips[0].out_us=21_000_000;doc.microphone=None;doc.timing=Timing{provenance:TimingProvenance::LegacyUnknown,audio_offset_us:None};
+        for name in ["mic.wav","system.wav"]{let mut w=hound::WavWriter::create(project.join(name),hound::WavSpec{channels:1,sample_rate:8000,bits_per_sample:16,sample_format:hound::SampleFormat::Int}).unwrap();for _ in 0..168000{w.write_sample(1000_i16).unwrap();}w.finalize().unwrap();}
+        let track=|path:&str|AudioTrack{path:path.into(),sample_rate:8000,channels:1,frame_count:168000,timing:AudioTrackTiming::Unknown{}};
+        doc.audio_tracks=Some(AudioTracks{microphone:Some(track("mic.wav")),system:Some(track("system.wav"))});
+        if route!="ordinary"{let mut index:serde_json::Value=serde_json::from_slice(&fs::read(project.join("index.json")).unwrap()).unwrap();index["durationUs"]=serde_json::json!(21_000_000);fs::write(project.join("index.json"),serde_json::to_vec(&index).unwrap()).unwrap();}
+        if route=="follow"{doc.cursor_settings.enabled=false;doc.zooms=vec![ZoomElement{mode:ZoomMode::Follow,id:"follow".into(),clip_id:"clip-0".into(),start_us:0,end_us:21_000_000,x:0.5,y:0.5,scale:2.0,intro_us:0,hold_us:0,outro_us:0}];}
+        fs::write(project.join("project.json"),serde_json::to_vec(&doc).unwrap()).unwrap();
+    }
+    #[test]
+    fn schema5_audio_stage_failure_cancel_and_aac_fallback_preserve_outputs(){
+        for route in ["ordinary","cursor","follow"]{for stage in ["decode","normalize","seam","mix","aac"]{for cancel in [false,true]{
+            let(_temp,project,manager)=setup();add_schema5_audio(&project,route);fs::write(project.join("edited.mp4"),b"previous video").unwrap();fs::create_dir_all(project.join("exports/previous")).unwrap();fs::write(project.join("exports/previous/output.mp4"),b"previous export").unwrap();
+            let before:Vec<_>=["screen.mp4","mic.wav","system.wav","project.json","edited.mp4","exports/previous/output.mp4"].map(|name|(name,fs::read(project.join(name)).unwrap())).into();
+            let injected=Arc::new(AtomicBool::new(false));let seen=injected.clone();let aac_calls=Arc::new(AtomicU64::new(0));let calls=aac_calls.clone();
+            let job=manager.start_with("fixture",0,ExportPreset::Balanced,move|dir,args|{
+                let output=Path::new(args.last().unwrap()).file_name().unwrap().to_string_lossy();let aac=args.iter().any(|a|a=="aac");if aac{calls.fetch_add(1,Ordering::Relaxed);}
+                let hit=match stage{"decode"=>output=="decoded.f32","normalize"=>output.starts_with("window-"),"seam"=>output.starts_with("seam-"),"mix"=>output=="mixed.f32",_=>aac};
+                let job_dir=if dir.file_name().is_some_and(|n|n=="audio-scratch"){dir.parent().unwrap()}else{dir};
+                if hit && !seen.swap(true,Ordering::AcqRel){fs::write(job_dir.join("injected-audio-stage"),stage.as_bytes()).unwrap();let mut c=child(if cancel{"silent"}else{"failure"},job_dir);if cancel{c.env("JOB_CHILD_STAGE_BARRIER","1");}return c;}
+                if dir.file_name().is_some_and(|n|n=="audio-scratch"){let mut c=Command::new("/usr/bin/ffmpeg");c.args(args);c}else{let mut c=child("success",job_dir);c.env("JOB_OUTPUT_NAME",output.as_ref());c}
+            }).unwrap();let dir=project.join("exports").join(&job.job_id);
+            let cancel_started=if cancel{wait_audio_stage(&manager,&job,&dir);let at=Instant::now();manager.cancel("fixture",&job.job_id).unwrap();Some(at)}else{None};
+            let done=manager.wait("fixture",&job.job_id).unwrap();if let Some(at)=cancel_started{assert!(at.elapsed()<Duration::from_secs(2),"{route} {stage}: cancellation must reap the active child promptly");}assert!(injected.load(Ordering::Acquire),"{route} {stage}");assert_eq!(fs::read_to_string(dir.join("injected-audio-stage")).unwrap(),stage);assert_eq!(done.state,if cancel{JobState::Cancelled}else{JobState::Completed},"{route} {stage}: {done:?}");
+            assert_eq!(done.warnings.iter().filter(|w|w.contains("retrying once without audio")).count(),usize::from(!cancel));assert_eq!(aac_calls.load(Ordering::Relaxed),u64::from(stage=="aac"));
+            assert!(!dir.join("audio-scratch").exists());assert!(!dir.join(ffmpeg::RENDER_OUTPUT).exists());assert!(!fs::read_dir(&dir).unwrap().any(|e|e.unwrap().file_name().to_string_lossy().starts_with("cursor-")));
+            if cancel{assert!(!dir.join(OUTPUT).exists());#[cfg(target_os="linux")]assert!(!Path::new("/proc").join(fs::read_to_string(dir.join("child.pid")).unwrap()).exists());}
+            for(name,bytes)in before{assert_eq!(fs::read(project.join(name)).unwrap(),bytes,"{route} {stage} {name}");}
+        }}}
+    }
+
+    #[test]
+    fn schema5_cancel_before_audio_fallback_or_during_video_retry_never_publishes(){
+        for route in ["ordinary","cursor","follow"]{for during_retry in [false,true]{
+            if during_retry && route!="ordinary"{continue;}
+            let(_temp,project,manager)=setup();add_schema5_audio(&project,route);let calls=Arc::new(AtomicU64::new(0));let aac=calls.clone();
+            let job=manager.start_with("fixture",0,ExportPreset::Balanced,move|dir,args|{
+                let name=Path::new(args.last().unwrap()).file_name().unwrap();let job_dir=if dir.file_name().is_some_and(|n|n=="audio-scratch"){dir.parent().unwrap()}else{dir};
+                if dir.file_name().is_some_and(|n|n=="audio-scratch"){let mut c=Command::new("/usr/bin/ffmpeg");c.args(args);return c;}
+                if args.iter().any(|a|a=="aac"){aac.fetch_add(1,Ordering::Relaxed);return child(if during_retry{"failure"}else{"cancel_failure"},job_dir);}
+                if during_retry && name==ffmpeg::RENDER_OUTPUT{let mut c=child("silent",job_dir);c.env("JOB_CHILD_STAGE_BARRIER","1");return c;}
+                let mut c=child("success",job_dir);c.env("JOB_OUTPUT_NAME",name);c
+            }).unwrap();let dir=project.join("exports").join(&job.job_id);let cancel_started=if during_retry{wait_audio_stage(&manager,&job,&dir);let at=Instant::now();manager.cancel("fixture",&job.job_id).unwrap();Some(at)}else{None};
+            let done=manager.wait("fixture",&job.job_id).unwrap();if let Some(at)=cancel_started{assert!(at.elapsed()<Duration::from_secs(2),"Retry cancellation must reap the active child promptly");}assert_eq!(done.state,JobState::Cancelled,"{route} {during_retry}: {done:?}");assert_eq!(calls.load(Ordering::Relaxed),1);assert!(!dir.join(OUTPUT).exists());assert!(!dir.join(ffmpeg::RENDER_OUTPUT).exists());assert!(!dir.join("audio-scratch").exists());assert_eq!(done.warnings.iter().filter(|w|w.contains("retrying once without audio")).count(),usize::from(during_retry));
+            #[cfg(target_os="linux")]assert!(!Path::new("/proc").join(fs::read_to_string(dir.join("child.pid")).unwrap()).exists());
+        }}
+    }
+    #[cfg(unix)]
+    #[test]
+    fn schema5_invalid_metadata_and_escaping_paths_fail_before_audio_fallback_or_children(){
+        for bad in ["timing","escape","dangling","outside"]{
+            let(_temp,project,manager)=setup();add_schema5_audio(&project,"ordinary");let path=project.join("project.json");let mut wire:serde_json::Value=serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            if bad=="timing"{wire["audioTracks"]["microphone"]["timing"]=serde_json::json!({"type":"estimated","offsetUs":86400000001_i64,"uncertaintyUs":0});}
+            if bad=="escape"{wire["audioTracks"]["microphone"]["path"]=serde_json::json!("../escape.wav");}
+            if bad=="dangling" || bad=="outside"{fs::remove_file(project.join("mic.wav")).unwrap();std::os::unix::fs::symlink(if bad=="dangling"{"missing.wav"}else{"/etc/passwd"},project.join("mic.wav")).unwrap();}
+            fs::write(&path,serde_json::to_vec(&wire).unwrap()).unwrap();let calls=Arc::new(AtomicU64::new(0));let observed=calls.clone();let error=manager.start_with("fixture",0,ExportPreset::Balanced,move|dir,_|{observed.fetch_add(1,Ordering::Relaxed);child("success",dir)}).unwrap_err();assert_eq!(error.code,if bad=="timing" || bad=="escape"{ErrorCode::InvalidDocument}else{ErrorCode::InvalidPath});assert_eq!(calls.load(Ordering::Relaxed),0);assert_eq!(fs::read(&path).unwrap(),serde_json::to_vec(&wire).unwrap());
+        }
+    }
 }
 
 // Every temporary is inside the reserved job directory and is removed on all exit paths.
 struct CursorScratch { paths: Vec<PathBuf> }
 impl Drop for CursorScratch {fn drop(&mut self){for path in &self.paths {let _=fs::remove_file(path);}}}
-fn encode_cursor(dir:&Path,snapshot:&RenderSnapshot,plan:&render::RenderPlan,selection:Option<&crate::preview::PreviewSelection>,control:&Control,current:&mut JobStatus,launch:&impl Fn(&Path,Vec<OsString>)->Command)->CoreResult<()> {
+fn encode_cursor(dir:&Path,snapshot:&RenderSnapshot,plan:&render::RenderPlan,selection:Option<&crate::preview::PreviewSelection>,control:&Control,current:&mut JobStatus,launch:&impl Fn(&Path,Vec<OsString>)->Command,use_audio:bool)->CoreResult<()> {
  let cancelled=||Ok(control.cancel.load(Ordering::Acquire)||cancel_requested(dir)?);
  let mut scratch=CursorScratch{paths:["cursor-atlas.pam","cursor-segment.mp4","cursor-concat.txt","cursor-video.mp4"].map(|p|dir.join(p)).into()};
  let first=selection.map_or(0,|s|s.first_frame);let end=first+selection.map_or(render::grid_boundary(plan.duration_us,plan.preset.fps())?,|s|s.frame_count);
@@ -977,7 +1057,7 @@ fn encode_cursor(dir:&Path,snapshot:&RenderSnapshot,plan:&render::RenderPlan,sel
  store::atomic_write(dir,"cursor-concat.txt",segments.as_bytes())?;
  ffmpeg::run_encoder(launch(dir,ffmpeg::cursor_concat_args(dir,plan.preset.fps())),&cancelled,|_|Ok(()))?;
  if cancelled()?{return Err(ffmpeg::cancel_error());}
- let audio=render::mux_audio_graph(snapshot,plan,selection)?;
+ let audio=if use_audio{render::mux_audio_graph(snapshot,plan,selection)?}else{String::new()};
  if !audio.is_empty(){
   store::atomic_write(dir,ffmpeg::FILTER_SCRIPT,audio.as_bytes())?;
   let result=ffmpeg::run_encoder(launch(dir,ffmpeg::cursor_audio_args(snapshot,plan,selection,dir)?),&cancelled,|_|Ok(()));

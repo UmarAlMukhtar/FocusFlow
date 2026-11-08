@@ -81,8 +81,9 @@ fn source_actions(dir:&Path,frequency:Option<i64>,records:&[serde_json::Value],o
  fixture_json(&dir.join("source-actions.json"),&value)
 }
 fn source(dir:&Path,w:u32,h:u32,nonce:u16,animated:bool,private_profile:Option<&str>)->TestResult<()> {
- let _fixture_cursor=if private_profile.is_some(){Some(cursor::FixtureCursor::new()?)}else{None};
- let decorated=private_profile==Some("decorated");let action_limit=if private_profile.is_some(){16}else{2};let original_cursor=unsafe{GetCursor()};let mut cursor_variants=Vec::new();let mut occluder=None;
+ let metadata=private_profile==Some("startup-metadata");if metadata{windows_capture::qualification::startup::require_disposable()?;}let cursor_profile=private_profile.is_some()&&!metadata;
+ let _fixture_cursor=if cursor_profile{Some(cursor::FixtureCursor::new()?)}else{None};
+ let decorated=private_profile==Some("decorated")||metadata;let action_limit=if metadata{1}else if private_profile.is_some(){16}else{2};let original_cursor=if cursor_profile{unsafe{GetCursor()}}else{HCURSOR::default()};let mut cursor_variants=Vec::new();let mut occluder=None;
  if !(160..=1920).contains(&w)||!(120..=1080).contains(&h){return Err("Generated geometry outside fixture bounds".into());}
  // Only this process owns this HWND, its canvas and message loop; no input is sent to user windows.
  let hwnd=unsafe{let instance=GetModuleHandleW(None)?;let class=WNDCLASSW{lpfnWndProc:Some(wndproc),hCursor:_fixture_cursor.as_ref().map_or(HCURSOR::default(),|c|c.0),hInstance:instance.into(),lpszClassName:w!("FocusFlowOwnedQualification"),..Default::default()};let _=RegisterClassW(&class);
@@ -100,6 +101,7 @@ fn source(dir:&Path,w:u32,h:u32,nonce:u16,animated:bool,private_profile:Option<&
    if command.is_file(){
     if sequence>action_limit{return Err("Too many generated source commands".into());}
     let read_before=observation_qpc();let read=fixture_read(&command);let read_after=observation_qpc();let value=read?;if value["sequence"]!=sequence{return Err("Generated source command sequence mismatch".into());}
+    if metadata&&value["action"]!="close"{return Err("Metadata source accepts only close".into());}
     match value["action"].as_str(){
      Some("close")=>{close_ack=Some((sequence,value,read_before,read_after));break;},
      Some("resize")=>{
@@ -143,7 +145,7 @@ fn source(dir:&Path,w:u32,h:u32,nonce:u16,animated:bool,private_profile:Option<&
   }Ok(())
  })();
  if let Some(other)=occluder.take(){unsafe{let _=DestroyWindow(other);}}
- if private_profile.is_some(){unsafe{SetClassLongPtrW(hwnd,GCLP_HCURSOR,0);SetCursor(Some(original_cursor));}}
+ if cursor_profile{unsafe{SetClassLongPtrW(hwnd,GCLP_HCURSOR,0);SetCursor(Some(original_cursor));}}
  let before=observation_qpc();let destroyed=unsafe{DestroyWindow(hwnd)};let after=observation_qpc();
  let overflow=actions.len()>=action_limit;
  if !overflow{actions.push(serde_json::json!({"sequence":close_ack.as_ref().map(|v|v.0),"action":if close_ack.is_some(){"close"}else{"cleanupDestroy"},"commandReadBeforeQpc":close_ack.as_ref().and_then(|v|v.2),"commandReadAfterQpc":close_ack.as_ref().and_then(|v|v.3),"operationBeforeQpc":before,"operationAfterQpc":after,"win32Succeeded":destroyed.is_ok(),"errorHresult":destroyed.as_ref().err().map(|e|e.code().0)}));}
@@ -344,11 +346,19 @@ fn platform(path:&Path)->TestResult<()> {
 pub(crate) fn run()->TestResult<()>{
  let args:Vec<_>=std::env::args_os().skip(1).collect();
  if args.len()==7&&args[0]=="--source-private"{
+  if args[6]=="startup-metadata"{return cursor::metadata_source(Path::new(&args[1]),args[2].to_str().ok_or("width")?.parse()?,args[3].to_str().ok_or("height")?.parse()?,args[4].to_str().ok_or("nonce")?.parse()?);}
   cursor::require_disposable()?;return cursor::source(Path::new(&args[1]),args[2].to_str().ok_or("width")?.parse()?,args[3].to_str().ok_or("height")?.parse()?,args[4].to_str().ok_or("nonce")?.parse()?,args[6].to_str().ok_or("profile")?);
  }
  if args.len()==6&&args[0]=="--source"{
   unsafe{SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)?;}
   return source(Path::new(&args[1]),args[2].to_str().ok_or("width")?.parse()?,args[3].to_str().ok_or("height")?.parse()?,args[4].to_str().ok_or("nonce")?.parse()?,args[5]=="1",None);
+ }
+ if args.len()==3&&args[0]=="--startup-metadata"{
+  windows_capture::qualification::startup::require_disposable()?;
+  let root=PathBuf::from(&args[1]);fs::create_dir(&root)?;let root=root.canonicalize()?;let dir=root.join("session-0");fs::create_dir(&dir)?;
+  fixture_json(&dir.join("source-request.json"),&serde_json::json!({"width":320,"height":240,"nonce":601,"animated":false,"privateProfile":"startup-metadata"}))?;
+  let mut window=GeneratedWindow::observed(dir.clone())?;let selected=fixture_read(&dir.join("source-selection.json"))?;let pid=u32::try_from(selected["sourcePid"].as_u64().ok_or("Metadata source PID missing")?)?;
+  let probe=dir.join("startup-probe");fs::create_dir(&probe)?;windows_capture::qualification::startup::run(&probe,window.hwnd as u64,pid,Path::new(&args[2]))?;window.close()?;return Ok(());
  }
  if args.len()==2&&args[0]=="--platform"{return platform(Path::new(&args[1]));}if args.len()!=7{return Err("usage: harness ROOT MODE WIDTH HEIGHT NONCE FFMPEG WORKER".into());}
  let mode=args[1].to_str().ok_or("mode")?;let w=args[2].to_str().ok_or("width")?.parse()?;let h=args[3].to_str().ok_or("height")?.parse()?;let nonce:u16=args[4].to_str().ok_or("nonce")?.parse()?;

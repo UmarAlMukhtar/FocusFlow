@@ -68,7 +68,7 @@ impl ProjectStore {
         document.zooms = state.zooms.clone();
         document.frame_style = state.frame_style.clone();
         document.cursor_settings = state.cursor_settings.clone();
-        document.schema_version = 4;
+        document.schema_version = document.schema_version.max(4);
         project::validate(&document)?;
         validate_cursor_change(&dir, &previous, &document)?;
         document.revision = next_revision(document.revision)?;
@@ -201,6 +201,21 @@ impl ProjectStore {
                 }
             }
         }
+        if document.audio_tracks.is_some() {
+            let snapshot=RenderSnapshot {project_dir:project_dir.clone(),document:document.clone(),prepared_cursor:None,prepared_focus:None};
+            let prepared=crate::audio::prepare_audio(&snapshot,true)?;
+            let tracks=document.audio_tracks.as_mut().unwrap();
+            for (kind,track,invalid,unknown,estimated) in [
+                (project::AudioTrackKind::Microphone,&mut tracks.microphone,ProjectWarning::InvalidMicrophoneAudio,ProjectWarning::MicrophoneTimingUnknown,ProjectWarning::MicrophoneTimingEstimated),
+                (project::AudioTrackKind::System,&mut tracks.system,ProjectWarning::InvalidSystemAudio,ProjectWarning::SystemTimingUnknown,ProjectWarning::SystemTimingEstimated),
+            ] {
+                let warning=if let Some(asset)=track.as_ref() {
+                    if !prepared.iter().any(|audio|audio.kind==kind) { *track=None; Some(invalid) }
+                    else {match asset.timing {project::AudioTrackTiming::Unknown {} =>Some(unknown),project::AudioTrackTiming::Estimated {..}=>Some(estimated),_=>None}}
+                } else {None};
+                if let Some(warning)=warning {if !document.warnings.contains(&warning) {document.warnings.push(warning);}}
+            }
+        }
         Ok(RenderSnapshot { project_dir, document, prepared_cursor: None, prepared_focus: None })
     }
 
@@ -305,10 +320,10 @@ fn read_document(dir: &Path, id: &str) -> CoreResult<ProjectDocument> {
     #[serde(rename_all = "camelCase")]
     struct SchemaVersion { schema_version: u64, frame_style: Option<serde::de::IgnoredAny> }
     let version: SchemaVersion = serde_json::from_slice(&bytes).map_err(|error| invalid("project", format!("Invalid project JSON: {error}")))?;
-    if !matches!(version.schema_version, 1 | 2 | 3 | 4) {
-        return Err(CoreError { code: ErrorCode::UnsupportedSchema, message: "Only project schema versions 1, 2, 3 and 4 are supported".into(), field: Some("schemaVersion".into()) });
+    if !matches!(version.schema_version, 1 | 2 | 3 | 4 | 5) {
+        return Err(CoreError { code: ErrorCode::UnsupportedSchema, message: "Only project schema versions 1, 2, 3, 4 and 5 are supported".into(), field: Some("schemaVersion".into()) });
     }
-    require(version.schema_version == 1 || version.frame_style.is_some(), "frameStyle", "Schemas 2, 3 and 4 require an explicit frameStyle")?;
+    require(version.schema_version == 1 || version.frame_style.is_some(), "frameStyle", "Schemas 2, 3, 4 and 5 require an explicit frameStyle")?;
     let document: ProjectDocument = serde_json::from_slice(&bytes).map_err(|error| invalid("project", format!("Invalid project document: {error}")))?;
     project::validate(&document)?;
     require(document.project_id == id, "projectId", "Document project ID must equal its directory ID")?;
@@ -426,7 +441,7 @@ mod tests {
             frame_style: Default::default(), schema_version: 1, project_id: "fixture".into(), revision: 1,
             cursor: None, cursor_settings: Default::default(),
         video: VideoAsset { cursor: crate::project::CursorMode::Embedded, path: "screen.mp4".into(), width: 100, height: 50, duration_us: 5_000_000 },
-            microphone: None, timing: Timing { provenance: TimingProvenance::LegacyUnknown, audio_offset_us: None },
+            audio_tracks: None, microphone: None, timing: Timing { provenance: TimingProvenance::LegacyUnknown, audio_offset_us: None },
             camera: CameraDefaults { pan_transition_us: 200_000, settle_us: 100_000 },
             clips: vec![Clip { id: "clip-0".into(), in_us: 0, out_us: 5_000_000 }],
             zooms: vec![], clicks: vec![], warnings: vec![],

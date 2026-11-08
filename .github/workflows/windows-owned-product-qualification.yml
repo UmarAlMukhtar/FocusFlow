@@ -1,7 +1,7 @@
 name: Windows owned product qualification
 on:
   push:
-    branches: [codex-windows-owned-product-qualification, codex-windows-owned-close-diagnostic, codex-windows-cursor-qualification]
+    branches: [codex-windows-owned-product-qualification, codex-windows-owned-close-diagnostic, codex-windows-cursor-qualification, codex-windows-startup-metadata]
 permissions:
   contents: read
 concurrency:
@@ -9,16 +9,20 @@ concurrency:
   cancel-in-progress: false
 jobs:
   generated-native:
-    if: github.ref == 'refs/heads/codex-windows-owned-product-qualification' || github.ref == 'refs/heads/codex-windows-owned-close-diagnostic' || github.ref == 'refs/heads/codex-windows-cursor-qualification'
+    if: github.ref == 'refs/heads/codex-windows-owned-product-qualification' || github.ref == 'refs/heads/codex-windows-owned-close-diagnostic' || github.ref == 'refs/heads/codex-windows-cursor-qualification' || github.ref == 'refs/heads/codex-windows-startup-metadata'
     runs-on: windows-2022
     timeout-minutes: 45
     env:
-      FOCUSFLOW_QUAL_SCOPE: ${{ github.ref == 'refs/heads/codex-windows-cursor-qualification' && 'cursor-private' || github.ref == 'refs/heads/codex-windows-owned-close-diagnostic' && 'close-diagnostic' || 'full' }}
+      FOCUSFLOW_QUAL_SCOPE: ${{ github.ref == 'refs/heads/codex-windows-startup-metadata' && 'startup-metadata' || github.ref == 'refs/heads/codex-windows-cursor-qualification' && 'cursor-private' || github.ref == 'refs/heads/codex-windows-owned-close-diagnostic' && 'close-diagnostic' || 'full' }}
       # Positive hosted-run binding is checked by Python, source, observer and proof worker before mutation.
       FOCUSFLOW_CURSOR_REVIEWED_SHA: ${{ github.sha }}
       FOCUSFLOW_CURSOR_REVIEWED_REPOSITORY: UmarAlMukhtar/FocusFlow
       FOCUSFLOW_CURSOR_REVIEWED_REF: refs/heads/codex-windows-cursor-qualification
       FOCUSFLOW_CURSOR_REVIEWED_RUN: ${{ github.run_id }}:${{ github.run_attempt }}
+      FOCUSFLOW_METADATA_REVIEWED_SHA: ${{ github.sha }}
+      FOCUSFLOW_METADATA_REVIEWED_REPOSITORY: UmarAlMukhtar/FocusFlow
+      FOCUSFLOW_METADATA_REVIEWED_REF: refs/heads/codex-windows-startup-metadata
+      FOCUSFLOW_METADATA_REVIEWED_RUN: ${{ github.run_id }}:${{ github.run_attempt }}
       PYTHONDONTWRITEBYTECODE: 1
       CARGO_TERM_COLOR: never
       CARGO_BUILD_JOBS: 2
@@ -106,6 +110,12 @@ jobs:
         run: |
           python -m unittest discover -s tools/windows-owned-product-qualification -p test_cursor_qualification.py -v 2>&1 | Tee-Object qualification-setup/analyzer.log
           if ($LASTEXITCODE -ne 0) { throw 'Private cursor controls failed' }
+      - name: Private startup metadata routing and evidence controls
+        if: github.ref == 'refs/heads/codex-windows-startup-metadata'
+        shell: pwsh
+        run: |
+          python -m unittest discover -s tools/windows-owned-product-qualification -p test_startup_metadata.py -v 2>&1 | Tee-Object qualification-setup/analyzer.log
+          if ($LASTEXITCODE -ne 0) { throw 'Startup metadata controls failed' }
       - name: Actual native modules and generated fixtures
         if: ${{ !cancelled() && steps.pinned_tools.outcome == 'success' }}
         shell: pwsh
@@ -117,7 +127,7 @@ jobs:
         shell: pwsh
         run: python tools/windows-owned-product-qualification/package_evidence.py qualification-evidence qualification-setup qualification-upload
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
+        if: always() && github.ref != 'refs/heads/codex-windows-startup-metadata'
         with:
           name: windows-owned-product-${{ github.sha }}
           retention-days: 7
@@ -136,3 +146,29 @@ jobs:
             qualification-upload/cases/**/cursor-*.pam
             qualification-upload/cases/**/native-color-*.pam
             qualification-upload/cases/**/raster-*.pam
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always() && github.ref == 'refs/heads/codex-windows-startup-metadata'
+        with:
+          name: windows-startup-metadata-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            qualification-upload/*.json
+            qualification-upload/*.txt
+            qualification-upload/*.log
+            qualification-upload/cases/startup-metadata/session-0/source-request.json
+            qualification-upload/cases/startup-metadata/session-0/source-ready.json
+            qualification-upload/cases/startup-metadata/session-0/source-observed.json
+            qualification-upload/cases/startup-metadata/session-0/source-selection.json
+            qualification-upload/cases/startup-metadata/session-0/source-exit.json
+            qualification-upload/cases/startup-metadata/session-0/source-cleanup.json
+            qualification-upload/cases/startup-metadata/session-0/source-actions.json
+            qualification-upload/cases/startup-metadata/session-0/source-command-1.json
+            qualification-upload/cases/startup-metadata/session-0/source-ack-1.json
+            qualification-upload/cases/startup-metadata/session-0/paint-history.json
+            qualification-upload/cases/startup-metadata/session-0/source.log
+            qualification-upload/cases/startup-metadata/session-0/startup-probe/startup-metadata.json
+            qualification-upload/cases/startup-metadata/session-0/startup-probe/startup-phase.json
+            qualification-upload/cases/startup-metadata/session-0/startup-probe/metadata-owned.json
+            qualification-upload/cases/startup-metadata/session-0/startup-probe/metadata-cleanup.json
+            qualification-upload/cases/startup-metadata/session-0/startup-probe/startup-analysis.json

@@ -36,6 +36,17 @@ def require_cursor_disposable_context():
     assert os.getenv('FOCUSFLOW_CURSOR_REVIEWED_RUN')==run_id+':'+attempt,'run handshake rejected'
     return dict(repository=expected['GITHUB_REPOSITORY'],ref=expected['GITHUB_REF'],sha=commit,runId=run_id,attempt=attempt,runnerEnvironment='github-hosted')
 
+def require_metadata_disposable_context():
+    expected=dict(GITHUB_ACTIONS='true',RUNNER_ENVIRONMENT='github-hosted',RUNNER_OS='Windows',GITHUB_REPOSITORY='UmarAlMukhtar/FocusFlow',GITHUB_REF='refs/heads/codex-windows-startup-metadata',GITHUB_EVENT_NAME='push',GITHUB_WORKFLOW_REF='UmarAlMukhtar/FocusFlow/.github/workflows/windows-owned-product-qualification.yml@refs/heads/codex-windows-startup-metadata')
+    for key,value in expected.items():assert os.getenv(key)==value,f'metadata disposable context rejected {key}'
+    commit=os.getenv('GITHUB_SHA','');assert re.fullmatch('[0-9a-f]{40}',commit),'invalid metadata SHA'
+    assert os.getenv('FOCUSFLOW_METADATA_REVIEWED_SHA')==commit,'metadata SHA handshake rejected'
+    assert os.getenv('FOCUSFLOW_METADATA_REVIEWED_REPOSITORY')==expected['GITHUB_REPOSITORY'],'metadata repository handshake rejected'
+    assert os.getenv('FOCUSFLOW_METADATA_REVIEWED_REF')==expected['GITHUB_REF'],'metadata ref handshake rejected'
+    run_id=os.getenv('GITHUB_RUN_ID','');attempt=os.getenv('GITHUB_RUN_ATTEMPT','');assert run_id.isdigit() and attempt.isdigit(),'metadata run identity missing'
+    assert os.getenv('FOCUSFLOW_METADATA_REVIEWED_RUN')==run_id+':'+attempt,'metadata run handshake rejected'
+    return dict(repository=expected['GITHUB_REPOSITORY'],ref=expected['GITHUB_REF'],sha=commit,runId=run_id,attempt=attempt,runnerEnvironment='github-hosted')
+
 def sha(path):
     with path.open('rb') as f:return hashlib.file_digest(f,'sha256').hexdigest()
 
@@ -49,8 +60,9 @@ def source_manifest(repo):
 
 def write(path,value):path.write_text(json.dumps(value,indent=2)+'\n',encoding='utf-8')
 
-def require_test_count(text,count):
+def require_test_count(text,count,names=()):
     assert re.search(r'test result: ok\. '+str(count)+r' passed; 0 failed; 0 ignored;',text), 'required native tests did not execute without skips'
+    for name in names:assert re.search(r'^test '+re.escape(name)+r' \.\.\. ok$',text,re.MULTILINE),'required test did not pass: '+name
 
 def require_exit7(case):
     trace=json.loads((case/'trace.json').read_text(encoding='utf-8'))
@@ -74,8 +86,14 @@ def bound(root):
             # The owned initial handshake atomically renames this one transient file.
             relative=p.relative_to(root).parts
             if len(relative)==3 and relative[0] in {'cursor-borderless-even','cursor-decorated-even','cursor-borderless-odd','cursor-decorated-odd'} and relative[1:]==('session-0','source-request.pending') and not is_link:continue
+            if not is_link and relative[:2]==('startup-metadata','session-0'):
+                if len(relative)==3 and relative[2] in {f'{n}.pending' for n in ['source-request','source-ready','source-observed','source-selection','source-exit','source-cleanup','source-actions','source-command-1','source-ack-1']}:continue
+                if len(relative)==4 and relative[2]=='startup-probe' and relative[3] in {'startup-phase.pending','startup-metadata.pending','metadata-owned.pending','metadata-cleanup.pending'}:continue
             raise
         size+=n
+        if p.name in {'startup-metadata.json','startup-analysis.json'}:assert n<=64*1024,'64KiB metadata cap reached'
+        if p.name in {'startup-phase.json','metadata-owned.json'}:assert n<=4096,'4KiB metadata control cap reached'
+        if p.name=='metadata-cleanup.json':assert n<=16*1024,'16KiB metadata cleanup cap reached'
         if p.name in {'screen.mp4','proof-with-cursor.mp4','proof-without-cursor.mp4'}:assert n<=64*1024*1024,'64MiB media cap reached'
         elif p.name=='trace.json':assert n<=4*1024*1024,'4MiB trace cap reached'
         elif p.suffix=='.pam':assert n<=9*1024*1024,'9MiB raw PAM cap reached'
@@ -124,9 +142,12 @@ class GeneratedSources:
             assert not case.is_symlink() and case.name in {'session-0','session-1','session-2'} and len(self.children)<3,'unexpected source session'
             data=fixture_read(request)
             private='privateProfile' in data
-            if private:require_cursor_disposable_context()
+            if private:
+                if data.get('privateProfile')=='startup-metadata':require_metadata_disposable_context()
+                else:require_cursor_disposable_context()
             assert set(data)=={'width','height','nonce','animated'}|({'privateProfile'} if private else set())
-            if private:assert data['privateProfile'] in {'borderless','decorated'} and data['animated'] is False
+            if private:assert data['privateProfile'] in {'borderless','decorated','startup-metadata'} and data['animated'] is False
+            if data.get('privateProfile')=='startup-metadata':assert [data['width'],data['height'],data['nonce']]==[320,240,601]
             assert type(data['width']) is int and 160<=data['width']<=1920
             assert type(data['height']) is int and 120<=data['height']<=1080
             assert type(data['nonce']) is int and 0<=data['nonce']<=65535 and type(data['animated']) is bool
@@ -174,6 +195,7 @@ class GeneratedSources:
         assert not failures,failures
 
 def execute(argv,root,name,timeout=600,env=None,observe=None,parent_death=False):
+    if name=='startup-metadata':require_metadata_disposable_context()
     started=time.monotonic();opened={};media={};killed_at=None;kill_qpc=None;receipts=[];error=None;error_filename=None;error_traceback=None
     log=root/(name+'.log');receipt=root/(name+'-command.json')
     sources=GeneratedSources(argv[0],observe,env) if observe else None
@@ -187,19 +209,23 @@ def execute(argv,root,name,timeout=600,env=None,observe=None,parent_death=False)
                     sources.poll(proc.pid)
                     ownership_paths=list(observe.glob('session-*/owned.json'))
                     ownership_paths+=list(observe.glob('session-*/without/owned.json'))+list(observe.glob('session-*/with/owned.json'))+list(observe.glob('session-*/alpha-without/owned.json'))+list(observe.glob('session-*/alpha-with/owned.json'))+list(observe.glob('session-*/challenge/owned.json'))+list(observe.glob('session-*/closed/owned.json'))
+                    ownership_paths+=list(observe.glob('session-0/startup-probe/metadata-owned.json'))
                     for path in ownership_paths:
                         if path in opened:continue
                         try:data=json.loads(path.read_text(encoding='utf-8'))
                         except (OSError,ValueError):continue
+                        metadata=path.name=='metadata-owned.json'
+                        if metadata:
+                            require_metadata_disposable_context();assert name=='startup-metadata' and set(data)=={'parent','worker','qpc'},'unexpected metadata ownership receipt'
                         assert data['parent']==proc.pid
                         handles=[]
                         try:
-                            for kind in ['worker','encoder']:handles.append(ExactHandle(data[kind]))
+                            for kind in (['worker'] if metadata else ['worker','encoder']):handles.append(ExactHandle(data[kind]))
                         except BaseException:
                             for handle in handles:handle.close()
                             raise
                         opened[path]=(data,handles)
-                        path.with_name('handles-open').write_text('independently held exact noninheritable process handles\n',encoding='utf-8')
+                        path.with_name('metadata-handles-open' if metadata else 'handles-open').write_text('independently held exact noninheritable process handles\n',encoding='utf-8')
                     for gate in observe.glob('session-*/before-publish'):
                         if gate not in media:
                             media[gate]=sha(gate.with_name('screen.mp4'))
@@ -237,13 +263,49 @@ def execute(argv,root,name,timeout=600,env=None,observe=None,parent_death=False)
                 try:sources.cleanup(error is not None,parent_death=parent_death and error is None)
                 except BaseException as exc:
                     if error is None:error=repr(exc);error_filename=str(exc.filename)[:1024] if isinstance(exc,OSError) and exc.filename is not None else None;error_traceback=traceback.format_exc(limit=8)[-8192:]
-            for _,handles in opened.values():
+            cleanup=[];deadline=time.monotonic()+2
+            for path,(data,handles) in opened.items():
+                signaled=[]
                 for h in handles:
-                    if not h.signaled():h.kill()
-                    h.close()
-            write(receipt,dict(argv=[str(x) for x in argv],exitCode=proc.returncode,seconds=time.monotonic()-started,error=error,errorFilename=error_filename,errorTraceback=error_traceback,logSha256=sha(log),ownership=receipts))
+                    try:
+                        if not h.signaled():h.kill()
+                        while not h.signaled() and time.monotonic()<deadline:time.sleep(.005)
+                        signaled.append(h.signaled())
+                    except BaseException as exc:
+                        signaled.append(None)
+                        if error is None:error=repr(exc);error_traceback=traceback.format_exc(limit=8)[-8192:]
+                    finally:
+                        try:h.close()
+                        except BaseException as exc:
+                            signaled[-1]=None
+                            if error is None:error=repr(exc);error_traceback=traceback.format_exc(limit=8)[-8192:]
+                cleanup.append(dict(**data,path=path.relative_to(observe).as_posix(),signaled=signaled))
+            final=dict(parent=dict(pid=proc.pid,signaled=proc.poll() is not None,exitCode=proc.returncode),owned=cleanup,sources=[dict(pid=item['proc'].pid,observed=item['observed'],signaled=item['proc'].poll() is not None,exitCode=item['proc'].poll()) for item in sources.children.values()] if sources else [])
+            write(receipt,dict(argv=[str(x) for x in argv],exitCode=proc.returncode,seconds=time.monotonic()-started,error=error,errorFilename=error_filename,errorTraceback=error_traceback,logSha256=sha(log),ownership=receipts,cleanup=final))
     if error:raise RuntimeError(error)
     return log
+
+def require_private_cleanup(root,receipt):
+    data=json.loads(receipt.read_text(encoding='utf-8'));cleanup=data['cleanup'];parent=cleanup['parent']
+    assert parent['signaled'] is True and type(parent['pid']) is int and parent['pid']>0 and type(parent['exitCode']) is int,'private parent cleanup unconfirmed'
+    allowed={f'session-0/{mode}/owned.json' for mode in ['without','with','alpha-without','alpha-with','challenge','closed']}
+    paths={p.relative_to(root).as_posix():p for p in root.rglob('owned.json')}
+    assert all((root/p).is_file() for p in allowed if (root/p).parent.exists()),'private proof started without observed owner'
+    owned=cleanup['owned'];assert paths and set(paths)<=allowed and len(owned)==len(paths),'unknown/unobserved private owner'
+    assert {row['path'] for row in owned}==set(paths),'private ownership cleanup incomplete'
+    pids={parent['pid']}
+    for row in owned:
+        original=json.loads(paths[row['path']].read_text(encoding='utf-8'))
+        assert set(original)=={'parent','worker','encoder','qpc'} and all(row[k]==original[k] for k in original),'private owner identity changed'
+        assert row['parent']==parent['pid'] and row['signaled']==[True,True] and all(value is True for value in row['signaled']),'private worker/encoder cleanup unconfirmed'
+        for key in ['worker','encoder']:
+            assert type(row[key]) is int and row[key]>0 and row[key]!=parent['pid'],'invalid exact private owner'
+            pids.add(row[key])
+    sources=cleanup['sources'];assert len(sources)==1,'private source ownership unknown'
+    assert {p.relative_to(root).as_posix() for p in root.rglob('source-cleanup.json')}=={'session-0/source-cleanup.json'},'unexpected private source owner'
+    source=sources[0];saved=json.loads((root/'session-0/source-cleanup.json').read_text(encoding='utf-8'))
+    assert type(source['pid']) is int and source['pid']>0 and source['pid'] not in pids and source['observed'] is True and source['signaled'] is True and type(source['exitCode']) is int,'private source cleanup unconfirmed'
+    assert all(saved[k]==source[k] for k in ['pid','observed','signaled','exitCode']),'private source cleanup identity disagrees'
 
 def build_exe(repo,evidence,manifest,name,test=False):
     args=['cargo','+1.89.0','test' if test else 'build','--locked','--manifest-path',manifest,'--message-format=json','--test' if test else '--bin',name]
@@ -277,19 +339,19 @@ def uninstrumented(case,ffmpeg,ffprobe):
 
 def run(a):
     assert sys.platform=='win32','native lane must run on Windows'
-    scope=getattr(a,'scope','full');assert scope in {'full','close-diagnostic','cursor-private'},'unknown qualification scope'
-    cursor_private=scope=='cursor-private'
-    disposable=require_cursor_disposable_context() if cursor_private else None
+    scope=getattr(a,'scope','full');assert scope in {'full','close-diagnostic','cursor-private','startup-metadata'},'unknown qualification scope'
+    cursor_private=scope=='cursor-private';startup_metadata=scope=='startup-metadata'
+    disposable=require_metadata_disposable_context() if startup_metadata else require_cursor_disposable_context() if cursor_private else None
     diagnostic=scope=='close-diagnostic'
-    expected_branch='codex-windows-cursor-qualification' if cursor_private else 'codex-windows-owned-close-diagnostic' if diagnostic else 'codex-windows-owned-product-qualification'
+    expected_branch='codex-windows-startup-metadata' if startup_metadata else 'codex-windows-cursor-qualification' if cursor_private else 'codex-windows-owned-close-diagnostic' if diagnostic else 'codex-windows-owned-product-qualification'
     observed_ref=os.getenv('GITHUB_REF')
     assert observed_ref is None or observed_ref=='refs/heads/'+expected_branch,'qualification scope/ref mismatch'
     if diagnostic:print('DIAGNOSTIC SUBSET: close only; cannot establish full qualification PASS')
     repo=Path(__file__).resolve().parents[2];os.chdir(repo)
-    if cursor_private:assert subprocess.check_output(['git','rev-parse','HEAD'],text=True,encoding='ascii').strip()==disposable['sha'],'checkout/run SHA mismatch before native tools'
+    if cursor_private or startup_metadata:assert subprocess.check_output(['git','rev-parse','HEAD'],text=True,encoding='ascii').strip()==disposable['sha'],'checkout/run SHA mismatch before native tools'
     evidence=a.evidence.resolve();evidence.mkdir();assert sha(a.ffmpeg)==FFMPEG_SHA and sha(a.ffprobe)==FFPROBE_SHA
     before=source_manifest(repo);write(evidence/'source-manifest.json',before)
-    write(evidence/'provenance.json',dict(scope=scope,privateCursorProof=cursor_private,disposableContext=disposable,diagnosticOnly=diagnostic,expectedBranch=expected_branch,observedRef=observed_ref,commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True,encoding='ascii').strip(),runnerImage=os.getenv('ImageVersion'),runnerOS=os.getenv('RUNNER_OS'),ffmpegSha256=sha(a.ffmpeg),ffprobeSha256=sha(a.ffprobe),archiveSha256=ARCHIVE_SHA,python=sys.version,platform=sys.platform,toolchain='1.89.0',profile='debug; H264 libx264 veryfast CRF23 yuv420p B0 30fps 30000-timescale',environment={k:os.getenv(k) for k in ['CARGO_TARGET_DIR','VCToolsVersion','WindowsSDKVersion','PROCESSOR_IDENTIFIER']}))
+    write(evidence/'provenance.json',dict(scope=scope,privateCursorProof=cursor_private,disposableContext=disposable,diagnosticOnly=diagnostic or startup_metadata,metadataOnly=startup_metadata,expectedBranch=expected_branch,observedRef=observed_ref,commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True,encoding='ascii').strip(),runnerImage=os.getenv('ImageVersion'),runnerOS=os.getenv('RUNNER_OS'),ffmpegSha256=sha(a.ffmpeg),ffprobeSha256=sha(a.ffprobe),archiveSha256=ARCHIVE_SHA,python=sys.version,platform=sys.platform,toolchain='1.89.0',profile='scalar metadata only; no encoder/ARM/admission' if startup_metadata else 'debug; H264 libx264 veryfast CRF23 yuv420p B0 30fps 30000-timescale',environment={k:os.getenv(k) for k in ['CARGO_TARGET_DIR','VCToolsVersion','WindowsSDKVersion','PROCESSOR_IDENTIFIER']}))
     metadata=json.loads(subprocess.check_output(['cargo','+1.89.0','metadata','--locked','--manifest-path','FocusFlow/src-tauri/Cargo.toml','--format-version','1'],text=True,encoding='utf-8'))
     vendor=[x for x in metadata['packages'] if x['name']=='windows-capture'];assert len(vendor)==1 and vendor[0]['source'] is None
     assert Path(vendor[0]['manifest_path']).resolve()==repo/'FocusFlow/vendor/windows-capture/Cargo.toml'
@@ -300,28 +362,50 @@ def run(a):
         except Exception as error:failures.append(dict(name=name,error=repr(error)));write(evidence/'failures.json',failures)
     app='FocusFlow/src-tauri/Cargo.toml';core='FocusFlow/crates/focusflow-core/Cargo.toml';mapping='.superpowers/sdd/2026-10-27-windows-owned-product/fix-1-native-harness/Cargo.toml'
     # Native file sync, actual mapping/debug layer, and Windows pipes are distinct required gates.
-    def require_tests(argv,name,count):
+    def require_tests(argv,name,count,names=()):
         log=execute(argv,evidence,name)
-        require_test_count(log.read_text(encoding='utf-8',errors='replace'),count)
-    if not diagnostic and not cursor_private:
+        require_test_count(log.read_text(encoding='utf-8',errors='replace'),count,names)
+    if not diagnostic and not cursor_private and not startup_metadata:
         attempt('core-publication',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',core,'--lib','capture::windows::tests::','--','--test-threads=1','--nocapture'],'core-publication',10))
         attempt('core-import',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',core,'--test','windows_capture','--','--test-threads=1','--nocapture','--skip','common::child_writer'],'core-import',WINDOWS_IMPORT_TEST_COUNT))
         attempt('mapping-debug',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',mapping,'--lib','frame::mapping_tests::','--','--test-threads=1','--nocapture'],'mapping-debug',4))
     def pipes():
         exe=build_exe(repo,evidence,core,'cfr_grid_windows',True);env=os.environ.copy();env['CORE_QUAL_EVIDENCE']=str(evidence/'core-pipes')
         execute([exe],evidence,'core-pipes',90,env)
-    if not diagnostic and not cursor_private:attempt('core-pipes',pipes)
+    if not diagnostic and not cursor_private and not startup_metadata:attempt('core-pipes',pipes)
     if cursor_private:attempt('cursor-renderer',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',core,'--test','cursor_render','lossless_rgba_compositing_isolates_alpha_and_hotspot','--','--test-threads=1'],'cursor-renderer',1))
     if cursor_private:attempt('cursor-portable',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',core,'--test','windows_cursor_private','--','--test-threads=1','--nocapture','--skip','common::child_writer'],'cursor-portable',6))
+    if cursor_private:
+        for label,filter_name,count,names in [
+            ('cursor-startup-lifecycle','recorder::windows_capture::lifecycle::tests::',11,[
+                'recorder::windows_capture::lifecycle::tests::'+name for name in [
+                    'metadata_only_until_arm_and_terminal_is_absorbing','queued_gates_cannot_override_eof_or_early_stop',
+                    'real_startup_sequence_injects_faults_at_reachable_owned_operations','real_startup_sequence_has_one_encoder_and_admits_only_after_park_and_writer',
+                    'feed_ack_precedes_finish_when_reader_pauses_before_stop_publication','feed_end_never_acknowledges_startup_cancellation_or_invents_automatic_stop']]),
+            ('cursor-startup-contract','recorder::windows_capture::tests::',11,[
+                'recorder::windows_capture::tests::'+name for name in [
+                    'terminal_rejects_partial_killed_missing_and_inconsistent_results','frozen_media_dimensions_stay_independent_of_observed_bounds_and_legacy_origin',
+                    'automatic_end_accepts_stop_during_finalization_without_inventing_an_ack']]),
+            ('cursor-startup-gate','recorder::owned_feed::tests::',9,[
+                'recorder::owned_feed::tests::'+name for name in [
+                    'startup_geometry_freezes_first_equal_callback_without_pixels','startup_geometry_deadline_invalid_and_postfreeze_changes_fail','startup_gate_action_is_not_upgraded_by_later_arm']])]:
+            attempt(label,lambda label=label,filter_name=filter_name,count=count,names=names:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',app,'--lib',filter_name,'--','--test-threads=1','--nocapture'],label,count,names))
     def product():
+        if cursor_private and failures:return
         built={}
-        targets=[('windows_owned_qualification',True)] if diagnostic or cursor_private else [('FocusFlow',False),('windows_owned_qualification',True),('windows_encoder_fixture',True)]
+        targets=[('windows_owned_qualification',True)] if diagnostic or cursor_private or startup_metadata else [('FocusFlow',False),('windows_owned_qualification',True),('windows_encoder_fixture',True)]
         for name,test in targets:
             attempt('build-'+name,lambda name=name,test=test:built.update({name:build_exe(repo,evidence,app,name,test)}))
         actual=built.get('FocusFlow');harness=built.get('windows_owned_qualification');fixture=built.get('windows_encoder_fixture')
         write(evidence/'executables.json',{str(p):sha(p) for p in built.values()})
         assert harness is not None,'instrumented harness unavailable; dependent native cases not run'
-        if not diagnostic and not cursor_private:attempt('native-platform',lambda:execute([harness,'--platform',evidence/'native-platform.json'],evidence,'native-platform',20))
+        if startup_metadata:
+            import startup_check
+            def metadata_case():
+                root=evidence/'startup-metadata';execute([harness,'--startup-metadata',root,harness],evidence,'startup-metadata',30,observe=root)
+                startup_check.check(root/'session-0',evidence/'startup-metadata-command.json')
+            attempt('startup-metadata',metadata_case);return
+        if not diagnostic and not cursor_private and not startup_metadata:attempt('native-platform',lambda:execute([harness,'--platform',evidence/'native-platform.json'],evidence,'native-platform',20))
         def one(label,mode,w,h,nonce,worker,encoder):
             root=evidence/label
             execute([harness,root,mode,w,h,nonce,encoder,worker],evidence,label,45,observe=root,parent_death=mode=='parent-death')
@@ -342,7 +426,9 @@ def run(a):
                     root=evidence/label;execute([harness,root,'cursor-private',w,h,nonce,a.ffmpeg,harness],evidence,label,45,observe=root)
                     cursor_check.check(root/'session-0',a.ffmpeg,a.ffprobe)
                 attempt(label,private_case)
-                if failures:break # Required first profile failure is FAIL, never an unavailable/skip.
+                before_cleanup=len(failures)
+                attempt(label+'-cleanup',lambda:require_private_cleanup(evidence/label,evidence/(label+'-command.json')))
+                if len(failures)!=before_cleanup:break # Unknown/live owners forbid another profile, even after an otherwise successful command.
             return
         if diagnostic:
             attempt('close',lambda:one('close','close',641,359,202,harness,a.ffmpeg));return
@@ -362,8 +448,8 @@ def run(a):
     assert source_manifest(repo)==before,'build changed qualified source inputs'
     bound(evidence)
     write(evidence/'artifact-hashes.json',{p.relative_to(evidence).as_posix():sha(p) for p in evidence.rglob('*') if p.is_file()})
-    write(evidence/'result.json',dict(scope=scope,privateCursorProof=cursor_private,productionCursorQualified=False,diagnosticOnly=diagnostic,passed=not failures and not diagnostic and not cursor_private,cursorProofPassed=(not failures if cursor_private else None),diagnosticPassed=(not failures if diagnostic else None),failures=failures,nativeEquality='inspect each analysis; missing equality is an open coverage gate',geometryTransition='inspect resize analysis; old-pool/new-content may remain unobserved',limitations=['No actual Tauri/WebView2 Record Stop Edit Play','No microphone/pointer/device/packaging claim','WARP debug-layer failure is unqualified, never skipped']))
+    write(evidence/'result.json',dict(scope=scope,privateCursorProof=cursor_private,productionCursorQualified=False,diagnosticOnly=diagnostic or startup_metadata,metadataCollected=(not failures if startup_metadata else None),passed=not failures and not diagnostic and not cursor_private and not startup_metadata,cursorProofPassed=(not failures if cursor_private else None),diagnosticPassed=(not failures if diagnostic else None),failures=failures,nativeEquality='not a frame equality/admission lane' if startup_metadata else 'inspect each analysis; missing equality is an open coverage gate',geometryTransition='metadata observations only; no geometry is admitted' if startup_metadata else 'inspect resize analysis; old-pool/new-content may remain unobserved',limitations=['Scalar metadata only; no encoder/ARM/epoch/pixels/import or production qualification'] if startup_metadata else ['No actual Tauri/WebView2 Record Stop Edit Play','No microphone/pointer/device/packaging claim','WARP debug-layer failure is unqualified, never skipped']))
     if failures:raise RuntimeError(f'{len(failures)} required gates failed')
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--scope',choices=['full','close-diagnostic','cursor-private'],default='full');p.add_argument('--evidence',type=Path,required=True);p.add_argument('--ffmpeg',type=Path,required=True);p.add_argument('--ffprobe',type=Path,required=True);a=p.parse_args();a.ffmpeg=a.ffmpeg.resolve();a.ffprobe=a.ffprobe.resolve();run(a)
+    p=argparse.ArgumentParser();p.add_argument('--scope',choices=['full','close-diagnostic','cursor-private','startup-metadata'],default='full');p.add_argument('--evidence',type=Path,required=True);p.add_argument('--ffmpeg',type=Path,required=True);p.add_argument('--ffprobe',type=Path,required=True);a=p.parse_args();a.ffmpeg=a.ffmpeg.resolve();a.ffprobe=a.ffprobe.resolve();run(a)

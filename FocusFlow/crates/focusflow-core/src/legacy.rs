@@ -66,7 +66,7 @@ pub fn read_legacy(project_dir: &Path, project_id: &str, video: ProbedVideo, def
         frame_style: Default::default(), schema_version: 3, project_id: project_id.into(), revision: 0,
         cursor: None, cursor_settings: Default::default(),
         video: VideoAsset { cursor: crate::project::CursorMode::Embedded, path: "screen.mp4".into(), width: video.width, height: video.height, duration_us: video.duration_us },
-        microphone, timing: Timing { provenance: TimingProvenance::LegacyUnknown, audio_offset_us: None },
+        audio_tracks: None, microphone, timing: Timing { provenance: TimingProvenance::LegacyUnknown, audio_offset_us: None },
         camera: CameraDefaults { pan_transition_us: defaults.pan_transition_us, settle_us: defaults.settle_us },
         clips: vec![Clip { id: "clip-0".into(), in_us: 0, out_us: video.duration_us }], zooms, clicks, warnings,
     };

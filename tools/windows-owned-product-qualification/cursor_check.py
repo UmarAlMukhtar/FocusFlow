@@ -22,7 +22,9 @@ def pam(path):
     assert len(body)==w*h*4,'truncated/raw overflow PAM'
     return w,h,body
 
-def anchors(w,h,pixels):
+def anchors(w,h,pixels,raw_width=None,raw_height=None):
+    rw,rh=(w if raw_width is None else raw_width),(h if raw_height is None else raw_height)
+    assert 0<rw<=w and 0<rh<=h
     result=[]
     for value in (40,100,160):
         points={(i%w,i//w) for i in range(w*h) if pixels[4*i:4*i+4]==bytes([value,value,value,255])}
@@ -37,6 +39,7 @@ def anchors(w,h,pixels):
                 left=min(x for x,y in region);top=min(y for x,y in region)
                 if max(x for x,y in region)==left+15 and max(y for x,y in region)==top+15:components.append([left+8,top+8])
         assert len(components)==1,'missing/ambiguous native 16px fiducial'
+        x,y=components[0];assert x+8<=rw and y+8<=rh,'fiducial extends into raw padding'
         result.append(components[0])
     return result
 
@@ -100,14 +103,40 @@ def codec_crop(actual,expected,w,h,crop):
         assert max(errors)<=48 and sum(errors)<=12*len(errors),f'codec-tolerant 420 {name} crop mismatch: max={max(errors)}, mean={sum(errors)/len(errors)}'
     return metrics
 
+def startup(trace,info):
+    s=trace['startup'];assert isinstance(s,dict),'missing scalar startup receipt'
+    for key in ['itemCreations','captureStarts','cleanupConsumptions','metadataCallbacks','mismatches','pixelCopies','preArmPixelCopies','preAdmissionPixelCopies','sourcePublications','preArmSourcePublications','proofWrites','preArmProofWrites']:
+        assert type(s[key]) is int and 0<=s[key]<2**(32 if key in {'itemCreations','captureStarts','cleanupConsumptions'} else 64),'invalid startup counter: '+key
+    stages=[s[k] for k in ['startQpc','freezeQpc','probeQpc','preparedQpc','gate2Qpc','encoderQpc','gate4Qpc','parkEnterQpc','parkLeaveQpc','supervisorQpc','writerQpc','armQpc']]
+    assert all(type(t) is int and 0<=t<2**63 for t in stages) and stages==sorted(stages),'startup transition order disagrees'
+    assert s['armQpc']==trace['admission'],'ARM/admission disagreement'
+    assert s['itemCreations']==s['captureStarts']==s['cleanupConsumptions']==1,'startup must use one item, capture and cleanup'
+    assert all(s[k]==0 for k in ['preArmPixelCopies','preAdmissionPixelCopies','preArmSourcePublications','preArmProofWrites']),'pre-arm/admission pixel or proof activity'
+    assert s['proofWrites']==2 and s['pixelCopies']>=s['sourcePublications']>=1,'incomplete private pixel receipt'
+    assert s['metadataCallbacks']>=s['pixelCopies']+s['mismatches']+1,'metadata/copy counts disagree'
+    assert len(s['allocation'])==2 and all(type(v) is int and 2<=v<=16384 for v in s['allocation']),'invalid allocation dimensions'
+    raw=[trace['width'],trace['height']]
+    assert s['frozen']==raw and info.get('rawSize',raw)==raw,'frozen media/proof dimensions disagree'
+    assert all(type(v) is int and 2<=v<=limit for v,limit in zip(raw,[1920,1080])),'private media dimension cap'
+    encoded=[v+v%2 for v in raw];assert info['encodedSize']==encoded,'coded dimensions disagree with frozen media'
+    sources=[e for e in trace['events'] if e['kind']=='source']
+    assert len(sources)==s['sourcePublications'] and sources[0]['native']==trace['epoch'],'first source/epoch disagreement'
+    for index,event in enumerate(sources):
+        assert event['seq']==index and event['native']*trace['frequency']>=trace['admission']*10000000 and event['qpc']>=trace['admission'],'source predates ARM/admission'
+        assert [event['contentWidth'],event['contentHeight']]==[event['textureWidth'],event['textureHeight']]==raw,'source/frozen dimensions disagree'
+    return encoded
+
 def movie(directory,info,ffmpeg,ffprobe,rawanchors,reference=None,crop=None):
     summary=json.loads((directory/'proof-summary.json').read_text())
     assert summary['privateProof'] is True and summary['neverImport'] is True and summary['workerExit']==0 and summary['encoderSignaled'] is True,'Private proof completion was not verified'
     clock=summary['clock'];trace=json.loads((directory/'trace.json').read_text());picks=analyze.expected(trace)
     assert all(clock[k]==trace[k] for k in ['frequency','admission','epoch','cutoff','selected','written'])
+    encoded=startup(trace,info)
+    for index in range(2):
+        rw,rh,_=pam(directory/f'raw-{index}.pam');assert [rw,rh]==encoded,'raw exemplar/frozen dimensions disagree'
     movie=directory/('proof-with-cursor.mp4' if info['withCursor'] else 'proof-without-cursor.mp4');assert movie.stat().st_size<=64*1024*1024
     meta=json.loads(subprocess.check_output([str(ffprobe),'-v','error','-show_streams','-show_packets','-of','json',movie],timeout=20,text=True))
-    assert len(meta['streams'])==1;stream=meta['streams'][0];w,h=info['encodedSize'];assert (stream['width'],stream['height'])==(w,h) and stream['codec_name']=='h264' and stream['pix_fmt']=='yuv420p';analyze.packets(meta['packets'],stream['time_base'],len(picks))
+    assert len(meta['streams'])==1;stream=meta['streams'][0];w,h=encoded;assert (stream['width'],stream['height'])==(w,h) and stream['codec_name']=='h264' and stream['pix_fmt']=='yuv420p';analyze.packets(meta['packets'],stream['time_base'],len(picks))
     diagnostics=dict(ffmpegVersion=subprocess.check_output([str(ffmpeg),'-version'],timeout=5,text=True).splitlines()[0],comparison='fiducials for dynamic proof',frames=[])
     if reference is not None:
         assert 0<w<=1920 and 0<h<=1080 and w%2==h%2==0 and len(reference)==w*h*4,'invalid full coded RGBA reference'
@@ -143,7 +172,7 @@ def check(case,ffmpeg,ffprobe):
     private_only(case);results={};raw={};controls={}
     for mode in ['without','with','alpha-without','alpha-with']:
         d=case/mode;info=json.loads((d/'geometry.json').read_text());w,h,pixels=pam(d/'raw-0.pam');rw,rh=info['rawSize'];assert [w,h]==info['encodedSize']==[rw+rw%2,rh+rh%2]
-        native=anchors(w,h,pixels);origin=unit_origin(native,info['physicalAnchors']);g=info['geometry'];assert origin in [g['window'][:2],g['dwm'][:2],g['clientOrigin']],'no independently measured origin candidate matched'
+        native=anchors(w,h,pixels,rw,rh);origin=unit_origin(native,info['physicalAnchors']);g=info['geometry'];assert origin in [g['window'][:2],g['dwm'][:2],g['clientOrigin']],'no independently measured origin candidate matched'
         # Validate padding once; no crop, fitted scale or DPI multiplication.
         assert all(pixels[(y*w+x)*4:(y*w+x)*4+3]==bytes(3) for y in range(h) for x in range(w) if x>=rw or y>=rh),'right/bottom padding not black'
         assert info['withCursor'] is (mode in ['with','alpha-with']) and len(info['observations'])==3,'stationary pair mode/observation count mismatch'
@@ -161,7 +190,7 @@ def check(case,ffmpeg,ffprobe):
         shape=row0['shape'];shape_pixels=pixels_shape;hotspot=[row0['position'][j]-origin[j] for j in [0,1]]
         exemplars=[]
         for index in range(2):
-            ew,eh,exemplar=pam(d/f'raw-{index}.pam');assert (ew,eh)==(w,h) and anchors(w,h,exemplar)==native,'stationary raw geometry changed'
+            ew,eh,exemplar=pam(d/f'raw-{index}.pam');assert (ew,eh)==(w,h) and anchors(w,h,exemplar,rw,rh)==native,'stationary raw geometry changed'
             exemplars.append(exemplar)
         raw[mode]=exemplars;results[mode]=dict(frames=frames,movieDiagnostics=movie_diagnostics,origin=origin,rawAnchors=native,times=times,normalization='physical hotspot minus proven unit origin divided by encoded dimensions once; no telemetry admitted')
         if mode in ['with','alpha-with']:

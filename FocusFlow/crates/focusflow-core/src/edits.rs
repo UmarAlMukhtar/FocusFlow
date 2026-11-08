@@ -27,7 +27,7 @@ pub fn apply(doc: &ProjectDocument, edits: &[Edit]) -> CoreResult<ProjectDocumen
     require((1..=256).contains(&edits.len()), "edits", "Expected between 1 and 256 edits")?;
     project::validate(doc)?;
     let mut candidate = doc.clone();
-    candidate.schema_version = 4;
+    candidate.schema_version = candidate.schema_version.max(4);
     for edit in edits {
         match edit {
             Edit::SetCursorSettings { settings } => {

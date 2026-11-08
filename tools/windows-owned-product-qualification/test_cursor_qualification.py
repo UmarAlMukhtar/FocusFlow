@@ -4,6 +4,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 import run
+from test_run import STARTUP_UNIT_LOGS
 
 class CursorQualification(unittest.TestCase):
     def test_positive_hosted_binding_before_any_mutation(self):
@@ -100,7 +101,7 @@ class PrivateChecks(unittest.TestCase):
         self.assertIn('#[cfg(not(test))] let cursor=CursorCaptureSettings::WithCursor;',production)
 
 class PrivateRouting(unittest.TestCase):
-    def test_private_scope_builds_one_harness_and_stops_on_first_required_failure(self):
+    def test_private_scope_builds_one_harness_and_stops_on_unknown_cleanup(self):
         import json,tempfile
         from types import SimpleNamespace
         for fail in [False,True]:
@@ -109,19 +110,57 @@ class PrivateRouting(unittest.TestCase):
                 metadata={'packages':[{'name':'windows-capture','source':None,'manifest_path':str(repo/'FocusFlow/vendor/windows-capture/Cargo.toml')}]};calls=[];builds=[]
                 def execute(argv,evidence,name,*unused,**kwargs):
                     calls.append(name)
-                    if name in {'cursor-portable','cursor-renderer'}:
-                        log=evidence/(name+'.log');log.write_text('test result: ok. '+('6' if name=='cursor-portable' else '1')+' passed; 0 failed; 0 ignored;');return log
+                    if name in {'cursor-portable','cursor-renderer'}|STARTUP_UNIT_LOGS.keys():
+                        log=evidence/(name+'.log');log.write_text(STARTUP_UNIT_LOGS.get(name,'test result: ok. '+('6' if name=='cursor-portable' else '1')+' passed; 0 failed; 0 ignored;'));return log
                     self.assertTrue(name.startswith('cursor-'));self.assertEqual(argv[2],'cursor-private')
                     if fail:raise RuntimeError('required first native profile failed')
+                    case=evidence/name/'session-0';d=case/'without';d.mkdir(parents=True);owned=dict(parent=10,worker=20,encoder=30,qpc=123);run.write(d/'owned.json',owned)
+                    source=dict(pid=40,observed=True,signaled=True,exitCode=0);run.write(case/'source-cleanup.json',source)
+                    run.write(evidence/(name+'-command.json'),dict(cleanup=dict(parent=dict(pid=10,signaled=True,exitCode=0),owned=[dict(**owned,path='session-0/without/owned.json',signaled=[True,True])],sources=[source])))
                 def build(repo,evidence,manifest,name,test):builds.append((name,test));return root/'harness'
                 with patch('run.sys.platform','win32'),patch.dict(os.environ,{'GITHUB_REF':'refs/heads/codex-windows-cursor-qualification'}),patch('run.require_cursor_disposable_context',return_value={'sha':'a'*40}),patch('run.os.chdir'),patch('run.source_manifest',return_value={}),patch('run.sha',side_effect=lambda p:run.FFMPEG_SHA if p==args.ffmpeg else run.FFPROBE_SHA if p==args.ffprobe else 'fixture-hash'),patch('run.subprocess.check_output',side_effect=lambda argv,**kw:json.dumps(metadata) if argv[0]=='cargo' else 'a'*40),patch('run.execute',side_effect=execute),patch('run.build_exe',side_effect=build),patch('cursor_check.check') as checker:
                     if fail:
                         with self.assertRaises(RuntimeError):run.run(args)
                     else:run.run(args)
                 self.assertEqual(builds,[('windows_owned_qualification',True)])
-                self.assertEqual(len(calls),3 if fail else 6);self.assertEqual(checker.call_count,0 if fail else 4)
+                self.assertEqual(len(calls),6 if fail else 9);self.assertEqual(checker.call_count,0 if fail else 4)
                 result=json.loads((args.evidence/'result.json').read_text());self.assertFalse(result['passed']);self.assertFalse(result['productionCursorQualified']);self.assertEqual(result['cursorProofPassed'],not fail)
                 self.assertNotIn('core-publication',calls);self.assertNotIn('native-platform',calls)
+
+    def test_clean_profile_failure_collects_all_four_but_unknown_cleanup_stops(self):
+        import json,tempfile
+        from types import SimpleNamespace
+        profiles=['cursor-borderless-even','cursor-decorated-even','cursor-borderless-odd','cursor-decorated-odd']
+        faults=['confirmed','worker-live','encoder-live','source-live','parent-live','unknown-owner','missing-receipt','unobserved-preparation','owner-identity','source-identity']
+        for cleanup,failed_profile in [(fault,0) for fault in faults]+[('confirmed',i) for i in [1,2,3]]+[(fault,None) for fault in ['worker-live','missing-receipt','unobserved-preparation']]:
+            with self.subTest(cleanup=cleanup,failed_profile=failed_profile),tempfile.TemporaryDirectory() as tmp:
+                repo=Path(__file__).resolve().parents[2];root=Path(tmp);args=SimpleNamespace(evidence=root/'evidence',ffmpeg=root/'f',ffprobe=root/'p',scope='cursor-private');calls=[]
+                metadata={'packages':[{'name':'windows-capture','source':None,'manifest_path':str(repo/'FocusFlow/vendor/windows-capture/Cargo.toml')}]}
+                def execute(argv,evidence,name,*unused,**kwargs):
+                    log=evidence/(name+'.log');log.write_text(STARTUP_UNIT_LOGS.get(name,'test result: ok. '+('6' if name=='cursor-portable' else '1')+' passed; 0 failed; 0 ignored;'))
+                    if name not in profiles:return log
+                    calls.append((name,list(argv[3:6])));case=evidence/name/'session-0';d=case/'without';d.mkdir(parents=True)
+                    owned=dict(parent=10,worker=20,encoder=30,qpc=123);run.write(d/'owned.json',owned)
+                    source=dict(pid=40,observed=True,signaled=True,exitCode=0);run.write(case/'source-cleanup.json',source)
+                    final=dict(parent=dict(pid=10,signaled=True,exitCode=0),owned=[dict(**owned,path='session-0/without/owned.json',signaled=[True,True])],sources=[source])
+                    if cleanup=='worker-live':final['owned'][0]['signaled'][0]=False
+                    if cleanup=='encoder-live':final['owned'][0]['signaled'][1]=False
+                    if cleanup=='source-live':final['sources'][0]['signaled']=False
+                    if cleanup=='parent-live':final['parent']['signaled']=False
+                    if cleanup=='unknown-owner':run.write(case/'owned.json',owned)
+                    if cleanup=='unobserved-preparation':(case/'with').mkdir()
+                    if cleanup=='owner-identity':final['owned'][0]['worker']=99
+                    if cleanup=='source-identity':run.write(case/'source-cleanup.json',dict(source,pid=99))
+                    if cleanup!='missing-receipt':run.write(evidence/(name+'-command.json'),dict(argv=[str(x) for x in argv],exitCode=0,error=None,cleanup=final))
+                    if failed_profile is not None and len(calls)==failed_profile+1:raise RuntimeError('profile failed after owned cleanup: '+name)
+                    return log
+                with patch('run.sys.platform','win32'),patch.dict(os.environ,{'GITHUB_REF':'refs/heads/codex-windows-cursor-qualification'}),patch('run.require_cursor_disposable_context',return_value={'sha':'a'*40}),patch('run.os.chdir'),patch('run.source_manifest',return_value={}),patch('run.sha',side_effect=lambda p:run.FFMPEG_SHA if p==args.ffmpeg else run.FFPROBE_SHA if p==args.ffprobe else 'fixture-hash'),patch('run.subprocess.check_output',side_effect=lambda argv,**kw:json.dumps(metadata) if argv[0]=='cargo' else 'a'*40),patch('run.execute',side_effect=execute),patch('run.build_exe',return_value=root/'harness'),patch('cursor_check.check'):
+                    with self.assertRaises(RuntimeError):run.run(args)
+                self.assertEqual([c[0] for c in calls],profiles if cleanup=='confirmed' else profiles[:1])
+                self.assertEqual([c[1] for c in calls],[[320,240,500],[320,240,501],[641,359,502],[641,359,503]] if cleanup=='confirmed' else [[320,240,500]])
+                result=json.loads((args.evidence/'result.json').read_text());self.assertFalse(result['cursorProofPassed']);self.assertFalse(result['passed']);self.assertFalse(result['productionCursorQualified'])
+                if failed_profile is not None:self.assertTrue(any('profile failed after owned cleanup' in f['error'] for f in result['failures']))
+                else:self.assertEqual(result['failures'][0]['name'],profiles[0]+'-cleanup')
 
     def test_missing_or_mismatched_context_rejected_before_tools_and_output(self):
         import tempfile
@@ -335,3 +374,114 @@ class OwnedAcquisitionScope(unittest.TestCase):
         self.assertIn('native_raster(HICON(original.0)',owned,'native oracle must retain the original borrowed handle')
         wrapper=source.split('fn copied_shape(',1)[1].split('fn owned_shape(',1)[0]
         self.assertIn('fail_stage==1',wrapper);self.assertIn('owned_shape(',wrapper)
+
+class StartupChecks(unittest.TestCase):
+    def fixture(self,root):
+        import json
+        w,h=322,272
+        startup=dict(allocation=[336,279],frozen=[322,272],itemCreations=1,captureStarts=1,metadataCallbacks=5,mismatches=1,
+                     startQpc=2990000,freezeQpc=2991000,probeQpc=2992000,preparedQpc=2993000,gate2Qpc=2994000,encoderQpc=2995000,gate4Qpc=2996000,parkEnterQpc=2997000,parkLeaveQpc=2997100,supervisorQpc=2998000,writerQpc=2999000,armQpc=3000000,
+                     pixelCopies=2,preArmPixelCopies=0,preAdmissionPixelCopies=0,sourcePublications=2,preArmSourcePublications=0,proofWrites=2,preArmProofWrites=0,cleanupConsumptions=1)
+        source=dict(kind='source',order=0,seq=0,native=10000000,qpc=3000010,contentWidth=w,contentHeight=h,textureWidth=w,textureHeight=h)
+        trace=dict(startup=startup,frequency=3000000,admission=3000000,epoch=10000000,cutoff=3100000,selected=1,written=1,width=w,height=h,overflow=False,events=[source,dict(source,order=1,seq=1,native=10000001,qpc=3000020),dict(kind='decision',order=2,ordinal=0,seq=0,qpc=3100000)],writes=[dict(ordinal=0,seq=0,bytes=w*h*4,ok=True)])
+        clock={k:trace[k] for k in ['frequency','admission','epoch','cutoff','selected','written']}
+        (root/'proof-summary.json').write_text(json.dumps(dict(privateProof=True,neverImport=True,workerExit=0,encoderSignaled=True,clock=clock)))
+        (root/'proof-without-cursor.mp4').write_bytes(b'fixture; external codec substituted')
+        pixels=bytes([40,40,40,255])*(w*h)
+        for i in range(2):(root/f'raw-{i}.pam').write_bytes(f'P7\nWIDTH {w}\nHEIGHT {h}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n'.encode()+pixels)
+        info=dict(rawSize=[w,h],encodedSize=[w,h],withCursor=False)
+        meta=dict(streams=[dict(width=w,height=h,codec_name='h264',pix_fmt='yuv420p',time_base='1/30')],packets=[dict(pts=0,dts=0,duration=1)])
+        return trace,info,meta
+
+    def movie(self,root,trace,info,meta):
+        import io,json
+        import cursor_check as c
+        (root/'trace.json').write_text(json.dumps(trace))
+        class Decoder:
+            def __init__(self,*unused,**kwargs):self.stdout=io.BytesIO(bytes([40]*3)*(meta['streams'][0]['width']*meta['streams'][0]['height']))
+            def poll(self):return 0
+            def wait(self,**kwargs):return 0
+            def kill(self):raise AssertionError('fixture decoder should have finished')
+        def output(argv,**unused):return 'fixture ffmpeg\n' if '-version' in argv else json.dumps(meta)
+        with patch('cursor_check.subprocess.check_output',side_effect=output),patch('cursor_check.subprocess.Popen',Decoder):
+            return c.movie(root,info,'ffmpeg','ffprobe',[[8,8]])
+
+    def test_initial_allocation_is_not_the_frozen_media_size(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);trace,info,meta=self.fixture(root)
+            self.assertEqual(self.movie(root,trace,info,meta)[1],1)
+
+    def test_odd_frozen_media_retains_right_bottom_coded_padding(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);trace,info,meta=self.fixture(root)
+            trace.update(width=321,height=271);trace['startup']['frozen']=[321,271];info['rawSize']=[321,271]
+            for event in trace['events']:
+                if event['kind']=='source':event.update(contentWidth=321,textureWidth=321,contentHeight=271,textureHeight=271)
+            self.assertEqual(self.movie(root,trace,info,meta)[1],1)
+
+    def test_startup_receipt_and_actual_order_are_required(self):
+        import tempfile
+        faults=['missing','media','freeze-after-arm','pre-arm-copy','pre-admission-copy','second-item','second-start','cleanup-twice','arm-disagrees','probe-before-freeze','writer-before-park','source-pre-arm','source-native-pre-arm','source-publication-pre-arm','epoch','counter-disagrees','bool-counter','missing-clock','raw-exemplar','decoded-dimensions','decoded-stream-only']
+        for fault in faults:
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);trace,info,meta=self.fixture(root);s=trace['startup']
+                if fault=='missing':del trace['startup']
+                if fault=='media':s['frozen']=[336,279]
+                if fault=='freeze-after-arm':s['freezeQpc']=3000001
+                if fault=='pre-arm-copy':s['preArmPixelCopies']=1
+                if fault=='pre-admission-copy':s['preAdmissionPixelCopies']=1
+                if fault=='second-item':s['itemCreations']=2
+                if fault=='second-start':s['captureStarts']=2
+                if fault=='cleanup-twice':s['cleanupConsumptions']=2
+                if fault=='arm-disagrees':s['armQpc']=2999999
+                if fault=='probe-before-freeze':s['probeQpc']=2990999
+                if fault=='writer-before-park':s['writerQpc']=2996999
+                if fault in {'source-pre-arm','source-native-pre-arm'}:
+                    early=dict(trace['events'][0],native=9999999,qpc=2999999 if fault=='source-pre-arm' else 3000000)
+                    for e in trace['events']:
+                        e['order']+=1;e['seq']+=1
+                    trace['events'].insert(0,early);trace['writes'][0]['seq']=1;s['sourcePublications']=3;s['pixelCopies']=3;s['metadataCallbacks']=6
+                if fault=='source-publication-pre-arm':trace['events'][0]['qpc']=2999999
+                if fault=='epoch':trace['epoch']=9999999
+                if fault=='counter-disagrees':s['sourcePublications']=1
+                if fault=='bool-counter':s['itemCreations']=True
+                if fault=='missing-clock':del s['parkLeaveQpc']
+                if fault=='raw-exemplar':
+                    p=root/'raw-1.pam';p.write_bytes(p.read_bytes().replace(b'WIDTH 322\n',b'WIDTH 320\n',1)[:-2*272*4])
+                if fault=='decoded-dimensions':
+                    info['encodedSize']=[336,280];meta['streams'][0].update(width=336,height=280)
+                if fault=='decoded-stream-only':meta['streams'][0].update(width=336,height=280)
+                with self.assertRaises((AssertionError,KeyError)):self.movie(root,trace,info,meta)
+
+    def test_unit_origin_requires_real_noncollinear_markers_even_with_size_delta(self):
+        import cursor_check as c
+        raw=[[8,8],[300,8],[8,250]]
+        for origin in [[100,50],[-100,-50],[0,-50]]:
+            physical=[[x+origin[0],y+origin[1]] for x,y in raw]
+            self.assertEqual(c.unit_origin(raw,physical),origin)
+            for bad in [raw[:2],[[8,8],[9,9],[10,10]],[[16,16],[600,16],[16,500]],[[9,8],[300,8],[8,250]]]:
+                with self.assertRaises(AssertionError):c.unit_origin(bad,physical)
+        # Allocation/media differences are not evidence of a translated pixel origin.
+        with self.assertRaises(AssertionError):c.unit_origin([],[[14,7]]*3)
+
+    def test_missing_ambiguous_and_padding_fiducials_fail_with_odd_padding_positive(self):
+        import cursor_check as c
+        w,h=66,66;raw=bytearray(w*h*4)
+        def marker(p,x,y,value):
+            for yy in range(y,y+16):
+                for xx in range(x,x+16):p[(yy*w+xx)*4:(yy*w+xx)*4+4]=bytes([value]*3+[255])
+        for x,y,v in [(0,0,40),(32,0,100),(0,32,160)]:marker(raw,x,y,v)
+        self.assertEqual(c.anchors(w,h,raw,65,65),[[8,8],[40,8],[8,40]])
+        for fault in ['missing','ambiguous','padding']:
+            bad=raw.copy()
+            if fault=='missing':marker(bad,0,32,0)
+            if fault=='ambiguous':marker(bad,32,32,40)
+            if fault=='padding':marker(bad,50,32,160);marker(bad,0,32,0)
+            with self.subTest(fault=fault):
+                if fault=='padding':
+                    # The 16px marker extends into the right pad of a 65px raw frame.
+                    with self.assertRaises(AssertionError):c.anchors(w,h,bad,65,65)
+                else:
+                    with self.assertRaises(AssertionError):c.anchors(w,h,bad)

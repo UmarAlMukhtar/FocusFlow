@@ -225,7 +225,8 @@ fn graph(snapshot: &crate::store::RenderSnapshot, plan: &RenderPlan, use_audio: 
     selection: Option<&crate::preview::PreviewSelection>, window: Option<&cursor_window::CursorWindow>) -> CoreResult<String> {
     crate::project::require((!snapshot.document.cursor_settings.enabled && plan.follow.is_none()) || window.is_some(), "cursor", "Cursor overlay or follow requires the prepared window renderer")?;
     let selected = selection.filter(|_|window.is_none()).map(|s| crate::preview::inputs(snapshot, plan, s, use_audio)).transpose()?;
-    let audio = if selected.is_none() && window.is_none() { crate::audio::render_audio(snapshot, use_audio)? } else { None };
+    let compiled_audio = if snapshot.document.schema_version==5 && selected.is_none() && window.is_none() {Some(crate::audio::compile_audio(snapshot,plan,None,use_audio)?)}else{None};
+    let audio = if snapshot.document.schema_version<5 && selected.is_none() && window.is_none() { crate::audio::render_audio(snapshot, use_audio)? } else { None };
     let width = (snapshot.document.video.width / 2 * 2).max(2);
     let height = (snapshot.document.video.height / 2 * 2).max(2);
     let fps = plan.preset.fps();
@@ -315,7 +316,7 @@ fn graph(snapshot: &crate::store::RenderSnapshot, plan: &RenderPlan, use_audio: 
         let (w,h) = crate::preview::dimensions(g.width,g.height);
         graph.chain(format_args!("[preview_composed]scale={w}:{h},setsar=1[v]"))?;
     }
-    let audio_text=audio_graph(snapshot,plan,selected.as_ref(),audio)?;
+    let audio_text=if let Some(audio)=selected.as_ref().and_then(|s|s.compiled_audio.as_ref()).or(compiled_audio.as_ref()){compiled_audio_graph(audio)}else{audio_graph(snapshot,plan,selected.as_ref(),audio)?};
     if !audio_text.is_empty(){graph.chain(format_args!("{audio_text}"))?;}
     Ok(graph.text)
 }
@@ -519,7 +520,11 @@ fn audio_graph(snapshot:&crate::store::RenderSnapshot,plan:&RenderPlan,selected:
  Ok(graph.text)
 }
 
+fn compiled_audio_graph(audio:&crate::audio::AudioRenderPlan)->String {
+    if audio.tracks.is_empty(){String::new()}else{format!("[{}:a]asettb=1/48000,asetpts=N[a]",audio.input_base)}
+}
 pub(crate) fn mux_audio_graph(snapshot:&crate::store::RenderSnapshot,plan:&RenderPlan,selection:Option<&crate::preview::PreviewSelection>)->CoreResult<String>{
+ if snapshot.document.schema_version==5{return Ok(compiled_audio_graph(&crate::audio::compile_audio(snapshot,plan,selection,true)?));}
  let selected=selection.map(|s|crate::preview::inputs(snapshot,plan,s,true)).transpose()?;
  let audio=if selected.is_none(){crate::audio::render_audio(snapshot,true)?}else{None};
  audio_graph(snapshot,plan,selected.as_ref(),audio)

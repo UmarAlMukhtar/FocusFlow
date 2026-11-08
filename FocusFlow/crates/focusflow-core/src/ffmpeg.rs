@@ -285,13 +285,15 @@ pub fn render_args(snapshot: &crate::store::RenderSnapshot, plan: &crate::render
     work_dir: &Path, use_audio: bool) -> CoreResult<Vec<std::ffi::OsString>> {
     crate::render::validate_plan(snapshot, plan)?;
     let video = crate::paths::asset_path(&snapshot.project_dir, &snapshot.document.video.path)?;
-    let audio = crate::audio::render_audio(snapshot, use_audio)?;
+    let compiled_audio=if snapshot.document.schema_version==5{Some(crate::audio::compile_audio(snapshot,plan,None,use_audio)?)}else{None};
+    let audio = if compiled_audio.is_none(){crate::audio::render_audio(snapshot, use_audio)?}else{None};
     let mut args: Vec<std::ffi::OsString> = ["-hide_banner", "-nostats", "-progress", "pipe:1", "-y"].map(Into::into).into();
     args.extend(input_args(&video, true));
     if let Some(input) = &audio { args.extend(input_args(&input.path, false)); }
+    let has_compiled_audio=append_compiled_audio(&mut args,compiled_audio.as_ref(),work_dir)?;
     args.push("-filter_complex_script".into()); args.push(work_dir.join(FILTER_SCRIPT).into_os_string());
     args.extend(["-map", "[v]"].map(Into::into));
-    if audio.is_some() { args.extend(["-map", "[a]", "-c:a", "aac", "-b:a", "128k"].map(Into::into)); }
+    if audio.is_some() || has_compiled_audio { args.extend(["-map", "[a]", "-c:a", "aac", "-b:a", "128k"].map(Into::into)); }
     else { args.push("-an".into()); }
     args.extend(["-r".into(), plan.preset.fps().to_string().into(), "-c:v".into(), "libx264".into(),
         "-preset".into(), "veryfast".into(), "-crf".into(), plan.preset.crf().to_string().into(),
@@ -300,6 +302,14 @@ pub fn render_args(snapshot: &crate::store::RenderSnapshot, plan: &crate::render
     Ok(args)
 }
 
+fn append_compiled_audio(args:&mut Vec<std::ffi::OsString>,audio:Option<&crate::audio::AudioRenderPlan>,work_dir:&Path)->CoreResult<bool> {
+    let Some(audio)=audio.filter(|a|!a.tracks.is_empty())else{return Ok(false);};
+    crate::project::require(args.iter().filter(|arg|*arg=="-i").count()==audio.input_base,"audio.inputs","Compiled audio input numbering does not match the video plan")?;
+    args.extend(raw_audio_input_args(&work_dir.join(crate::audio::normalize::RAW_AUDIO)));Ok(true)
+}
+fn raw_audio_input_args(input:&Path)->Vec<std::ffi::OsString> {
+    let mut args:Vec<std::ffi::OsString>=["-protocol_whitelist","file,pipe","-f","f32le","-ar","48000","-ac","2","-i"].map(Into::into).into();args.push(input.as_os_str().into());args
+}
 fn input_args(input: &Path, video: bool) -> Vec<std::ffi::OsString> {
     // Recorder containers only: auto-probed playlists and external MOV tracks can escape asset containment.
     let format = if video { "mov" } else { "wav" };
@@ -426,13 +436,14 @@ pub fn preview_args(snapshot: &crate::store::RenderSnapshot, plan: &crate::rende
             args.extend(input_args(&wav.path, false));
         }
     }
+    let has_compiled_audio=append_compiled_audio(&mut args,selected.compiled_audio.as_ref(),work_dir)?;
     args.push("-filter_complex_script".into()); args.push(work_dir.join(FILTER_SCRIPT).into_os_string());
     args.extend(["-map", "[v]", "-frames:v"].map(Into::into)); args.push(selection.frame_count.to_string().into());
     if still {
         args.extend(["-an", "-c:v", "png", "-threads", "1", "-update", "1"].map(Into::into));
         args.push(work_dir.join("output.partial.png").into_os_string());
     } else {
-        if selected.audio.is_some() { args.extend(["-map", "[a]", "-c:a", "aac", "-b:a", "128k"].map(Into::into)); }
+        if selected.audio.is_some() || has_compiled_audio { args.extend(["-map", "[a]", "-c:a", "aac", "-b:a", "128k"].map(Into::into)); }
         else { args.push("-an".into()); }
         args.extend(["-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", "25", "-pix_fmt", "yuv420p", "-movflags", "+faststart"].map(Into::into));
         args.push(work_dir.join(RENDER_OUTPUT).into_os_string());

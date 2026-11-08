@@ -52,7 +52,7 @@ pub fn dimensions(width: u32, height: u32) -> (u32, u32) {
 
 pub(crate) struct VideoSpan { pub clip: usize, pub first: u64, pub count: u64, pub source_first: u64 }
 pub(crate) struct AudioSpan { pub count: u64, pub low: u64, pub high: u64, pub delay: u64, pub input: Option<usize> }
-pub(crate) struct Inputs { pub video: Vec<VideoSpan>, pub audio: Option<crate::audio::RenderAudio>, pub audio_spans: Vec<AudioSpan> }
+pub(crate) struct Inputs { pub compiled_audio: Option<crate::audio::AudioRenderPlan>, pub video: Vec<VideoSpan>, pub audio: Option<crate::audio::RenderAudio>, pub audio_spans: Vec<AudioSpan> }
 
 pub(crate) fn inputs(snapshot: &crate::store::RenderSnapshot, plan: &RenderPlan, selection: &PreviewSelection, use_audio: bool) -> CoreResult<Inputs> {
     validate(plan, selection)?;
@@ -62,6 +62,10 @@ pub(crate) fn inputs(snapshot: &crate::store::RenderSnapshot, plan: &RenderPlan,
         let (first, count, source_first) = crate::render::clip_grid(clip, FPS)?;
         let a = first.max(p); let b = (first + count).min(q);
         if a < b { video.push(VideoSpan { clip: index, first: a, count: b - a, source_first: source_first + a - first }); }
+    }
+    if snapshot.document.schema_version == 5 {
+        let compiled_audio=Some(crate::audio::compile_audio(snapshot,plan,Some(selection),use_audio)?);
+        return Ok(Inputs{video,audio:None,audio_spans:Vec::new(),compiled_audio});
     }
     let mut input_count = video.len();
     let mut audio = crate::audio::render_audio(snapshot, use_audio)?;
@@ -86,5 +90,5 @@ pub(crate) fn inputs(snapshot: &crate::store::RenderSnapshot, plan: &RenderPlan,
         if audio_spans.is_empty() { audio = None; }
     }
     crate::project::require(input_count <= MAX_INPUTS, "preview.inputs", "Preview exceeds 32 seeked file inputs; request a shorter or simpler range")?;
-    Ok(Inputs { video, audio, audio_spans })
+    Ok(Inputs { video, audio, audio_spans, compiled_audio: None })
 }

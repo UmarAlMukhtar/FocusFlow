@@ -642,7 +642,7 @@ mod tests {
         fs::write(root.join("cursor/index.json"),serde_json::to_vec(&index).unwrap()).unwrap();
         let samples=shapes.iter().enumerate().map(|(i,s)|format!("{}\n",serde_json::json!({"atUs":i*100,"x":0.5,"y":0.5,"visible":true,"shapeId":s.id,"discontinuity":false}))).collect::<String>();
         fs::write(root.join("cursor/samples.ndjson"),samples).unwrap();
-        let doc=ProjectDocument{schema_version:3,project_id:"fixture".into(),revision:0,frame_style:Default::default(),
+        let doc=ProjectDocument{audio_tracks:None,schema_version:3,project_id:"fixture".into(),revision:0,frame_style:Default::default(),
             video:VideoAsset{cursor:CursorMode::Separate,path:"screen.mp4".into(),width:bounds.width,height:bounds.height,duration_us},
             cursor:Some(CursorAsset{index_path:"cursor/index.json".into()}),cursor_settings:CursorSettings{enabled:true,style:CursorStyle::Native,..Default::default()},
             microphone:None,timing:Timing{provenance:TimingProvenance::LegacyUnknown,audio_offset_us:None},camera:CameraDefaults{pan_transition_us:0,settle_us:0},

@@ -173,3 +173,48 @@ fn production_cursor_pixels_only_change_inside_resampled_glyph() {
   for (name,bytes) in assets{assert_eq!(fs::read(dir.join(name)).unwrap(),bytes,"render mutated {name}");}
  }
 }
+
+fn add_two_tracks(dir:&Path,doc:&mut ProjectDocument){
+ for(name,rate,channels,markers) in [("mic.wav",44100,1,vec![17640_u32,35280]),("system.wav",48000,2,vec![9600,31200])]{
+  let mut w=hound::WavWriter::create(dir.join(name),hound::WavSpec{channels,sample_rate:rate,bits_per_sample:32,sample_format:hound::SampleFormat::Float}).unwrap();
+  for n in 0..rate*2{for channel in 0..channels{let v=if markers.contains(&n){if channel==0{0.9_f32}else{-0.6}}else{((n*17%127)as f32-63.0)*0.0001};w.write_sample(v).unwrap();}}w.finalize().unwrap();
+ }
+ doc.schema_version=5;doc.microphone=None;doc.timing=Timing{provenance:TimingProvenance::LegacyUnknown,audio_offset_us:None};doc.audio_tracks=Some(AudioTracks{microphone:Some(AudioTrack{path:"mic.wav".into(),sample_rate:44100,channels:1,frame_count:88200,timing:AudioTrackTiming::Unknown{}}),system:Some(AudioTrack{path:"system.wav".into(),sample_rate:48000,channels:2,frame_count:96000,timing:AudioTrackTiming::Estimated{offset_us:250000,uncertainty_us:10}})});
+}
+fn audio_pcm(path:&Path)->Vec<f32>{run("/usr/bin/ffmpeg",&["-v","error","-i",path.to_str().unwrap(),"-map","0:a","-c:a","pcm_f32le","-f","f32le","-"]).chunks_exact(4).map(|b|f32::from_le_bytes(b.try_into().unwrap())).collect()}
+fn peak(samples:&[f32],at:usize)->usize{let frames=samples.len()/2;let first=at.saturating_sub(1024);let end=(at+1025).min(frames);(first..end).max_by(|a,b|samples[a*2].abs().total_cmp(&samples[b*2].abs())).unwrap()}
+#[cfg(unix)]
+#[test]
+fn two_track_preview_export_parity_in_ordinary_cursor_and_follow_jobs(){
+ for route in ["ordinary","cursor","follow"]{
+  let(temp,dir,mut doc)=media_fixture();add_two_tracks(&dir,&mut doc);
+  if route=="ordinary"{doc.video.cursor=CursorMode::Embedded;doc.cursor=None;doc.cursor_settings=CursorSettings::default();}
+  if route=="follow"{doc.cursor_settings.enabled=false;doc.zooms.push(ZoomElement{mode:ZoomMode::Follow,id:"follow".into(),clip_id:"a".into(),start_us:12345,end_us:1_012_346,x:0.5,y:0.5,scale:2.0,intro_us:100000,hold_us:0,outro_us:100000});}
+  fs::write(dir.join("project.json"),serde_json::to_vec(&doc).unwrap()).unwrap();let before:Vec<_>=["project.json","screen.mp4","mic.wav","system.wav"].map(|p|(p,fs::read(dir.join(p)).unwrap())).into();
+  use std::os::unix::fs::PermissionsExt;
+  let wrapper=temp.path().join("capture-ffmpeg.sh");
+  fs::write(&wrapper,b"#!/bin/sh\nset -eu\nfor arg do\n case \"$arg\" in */audio-scratch/final.f32) cp -- \"$arg\" \"${arg%/audio-scratch/final.f32}/pre-aac.f32\";; esac\ndone\nexec /usr/bin/ffmpeg \"$@\"\n").unwrap();
+  fs::set_permissions(&wrapper,fs::Permissions::from_mode(0o700)).unwrap();
+  let m=JobManager::new(temp.path(),&wrapper).unwrap();let export=m.start_export("fixture",0,ExportPreset::Balanced).unwrap();let export=m.wait("fixture",&export.job_id).unwrap();assert_eq!(export.state,JobState::Completed,"{route} {:?}",export.error);assert!(!export.warnings.iter().any(|w|w.contains("retrying")),"{:?}",export.warnings);
+  let full_path=dir.join(export.output_relative_path.unwrap());let probe:serde_json::Value=serde_json::from_slice(&run("/usr/bin/ffprobe",&["-v","error","-show_streams","-of","json",full_path.to_str().unwrap()])).unwrap();let streams=probe["streams"].as_array().unwrap();assert!(streams.iter().any(|s|s["codec_name"]=="aac" && s["sample_rate"]=="48000" && s["channels"]==2));assert!(streams.iter().any(|s|s["codec_name"]=="h264" && s["nb_frames"]=="61"));
+  let preview=m.start_preview("fixture",0,PreviewRequest::Video{start_us:100000,end_us:1_900_000}).unwrap();let preview=m.wait("fixture",&preview.job_id).unwrap();assert_eq!(preview.state,JobState::Completed,"{route} {:?}",preview.error);assert!(!preview.warnings.iter().any(|w|w.contains("retrying")));
+  let full_raw=fs::read(dir.join("exports").join(&export.job_id).join("pre-aac.f32")).unwrap();let crop_raw=fs::read(dir.join("exports").join(&preview.job_id).join("pre-aac.f32")).unwrap();assert_eq!(full_raw.len(),96001*8);assert_eq!(crop_raw.len(),86400*8);assert_eq!(crop_raw,full_raw[4800*8..91200*8],"{route} actual job PCM must be an exact crop");
+  let full=audio_pcm(&full_path);let cropped=audio_pcm(&dir.join(preview.output_relative_path.unwrap()));for expected in [18607_usize,37807,66607,85807]{let a=peak(&full,expected);let b=peak(&cropped,expected-4800)+4800;assert!(a.abs_diff(b)<=1024,"{route} marker{expected}: full{a} preview{b}");}
+  let still=m.start_preview("fixture",0,PreviewRequest::Still{at_us:500000}).unwrap();let still=m.wait("fixture",&still.job_id).unwrap();assert_eq!(still.state,JobState::Completed);assert_eq!(&fs::read(dir.join(still.output_relative_path.unwrap())).unwrap()[..8],b"\x89PNG\r\n\x1a\n");assert!(!dir.join("exports").join(&still.job_id).join("pre-aac.f32").exists());
+  for job in [export.job_id,preview.job_id,still.job_id]{assert!(!dir.join("exports").join(job).join("audio-scratch").exists());}
+  for(name,bytes)in before{assert_eq!(fs::read(dir.join(name)).unwrap(),bytes,"{route} {name}");}
+ }
+}
+
+#[test]
+fn two_track_mix_and_corrupt_sibling_preserve_video_in_all_consumers(){
+ for route in ["ordinary","cursor","follow"]{for both_corrupt in [false,true]{
+  let(temp,dir,mut doc)=media_fixture();add_two_tracks(&dir,&mut doc);
+  if route=="ordinary"{doc.video.cursor=CursorMode::Embedded;doc.cursor=None;doc.cursor_settings=CursorSettings::default();}
+  if route=="follow"{doc.cursor_settings.enabled=false;doc.zooms.push(ZoomElement{mode:ZoomMode::Follow,id:"follow".into(),clip_id:"a".into(),start_us:12345,end_us:1_012_346,x:0.5,y:0.5,scale:2.0,intro_us:100000,hold_us:0,outro_us:100000});}
+  fs::write(dir.join("project.json"),serde_json::to_vec(&doc).unwrap()).unwrap();fs::write(dir.join("mic.wav"),b"invalid optional microphone").unwrap();if both_corrupt{fs::write(dir.join("system.wav"),b"invalid optional system audio").unwrap();}
+  let before:Vec<_>=["project.json","screen.mp4","mic.wav","system.wav"].map(|p|(p,fs::read(dir.join(p)).unwrap())).into();let m=JobManager::new(temp.path(),Path::new("/usr/bin/ffmpeg")).unwrap();let job=m.start_export("fixture",0,ExportPreset::Balanced).unwrap();let done=m.wait("fixture",&job.job_id).unwrap();assert_eq!(done.state,JobState::Completed,"{route} {both_corrupt}: {:?}",done.error);assert!(done.warnings.iter().any(|w|w=="InvalidMicrophoneAudio"));assert_eq!(done.warnings.iter().any(|w|w=="InvalidSystemAudio"),both_corrupt);assert!(!done.warnings.iter().any(|w|w.contains("retrying")));
+  let probe:serde_json::Value=serde_json::from_slice(&run("/usr/bin/ffprobe",&["-v","error","-show_streams","-of","json",dir.join(done.output_relative_path.unwrap()).to_str().unwrap()])).unwrap();let streams=probe["streams"].as_array().unwrap();assert_eq!(streams.iter().any(|s|s["codec_name"]=="aac"),!both_corrupt);assert!(streams.iter().any(|s|s["codec_name"]=="h264" && s["nb_frames"]=="61"));
+  assert!(!dir.join("exports").join(done.job_id).join("audio-scratch").exists());for(name,bytes)in before{assert_eq!(fs::read(dir.join(name)).unwrap(),bytes,"{name}");}
+ }}
+}

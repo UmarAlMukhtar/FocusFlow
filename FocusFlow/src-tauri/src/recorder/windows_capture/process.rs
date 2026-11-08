@@ -1,7 +1,8 @@
 //! App-owned Job and gated WGC worker. No frame data crosses the control pipe.
 use super::*;
 use super::super::{CapturePlan, StartReservation};
-use owned_feed::{Geometry, OwnedCount, OwnedPixels, Source, Selector, complete_cells, write_frame};
+use owned_feed::{Geometry, FrameAction, OwnedCount, OwnedPixels, Source, Selector, complete_cells, write_frame};
+use super::lifecycle::{Lifecycle,ordered_controls,with_capture,StartupOps,StartupStep};
 use std::{ffi::{OsStr,OsString}, io::Write, os::windows::{io::AsRawHandle,process::CommandExt}, path::PathBuf,
  process::{Child,Command,Stdio}, sync::{Arc,Mutex,mpsc::{self,Receiver,SyncSender},atomic::{AtomicBool,Ordering}},thread,time::{Duration,Instant}};
 use ::windows::{core::{PCWSTR,BOOL}, Win32::{Foundation::{CloseHandle,DuplicateHandle,HANDLE,HWND,WAIT_OBJECT_0,WAIT_TIMEOUT,SetLastError,GetLastError,WIN32_ERROR,ERROR_INVALID_WINDOW_HANDLE},System::{JobObjects::*,Performance::*,Threading::*,WinRT::{RoInitialize,RoUninitialize,RO_INIT_MULTITHREADED}},UI::WindowsAndMessaging::GetWindowThreadProcessId}};
@@ -67,12 +68,8 @@ impl SourceOwner {
 // Keep only the Send window variant; the upstream enum also contains a thread-bound picker HWND.
 struct PreparedWindow {item: ::windows_capture::GraphicsCaptureItem,window:Window}
 impl From<PreparedWindow> for GraphicsCaptureItemType {fn from(value:PreparedWindow)->Self{Self::Window((value.item,value.window))}}
-fn item_geometry(item:&PreparedWindow)->Result<Geometry>{
+fn item_allocation_geometry(item:&PreparedWindow)->Result<Geometry>{
  let size=item.item.Size().map_err(err)?;Geometry::new(u32::try_from(size.Width).map_err(err)?,u32::try_from(size.Height).map_err(err)?).map_err(err)
-}
-fn verify_source(window:u64,pid:u32,item:&PreparedWindow,g:Geometry)->Result<()> {
- verify_identity(window,pid)?;let actual=item_geometry(item)?;
- if (actual.width,actual.height)!=(g.width,g.height){return Err("Selected window changed size before admission; select it again".into());}Ok(())
 }
 
 pub(in super::super) struct Session {child:Child,job:Handle,encoder:Option<Handle>,messages:Receiver<Result<Message>>,manifest:Option<WindowsCaptureManifestV2>,finished:bool}
@@ -142,10 +139,11 @@ fn probe_profile(ffmpeg:&Path,job:&str)->Result<()> {
   if wait_child(&mut encoder.0,Instant::now()+STAGE)?!=0{return Err(format!("Installed FFmpeg cannot encode the required H.264 profile: {}",diagnostic.recv_timeout(STAGE).map_err(err)??));}Ok(())})();
  let _=std::fs::remove_dir_all(dir);result
 }
-#[derive(Clone,Default)]
-struct Shared {cutoff:Option<i64>,closed:bool,geometry_changed:bool,source_availability:Option<SourceAvailabilityEnd>,failure:Option<String>,#[cfg(test)] trace:qualification::Trace}
+struct Shared {state:Lifecycle,source_availability:Option<SourceAvailabilityEnd>,#[cfg(test)] trace:qualification::Trace}
+impl std::ops::Deref for Shared {type Target=Lifecycle;fn deref(&self)->&Lifecycle{&self.state}}
+impl std::ops::DerefMut for Shared {fn deref_mut(&mut self)->&mut Lifecycle{&mut self.state}}
 #[derive(Clone)]
-struct Flags {tx:SyncSender<Source>,shared:Arc<Mutex<Shared>>,live:Arc<OwnedCount>,geometry:Geometry,#[cfg(test)] window:u64,#[cfg(test)] pid:u32,#[cfg(test)] proof_path:Option<PathBuf>}
+struct Flags {tx:SyncSender<Source>,shared:Arc<Mutex<Shared>>,live:Arc<OwnedCount>,frequency:i64,#[cfg(test)] window:u64,#[cfg(test)] pid:u32,#[cfg(test)] proof_path:Option<PathBuf>}
 struct Capture {flags:Flags,seq:u64,#[cfg(test)] rejected_seen:bool}
 impl GraphicsCaptureApiHandler for Capture {
  type Flags=Flags;type Error=Box<dyn std::error::Error+Send+Sync>;
@@ -153,34 +151,42 @@ impl GraphicsCaptureApiHandler for Capture {
  fn on_frame_arrived(&mut self,frame:&mut Frame,control:InternalCaptureControl)->std::result::Result<(),Self::Error>{
   #[cfg(test)] let callback_qpc=qpc().ok();
   let result=(||->Result<()>{
+   #[allow(unused_variables)] let (action,content)={let mut state=self.flags.shared.lock().map_err(err)?;
+    if state.terminal(){return Ok(());}
+    let content=match frame.content_size(){Ok(content)=>content,Err(error)=>{let error=err(error);state.failure=Some(error.clone());return Err(error);}};let texture=(frame.width(),frame.height());
+    #[cfg(test)] let before=state.gate.geometry().is_some();
+    let action=state.observe(content,texture,Instant::now(),qpc)?;
+    #[cfg(test)] {state.trace.startup.metadata_callbacks+=1;if !before{if state.gate.geometry().is_some(){state.trace.startup.frozen=Some((content.0,content.1));state.trace.startup.freeze_qpc=Some(qpc()?);}else{state.trace.startup.mismatches+=1;}}
+     if matches!(action,FrameAction::GeometryChanged){let cutoff=state.cutoff.unwrap_or_default();state.trace.push(qualification::Event{kind:"geometry",qpc:cutoff,content_width:content.0,content_height:content.1,texture_width:texture.0,texture_height:texture.1,..Default::default()})?;}
+    }
+    (action,content)
+   };
+   let (g,admission)=match action{FrameAction::Discard=>return Ok(()),FrameAction::GeometryChanged=>return Ok(()),FrameAction::Copy{geometry,admission}=>(geometry,admission)};
    let native=frame.timestamp().map_err(err)?.Duration;
-   #[cfg(test)] let content=frame.content_size().map_err(err)?;
-   if !self.flags.geometry.matches(frame.content_size().map_err(err)?,(frame.width(),frame.height())){
-    let mut state=self.flags.shared.lock().map_err(err)?;
-    #[cfg(test)] state.trace.push(qualification::Event{kind:"geometry",native,content_width:content.0,content_height:content.1,texture_width:frame.width(),texture_height:frame.height(),..Default::default()})?;
-    if state.cutoff.is_none(){state.cutoff=Some(qpc()?);state.geometry_changed=true;}drop(state);return Ok(());
-   }
+   if !owned_feed::admitted(native,admission,self.flags.frequency)?{return Ok(());}
+   #[cfg(test)] {let mut state=self.flags.shared.lock().map_err(err)?;state.trace.startup.pixel_copies+=1;if !matches!(state.gate,owned_feed::CaptureGate::Armed{..}){state.trace.startup.pre_arm_pixel_copies+=1;}if !owned_feed::admitted(native,admission,self.flags.frequency)?{state.trace.startup.pre_admission_pixel_copies+=1;}}
    let mut buffer=frame.buffer().map_err(err)?;if buffer.color_format()!=ColorFormat::Bgra8{return Err("WGC frame is not BGRA".into());}
-   let pitch=buffer.row_pitch() as usize;let owned=OwnedPixels::copy(buffer.as_raw_buffer(),pitch,self.flags.geometry,self.flags.live.clone())?;
+   let pitch=buffer.row_pitch() as usize;let owned=OwnedPixels::copy(buffer.as_raw_buffer(),pitch,g,self.flags.live.clone())?;
    #[cfg(test)] let identity_before=qpc().ok();
-   #[cfg(test)] if let Some(path)=&self.flags.proof_path{qualification::proof::save_pixels(path,&owned,self.flags.geometry,self.seq)?;}
-   #[cfg(test)] let (paint,nonce,corners)=if self.flags.proof_path.is_some(){(0,0,[0;4])}else{match qualification::identity(&owned,self.flags.geometry){
+   #[cfg(test)] if let Some(path)=&self.flags.proof_path{qualification::proof::save_pixels(path,&owned,g,self.seq)?;if self.seq<2{let mut state=self.flags.shared.lock().map_err(err)?;state.trace.startup.proof_writes+=1;if state.trace.startup.arm_qpc.is_none(){state.trace.startup.pre_arm_proof_writes+=1;}}}
+   #[cfg(test)] let (paint,nonce,corners)=if self.flags.proof_path.is_some(){(0,0,[0;4])}else{match qualification::identity(&owned,g){
     Ok(value)=>value,Err(error)=>{
      if !self.rejected_seen{self.rejected_seen=true;
-      let observed=qualification::rejected(&owned,self.flags.geometry,self.seq,native,callback_qpc,identity_before,content,(frame.width(),frame.height()),self.flags.window,self.flags.pid,&error);
+      let observed=qualification::rejected(&owned,g,self.seq,native,callback_qpc,identity_before,content,(frame.width(),frame.height()),self.flags.window,self.flags.pid,&error);
       if let Ok(mut state)=self.flags.shared.lock(){if state.trace.rejected.is_none(){state.trace.rejected=Some(observed);}}
      }
      return Err(error);
     }
    }};
-   #[allow(unused_mut)] let mut state=self.flags.shared.lock().map_err(err)?;if state.cutoff.is_some(){return Ok(());}
+   #[allow(unused_mut)] let mut state=self.flags.shared.lock().map_err(err)?;if state.terminal(){return Ok(());}
    let published=qpc()?;self.flags.tx.try_send(Source{seq:self.seq,native,published,pixels:Arc::new(owned)}).map_err(|_|"Source snapshot queue overflow/disconnected")?;
+   #[cfg(test)] {state.trace.startup.source_publications+=1;if state.trace.startup.arm_qpc.is_none(){state.trace.startup.pre_arm_source_publications+=1;}}
    #[cfg(test)] state.trace.push(qualification::Event{kind:"source",seq:self.seq,native,qpc:published,paint,nonce,corners,content_width:content.0,content_height:content.1,texture_width:frame.width(),texture_height:frame.height(),..Default::default()})?;
    self.seq=self.seq.checked_add(1).ok_or("Snapshot sequence overflow")?;drop(state);Ok(())
   })();
   if let Err(e)=result{if let Ok(mut state)=self.flags.shared.lock(){state.failure=Some(e.clone());}control.stop();return Err(e.into());}if self.flags.shared.lock().map_err(|_|"Capture state poisoned")?.geometry_changed{control.stop();}Ok(())
  }
- fn on_closed(&mut self)->std::result::Result<(),Self::Error>{let mut state=self.flags.shared.lock().map_err(|_|"Capture state poisoned")?;if state.cutoff.is_none(){state.cutoff=Some(qpc()?);state.closed=true;}Ok(())}
+ fn on_closed(&mut self)->std::result::Result<(),Self::Error>{let mut state=self.flags.shared.lock().map_err(|_|"Capture state poisoned")?;if !state.terminal(){state.cutoff=Some(qpc()?);state.closed=true;}Ok(())}
 }
 #[derive(Clone,Default)]
 struct Progress {began:Option<Instant>,complete:u32,#[cfg(test)] writes:qualification::Writes,#[cfg(test)] supervisor_terminated:Option<bool>}
@@ -208,37 +214,111 @@ impl Supervisor {
  fn finish(&self)->Result<()>{self.stop.store(true,Ordering::SeqCst);self.done.recv_timeout(STAGE).map_err(err)?}
 }
 impl Drop for Supervisor {fn drop(&mut self){self.stop.store(true,Ordering::SeqCst);}}
+fn startup_live(shared:&Arc<Mutex<Shared>>,owner:&SourceOwner,finished:bool)->Result<()> {
+ owner.require_available()?;shared.lock().map_err(err)?.require_live()?;if finished{return Err("WGC ended before admission; restore the window and retry".into());}Ok(())
+}
+fn wait_gate(control:&Receiver<Result<()>>,shared:&Arc<Mutex<Shared>>,owner:&SourceOwner,finished:impl Fn()->bool,deadline:Option<Instant>)->Result<()> {
+ loop{startup_live(shared,owner,finished())?;if deadline.is_some_and(|d|Instant::now()>=d){return Err("Window encoder admission timed out; restore the window and retry".into());}
+  match control.try_recv(){Ok(result)=>{result?;startup_live(shared,owner,finished())?;return Ok(());},Err(mpsc::TryRecvError::Disconnected)=>return Err("Parent control lost".into()),Err(mpsc::TryRecvError::Empty)=>thread::sleep(POLL)}
+ }
+}
+type NativeCapture=windows_capture::capture::CaptureControl<Capture,<Capture as GraphicsCaptureApiHandler>::Error>;
+struct Preparing<'a> {
+ capture:&'a NativeCapture,shared:&'a Arc<Mutex<Shared>>,owner:&'a SourceOwner,controls:&'a Receiver<Result<()>>,
+ ffmpeg:&'a Path,path:&'a Path,job:&'a str,warm_deadline:Instant,arm_deadline:Option<Instant>,freq:i64,g:Option<Geometry>,started:Option<(i64,Selector)>,
+ encoder:&'a mut Option<Encoder>,stderr:&'a mut Option<Receiver<Result<String>>>,supervisor:&'a mut Option<Supervisor>,
+ writer_tx:&'a mut Option<SyncSender<Source>>,done_rx:&'a mut Option<Receiver<Result<()>>>,progress:&'a Arc<Mutex<Progress>>,
+}
+impl StartupOps for Preparing<'_> {
+ fn step(&mut self,step:StartupStep)->Result<()> {
+  use StartupStep::*;startup_live(self.shared,self.owner,self.capture.is_finished())?;
+  if self.arm_deadline.is_some_and(|deadline|Instant::now()>=deadline){return Err("Window encoder admission timed out; restore the window and retry".into());}
+  match step {
+   Freeze=>{self.g=Some(loop{startup_live(self.shared,self.owner,self.capture.is_finished())?;let state=self.shared.lock().map_err(err)?;
+    if state.gate.geometry().is_some(){break state.geometry()?;}if Instant::now()>=self.warm_deadline{return Err("No matching window dimensions within 2 seconds; restore the window and retry".into());}drop(state);thread::sleep(POLL);
+   });},
+   Probe=>{#[cfg(test)] {self.shared.lock().map_err(err)?.trace.startup.probe_qpc=Some(qpc()?);}probe_profile(self.ffmpeg,self.job)?;},
+   Prepared=>{let g=self.g.ok_or("Frozen media dimensions missing")?;#[allow(unused_mut)] let mut state=self.shared.lock().map_err(err)?;state.require_live()?;emit(Message::Prepared{width:g.width as u32,height:g.height as u32})?;
+    #[cfg(test)] {state.trace.startup.prepared_qpc=Some(qpc()?);}
+   },
+   Gate2=>{ // Parent microphone/filesystem preparation retains its existing inter-call lifetime.
+    wait_gate(self.controls,self.shared,self.owner,||self.capture.is_finished(),None)?;self.arm_deadline=Some(self.shared.lock().map_err(err)?.gate2_at.ok_or("Missing encoder admission gate")?+Duration::from_secs(5));
+   },
+   SpawnEncoder=>{let g=self.g.ok_or("Frozen media dimensions missing")?;
+    #[cfg(test)] {self.shared.lock().map_err(err)?.trace.startup.encoder_qpc=Some(qpc()?);}
+    *self.encoder=Some(Encoder(encoder_command(self.ffmpeg,g,self.path).spawn().map_err(err)?));
+   },
+   VerifyEncoder=>{let child=&mut self.encoder.as_mut().ok_or("Owned encoder missing")?.0;verify_job(child,self.job)?;*self.stderr=Some(drain(child.stderr.take().ok_or("Encoder stderr missing")?)?);},
+   EncoderMessage=>emit(Message::Encoder{pid:self.encoder.as_ref().ok_or("Owned encoder missing")?.0.id()})?,
+   Gate4=>wait_gate(self.controls,self.shared,self.owner,||self.capture.is_finished(),self.arm_deadline)?,
+   Park=>{#[cfg(test)] {self.shared.lock().map_err(err)?.trace.startup.park_enter_qpc=Some(qpc()?);qualification::park(self.path)?;self.shared.lock().map_err(err)?.trace.startup.park_leave_qpc=Some(qpc()?);}},
+   Supervisor=>{#[cfg(test)] {self.shared.lock().map_err(err)?.trace.startup.supervisor_qpc=Some(qpc()?);}
+    *self.supervisor=Some(self::Supervisor::start(&self.encoder.as_ref().ok_or("Owned encoder missing")?.0,self.progress.clone())?);
+   },
+   Writer=>{let(output_tx,writer_rx)=mpsc::sync_channel(2);let(done_tx,writer_done)=mpsc::sync_channel(1);let pipe=self.encoder.as_mut().ok_or("Owned encoder missing")?.0.stdin.take().ok_or("Encoder stdin missing")?;let progress=self.progress.clone();
+    #[cfg(test)] {self.shared.lock().map_err(err)?.trace.startup.writer_qpc=Some(qpc()?);}
+    thread::Builder::new().name("wgc-raw-writer".into()).spawn(move||{let _=done_tx.send(write_outputs(pipe,writer_rx,progress));}).map_err(err)?;*self.writer_tx=Some(output_tx);*self.done_rx=Some(writer_done);
+   },
+   Arm=>{let mut state=self.shared.lock().map_err(err)?;state.require_live()?;if self.arm_deadline.is_some_and(|deadline|Instant::now()>=deadline){return Err("Window encoder admission timed out".into());}let admission=qpc()?;state.arm(admission)?;let selector=Selector::new(admission,self.freq)?;
+    #[cfg(test)] {state.trace.startup.arm_qpc=Some(admission);}
+    emit(Message::Ready{})?;self.started=Some((admission,selector));
+   },
+  }Ok(())
+ }
+ fn failed(&mut self,error:&str){if let Ok(mut state)=self.shared.lock(){if !state.geometry_changed{state.failure.get_or_insert(error.into());}}}
+ fn close_encoder(&mut self){self.writer_tx.take();if let Some(encoder)=self.encoder.as_mut(){encoder.0.stdin.take();}}
+ fn kill_encoder(&mut self){if let Some(encoder)=self.encoder.as_mut(){if !matches!(encoder.0.try_wait(),Ok(Some(_))){let _=encoder.0.kill();}}}
+ fn wait_encoder(&mut self)->Result<()> {
+  if let Some(done)=self.done_rx.take(){done.recv_timeout(STAGE).map_err(err)??;}
+  let result=wait_child(&mut self.encoder.as_mut().ok_or("Owned encoder cleanup missing")?.0,Instant::now()+STAGE);
+  if let Some(supervisor)=self.supervisor.take(){supervisor.finish()?;}result?;self.encoder.take();Ok(())
+ }
+}
 fn worker(window:u64,pid:u32,path:&Path,ffmpeg:&Path,job:&str,#[cfg(test)] proof:Option<bool>)->Result<()> {
  control(1)?;
+ let shared=Arc::new(Mutex::new(Shared{state:Lifecycle::new(Instant::now()+STAGE),source_availability:None,#[cfg(test)] trace:qualification::Trace::allocated()}));
+ let(control_tx,control_rx)=mpsc::sync_channel(3);let reader_shared=shared.clone();
+ thread::Builder::new().name("wgc-parent-control".into()).spawn(move||{
+  ordered_controls(&mut io::stdin(),|expected,result|{
+   let mut state=reader_shared.lock().map_err(err)?;let result=state.control(expected,result,qpc);
+   #[cfg(test)] if result.is_ok(){let observed=match qpc(){Ok(now)=>now,Err(error)=>{state.failure.get_or_insert(error.clone());return Err(error);}};match expected{2=>state.trace.startup.gate2_qpc=Some(observed),4=>state.trace.startup.gate4_qpc=Some(observed),_=>{}}}
+   result
+  },|result|control_tx.send(result).is_ok());
+ }).map_err(err)?;
  #[cfg(test)] if proof.is_some(){crate::recorder::windows_qualification::cursor::require_disposable()?;}
  #[cfg(test)] qualification::initialize(path)?;
  let _apartment=Apartment::initialize()?;let owner=SourceOwner::prepare(window,pid)?;
  let captured:GraphicsCaptureItemType=verify_identity(window,pid)?.try_into().map_err(err)?;
  let GraphicsCaptureItemType::Window((item,window_handle))=captured else{return Err("Expected a native window item".into());};
- let item=PreparedWindow{item,window:window_handle};let g=item_geometry(&item)?;probe_profile(ffmpeg,job)?;emit(Message::Prepared{width:g.width as u32,height:g.height as u32})?;control(2)?;
- verify_source(window,pid,&item,g)?;owner.require_available()?;let freq=frequency()?;
- let mut encoder=Encoder(encoder_command(ffmpeg,g,path).spawn().map_err(err)?);verify_job(&encoder.0,job)?;
- let stderr=drain(encoder.0.stderr.take().ok_or("Encoder stderr missing")?)?;
- emit(Message::Encoder{pid:encoder.0.id()})?;control(4)?;
- #[cfg(test)] qualification::park(path)?;
- // Revalidate immediately before admission; preparation never authorizes a replacement HWND.
- verify_source(window,pid,&item,g)?;owner.require_available()?;
- let progress=Arc::new(Mutex::new(Progress{#[cfg(test)] writes:qualification::Writes::allocated(),..Default::default()}));let supervisor=Supervisor::start(&encoder.0,progress.clone())?;
- let(writer_tx,writer_rx)=mpsc::sync_channel(2);let(done_tx,done_rx)=mpsc::sync_channel(1);let pipe=encoder.0.stdin.take().ok_or("Encoder stdin missing")?;let writer_progress=progress.clone();
- thread::Builder::new().name("wgc-raw-writer".into()).spawn(move||{let _=done_tx.send(write_outputs(pipe,writer_rx,writer_progress));}).map_err(err)?;
- let(control_tx,control_rx)=mpsc::sync_channel(1);thread::Builder::new().name("wgc-parent-control".into()).spawn(move||{let _=control_tx.send(control(3));}).map_err(err)?;
- let shared=Arc::new(Mutex::new(Shared{#[cfg(test)] trace:qualification::Trace::allocated(),..Default::default()}));let(tx,rx)=mpsc::sync_channel(8);let admission=qpc()?;
+ #[cfg(test)] {shared.lock().map_err(err)?.trace.startup.item_creations+=1;}
+ let item=PreparedWindow{item,window:window_handle};let allocation=item_allocation_geometry(&item)?;let freq=frequency()?;
+ #[cfg(test)] {shared.lock().map_err(err)?.trace.startup.allocation=Some((allocation.width,allocation.height));}
+ #[cfg(not(test))] let _=allocation;
+ let(tx,rx)=mpsc::sync_channel(8);
  #[cfg(not(test))] let cursor=CursorCaptureSettings::WithCursor;
  #[cfg(test)] let cursor=if proof==Some(false){CursorCaptureSettings::WithoutCursor}else{CursorCaptureSettings::WithCursor};
- let settings=Settings::new(item,cursor,DrawBorderSettings::Default,SecondaryWindowSettings::Default,MinimumUpdateIntervalSettings::Default,DirtyRegionSettings::Default,ColorFormat::Bgra8,Flags{tx,shared:shared.clone(),live:Arc::new(OwnedCount::default()),geometry:g,#[cfg(test)] window,#[cfg(test)] pid,#[cfg(test)] proof_path:proof.map(|_|path.to_owned())});
- let capture=Capture::start_free_threaded(settings).map_err(err)?;emit(Message::Ready{})?;
- let mut selector=Selector::new(admission,freq)?;let mut selected=0;let started=Instant::now();let mut handled=false;let mut state_at_end=Shared::default();
+ let settings=Settings::new(item,cursor,DrawBorderSettings::Default,SecondaryWindowSettings::Default,MinimumUpdateIntervalSettings::Default,DirtyRegionSettings::Default,ColorFormat::Bgra8,Flags{tx,shared:shared.clone(),live:Arc::new(OwnedCount::default()),frequency:freq,#[cfg(test)] window,#[cfg(test)] pid,#[cfg(test)] proof_path:proof.map(|_|path.to_owned())});
+ let warm_deadline=Instant::now()+STAGE;
+ {let mut state=shared.lock().map_err(err)?;state.require_live()?;state.gate=owned_feed::CaptureGate::new(warm_deadline);
+  #[cfg(test)] {state.trace.startup.capture_starts+=1;state.trace.startup.start_qpc=Some(qpc()?);}
+ }
+ let capture=Capture::start_free_threaded(settings).map_err(err)?;
+ let mut encoder:Option<Encoder>=None;let mut stderr=None;let mut supervisor=None;let mut writer_tx=None;let mut done_rx=None;
+ let progress=Arc::new(Mutex::new(Progress{#[cfg(test)] writes:qualification::Writes::allocated(),..Default::default()}));
+ let mut context=None;let mut state_at_end=(None,false,false,None);
+ #[cfg(test)] let cleanup_shared=shared.clone();
+ let result=with_capture(capture,|capture|->Result<()> {
+  let run=(||->Result<()> {
+  let mut preparing=Preparing{capture,shared:&shared,owner:&owner,controls:&control_rx,ffmpeg,path,job,warm_deadline,arm_deadline:None,freq,g:None,started:None,encoder:&mut encoder,stderr:&mut stderr,supervisor:&mut supervisor,writer_tx:&mut writer_tx,done_rx:&mut done_rx,progress:&progress};
+  super::lifecycle::prepare(&mut preparing)?;
+  let g=preparing.g.ok_or("Frozen media dimensions missing")?;let(admission,mut selector)=preparing.started.take().ok_or("Window admission missing")?;drop(preparing);
+  let mut selected=0;let started=Instant::now();let mut handled=false;
+  let done_rx=done_rx.as_ref().ok_or("Writer completion missing")?;let writer_tx=writer_tx.as_ref().ok_or("Writer queue missing")?;
  let feed=(||->Result<()>{loop{
   match done_rx.try_recv(){Ok(r)=>{r?;return Err("Writer ended before input was closed".into());},Err(mpsc::TryRecvError::Disconnected)=>return Err("Writer lost".into()),Err(mpsc::TryRecvError::Empty)=>{}}
   let availability=owner.observe();let mut ack=None;let mut output=None;let finished;
   {
    let mut state=shared.lock().map_err(err)?;if let Some(failure)=&state.failure{return Err(failure.clone());}
-   if !handled {match control_rx.try_recv(){Ok(r)=>{r?;if state.cutoff.is_none(){state.cutoff=Some(qpc()?);}ack=state.cutoff;handled=true;},Err(mpsc::TryRecvError::Disconnected)=>return Err("Parent control lost".into()),Err(mpsc::TryRecvError::Empty)=>{}}}
    if let Some(observed)=availability{if let Some(reason)=observed.install(&mut state.cutoff,qpc)?{state.source_availability=Some(reason);}}
    // Snapshot draining and decisions share the publication lock; all I/O follows unlock.
    while let Ok(source)=rx.try_recv(){selector.push(source)?;}
@@ -250,38 +330,45 @@ fn worker(window:u64,pid:u32,path:&Path,ffmpeg:&Path,job:&str,#[cfg(test)] proof
     if selected<cells{output=Some(selector.select(selected,decision)?);
      #[cfg(test)] state.trace.push(qualification::Event{kind:"decision",ordinal:selected,seq:output.as_ref().unwrap().seq,qpc:decision,..Default::default()})?;
      selected+=1;}
-    finished=state.cutoff.is_some()&&selected==cells;
+    (ack,finished)=state.feed_end(&control_rx,&mut handled,selected,cells)?;
    }else{if state.cutoff.is_some()||started.elapsed()>STAGE{return Err("No admitted complete frame; restore the window and retry".into());}finished=false;}
    if capture.is_finished()&&state.cutoff.is_none(){return Err("WGC ended without installed cutoff".into());}
-   state_at_end=state.clone();
+   state_at_end=(state.cutoff,state.closed,state.geometry_changed,state.source_availability);
   }
   if let Some(cutoff)=ack{emit(Message::Ack{cutoff})?;}
   if let Some(source)=output{writer_tx.try_send(source).map_err(|_|"Output queue overflow/disconnected")?;}
   if finished{break;}thread::sleep(Duration::from_millis(2));
  }Ok(())})();
- let mut failure=feed.err();let(capture_tx,capture_rx)=mpsc::sync_channel(1);
- thread::spawn(move||{let result=if capture.is_finished(){capture.wait()}else{capture.stop()};let _=capture_tx.send(result.map_err(err));});
- if failure.is_some(){let _=encoder.0.kill();}
- if let Err(e)=capture_rx.recv_timeout(STAGE).map_err(err).and_then(|r|r){failure.get_or_insert(e);let _=encoder.0.kill();}
- drop(writer_tx);
- if let Err(e)=done_rx.recv_timeout(STAGE).map_err(err).and_then(|r|r){failure.get_or_insert(e);let _=encoder.0.kill();}
+  context=Some((g,freq,admission,selector.epoch,selected));feed
+  })();
+  if let Err(error)=&run{if let Ok(mut state)=shared.lock(){if !state.geometry_changed{state.failure.get_or_insert(error.clone());}}}run
+ },move|capture|{
+  #[cfg(test)] {cleanup_shared.lock().map_err(err)?.trace.startup.cleanup_consumptions+=1;}
+  let result=if capture.is_finished(){capture.wait()}else{capture.stop()};result.map_err(err)
+ },STAGE);
+ let mut failure=result.err();if failure.is_some(){if let Some(encoder)=encoder.as_mut(){let _=encoder.0.kill();}}
+ drop(writer_tx.take());
+ let Some(mut encoder)=encoder else{return Err(failure.unwrap_or_else(||"Encoder was not prepared".into()));};
+ if let Some(done_rx)=done_rx{if let Err(e)=done_rx.recv_timeout(STAGE).map_err(err).and_then(|r|r){failure.get_or_insert(e);let _=encoder.0.kill();}}
  #[cfg(test)] let mut encoder_exit=None;
  let code=match wait_child(&mut encoder.0,Instant::now()+STAGE){Ok(code)=>{#[cfg(test)] {encoder_exit=Some(code);}code},Err(e)=>{failure.get_or_insert(e);let _=encoder.0.kill();-1}};
- if let Err(e)=supervisor.finish(){failure.get_or_insert(e);}
+ if let Some(supervisor)=supervisor{if let Err(e)=supervisor.finish(){failure.get_or_insert(e);}}
  #[cfg(test)] let mut non_encoder_failure=failure.is_some();
  if code!=0{failure.get_or_insert(format!("Encoder exited {code}"));}
- let diagnostic=stderr.recv_timeout(Duration::from_millis(100)).map_err(err).and_then(|r|r);
+ let diagnostic=stderr.map(|stderr|stderr.recv_timeout(Duration::from_millis(100)).map_err(err).and_then(|r|r)).unwrap_or(Ok(String::new()));
  #[cfg(test)] {non_encoder_failure|=diagnostic.is_err();}
  if let Err(e)=diagnostic{failure.get_or_insert(e);}
- match shared.try_lock(){Ok(state)=>{#[cfg(test)] {non_encoder_failure|=state.failure.is_some();}if let Some(e)=&state.failure{failure.get_or_insert(e.clone());}state_at_end=state.clone();},Err(_)=>{#[cfg(test)] {non_encoder_failure=true;}failure.get_or_insert("Capture final state unavailable".into());}}
- #[cfg(test)] qualification::flush(path,&shared,&progress,g,freq,admission,selector.epoch,selected,&failure,encoder_exit,non_encoder_failure)?;
+ match shared.try_lock(){Ok(state)=>{#[cfg(test)] {non_encoder_failure|=state.failure.is_some();}if let Some(e)=&state.failure{failure.get_or_insert(e.clone());}state_at_end=(state.cutoff,state.closed,state.geometry_changed,state.source_availability);},Err(_)=>{#[cfg(test)] {non_encoder_failure=true;}failure.get_or_insert("Capture final state unavailable".into());}}
+ #[allow(unused_variables)] let Some((g,freq,admission,epoch,selected))=context else{return Err(failure.unwrap_or_else(||"Window startup did not admit capture".into()));};
+ #[cfg(test)] qualification::flush(path,&shared,&progress,g,freq,admission,epoch,selected,&failure,encoder_exit,non_encoder_failure)?;
  if let Some(error)=failure{return Err(error);}
  let written=progress.try_lock().map_err(err)?.complete;
- let summary=Summary{frequency:freq,admission,epoch:selector.epoch.ok_or("No epoch")?,cutoff:state_at_end.cutoff.ok_or("No cutoff")?,closed:state_at_end.closed,selected,written,encoder_exit:code,geometry_changed:state_at_end.geometry_changed,source_availability:state_at_end.source_availability};summary.clock(0)?;
+ let summary=Summary{frequency:freq,admission,epoch:epoch.ok_or("No epoch")?,cutoff:state_at_end.0.ok_or("No cutoff")?,closed:state_at_end.1,selected,written,encoder_exit:code,geometry_changed:state_at_end.2,source_availability:state_at_end.3};summary.clock(0)?;
  emit(Message::Terminal{summary})
 }
 pub(crate) fn dispatch(mut args:impl Iterator<Item=OsString>)->Option<i32>{
  let mode=args.next();
+ #[cfg(test)] if mode.as_deref()==Some(OsStr::new(qualification::startup::MODE)){return Some(qualification::startup::dispatch(args));}
  #[cfg(test)] let private=mode.as_deref()==Some(OsStr::new(qualification::proof::MODE));
  #[cfg(not(test))] let private=false;
  if mode.as_deref()!=Some(OsStr::new(MODE))&&!private{return None;}

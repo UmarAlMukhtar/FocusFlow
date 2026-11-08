@@ -3,6 +3,7 @@ use super::{owned_feed, RecorderError, RecorderResult};
 use focusflow_core::{capture::{*, windows::*}, ffmpeg::SavedCfrGrid, legacy::LegacyDefaults, project::*};
 use serde::{Deserialize, Serialize};
 use std::{io::{self, Read}, path::Path};
+mod lifecycle;
 #[cfg(windows)]
 mod process;
 #[cfg(windows)]
@@ -73,7 +74,7 @@ impl Completion {
  pub(super) fn count(&self)->u64{self.clock.completed_frames}
  pub(super) fn publish(mut self,dir:&Path,grid:&SavedCfrGrid,has_mic:bool)->RecorderResult<()>{
   let saved=grid.video;let duration=saved.video.duration_us;
-  let project=ProjectDocument{schema_version:3,project_id:self.manifest.capture_id.clone(),revision:0,video:VideoAsset{path:"screen.mp4".into(),width:saved.video.width,height:saved.video.height,duration_us:duration,cursor:CursorMode::Embedded},cursor:None,cursor_settings:Default::default(),microphone:has_mic.then_some(AudioAsset{path:"mic.wav".into()}),timing:Timing{provenance:TimingProvenance::LegacyUnknown,audio_offset_us:None},camera:self.manifest.initial_defaults.camera.clone(),frame_style:self.manifest.initial_defaults.frame_style.clone(),clips:vec![Clip{id:"clip-0".into(),in_us:0,out_us:duration}],zooms:vec![],clicks:vec![],warnings:vec![ProjectWarning::EmbeddedCursor,ProjectWarning::LegacyTimingUnknown]};
+  let project=ProjectDocument{audio_tracks:None,schema_version:3,project_id:self.manifest.capture_id.clone(),revision:0,video:VideoAsset{path:"screen.mp4".into(),width:saved.video.width,height:saved.video.height,duration_us:duration,cursor:CursorMode::Embedded},cursor:None,cursor_settings:Default::default(),microphone:has_mic.then_some(AudioAsset{path:"mic.wav".into()}),timing:Timing{provenance:TimingProvenance::LegacyUnknown,audio_offset_us:None},camera:self.manifest.initial_defaults.camera.clone(),frame_style:self.manifest.initial_defaults.frame_style.clone(),clips:vec![Clip{id:"clip-0".into(),in_us:0,out_us:duration}],zooms:vec![],clicks:vec![],warnings:vec![ProjectWarning::EmbeddedCursor,ProjectWarning::LegacyTimingUnknown]};
   self.manifest.diagnostic=self.notice.map(|message|CaptureDiagnosticV1{stage:DiagnosticStage::Clock,message});
   self.manifest.state=WindowsCaptureStateV2::Finalized{video_timing:WindowsVideoTimingV2{endpoint:WindowsSavedEndpointV2{provenance:WindowsEndpointProvenance::SavedPacketFullGrid,end_pts:saved.endpoint.ticks,time_base:TimeBase{numerator:saved.endpoint.numerator,denominator:saved.endpoint.denominator},interval:Interval::HalfOpen},clock:self.clock},cursor_timing:NullOnly,initial_project:project};
   publish_windows_finalized_assets(dir,&self.manifest,grid).map_err(recovery)?;Ok(())
@@ -143,6 +144,34 @@ mod tests {
   let c=Completion::new(m.clone(),summary(),0).unwrap();assert_eq!(c.count(),30);assert!(c.publish(&dir,&grid,false).is_err());assert!(matches!(decode_windows(&std::fs::read(dir.join("capture.json")).unwrap(),id).unwrap().state,WindowsCaptureStateV2::Incomplete{..}));
   grid.completed_frames=30;Completion::new(m,summary(),0).unwrap().publish(&dir,&grid,false).unwrap();let manifest=decode_windows(&std::fs::read(dir.join("capture.json")).unwrap(),id).unwrap();let doc=manifest.finalized_project().unwrap();
   assert!(doc.clicks.is_empty()&&doc.zooms.is_empty());assert_eq!(doc.camera.pan_transition_us,123456);assert_eq!(doc.video.cursor,CursorMode::Embedded);assert_eq!(std::fs::read(dir.join("screen.mp4")).unwrap(),b"unchanged media");assert!(!dir.join("project.json").exists());std::fs::remove_dir_all(dir).unwrap();
+ }
+
+ #[test] fn frozen_media_dimensions_stay_independent_of_observed_bounds_and_legacy_origin(){
+  for (width,height,encoded) in [(322,272,(322,272)),(641,359,(642,360))]{
+   let dir=std::env::temp_dir().join(format!("focusflow-frozen-{}-{width}",std::process::id()));std::fs::create_dir(&dir).unwrap();let dir=dir.canonicalize().unwrap();let id=dir.file_name().unwrap().to_str().unwrap();
+   let defaults=crate::export::ExportSettings::default().legacy_defaults().unwrap();let bounds=Bounds{x:-120,y:37,width:336,height:279};
+   let manifest=incomplete(id,42,width,height,bounds.clone(),defaults).unwrap();let frozen_source=serde_json::to_value(&manifest.source).unwrap();
+   assert_eq!(manifest.source.raw_size,PixelSize{width,height});assert_eq!(manifest.source.encoded_size,PixelSize{width:encoded.0,height:encoded.1});assert_eq!(manifest.source.content_rect,Bounds{x:0,y:0,width,height});assert_eq!(manifest.source.observed_window_bounds,Some(bounds));assert_eq!(frozen_source["pointerOrigin"],serde_json::Value::Null);
+   publish_windows_incomplete(&dir,&manifest).unwrap();std::fs::write(dir.join("screen.mp4"),b"immutable media").unwrap();
+   std::fs::write(dir.join("clicks.json"),br#"[{"x":310,"y":260,"time":0.1}]"#).unwrap();std::fs::write(dir.join("metadata.json"),br#"{"width":336,"height":279,"x":-120,"y":37}"#).unwrap();
+   let mut grid=SavedCfrGrid{completed_frames:30,video:focusflow_core::ffmpeg::ProbedVideoEvidence{video:focusflow_core::ffmpeg::ProbedVideo{width:336,height:280,duration_us:1_000_000},endpoint:focusflow_core::ffmpeg::PacketTime{ticks:30000,numerator:1,denominator:30000},first_packet_duration:focusflow_core::ffmpeg::PacketTime{ticks:1000,numerator:1,denominator:30000}}};
+   assert!(Completion::new(manifest.clone(),summary(),0).unwrap().publish(&dir,&grid,false).is_err());
+   let retained=decode_windows(&std::fs::read(dir.join("capture.json")).unwrap(),id).unwrap();assert_eq!(serde_json::to_value(&retained.source).unwrap(),frozen_source);assert!(retained.finalized_project().is_err());
+   grid.video.video.width=encoded.0;grid.video.video.height=encoded.1;Completion::new(manifest,summary(),0).unwrap().publish(&dir,&grid,false).unwrap();
+   let saved=decode_windows(&std::fs::read(dir.join("capture.json")).unwrap(),id).unwrap();assert_eq!(serde_json::to_value(&saved.source).unwrap(),frozen_source);
+   let project=saved.finalized_project().unwrap();assert_eq!((project.video.width,project.video.height),encoded);assert_eq!(project.video.cursor,CursorMode::Embedded);assert!(project.cursor.is_none());assert!(project.clicks.is_empty()&&project.zooms.is_empty());assert_eq!(std::fs::read(dir.join("screen.mp4")).unwrap(),b"immutable media");std::fs::remove_dir_all(dir).unwrap();
+  }
+ }
+
+ #[test] fn automatic_end_accepts_stop_during_finalization_without_inventing_an_ack(){
+  use std::{sync::mpsc,time::{Instant,Duration}};
+  for cause in ["closed","geometry","source"]{
+   let now=Instant::now();let mut state=lifecycle::Lifecycle::new(now+Duration::from_secs(2));state.observe((2,2),(2,2),now,||Ok(0)).unwrap();state.arm(2_997_000).unwrap();
+   let mut summary=summary();state.cutoff=Some(summary.cutoff);state.closed=cause=="closed";summary.closed=state.closed;state.geometry_changed=cause=="geometry";summary.geometry_changed=state.geometry_changed;if cause=="source"{summary.source_availability=Some(SourceAvailabilityEnd::Unavailable);}
+   let(_tx,rx)=mpsc::sync_channel(3);let mut handled=false;let(ack,finished)=state.feed_end(&rx,&mut handled,30,30).unwrap();assert_eq!(ack,None);assert!(finished);assert!(!handled);
+   // The feed has finished automatically; a later requested Stop keeps the same cutoff.
+   state.control(3,Ok(3),||panic!("Late Stop cannot replace the automatic cutoff")).unwrap();assert_eq!(state.cutoff,Some(summary.cutoff));assert!(summary.check_stop_ack(true,ack).is_ok());assert!(summary.clock(0).is_ok());
+  }
  }
 
 }

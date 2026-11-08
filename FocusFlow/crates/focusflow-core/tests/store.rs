@@ -106,7 +106,7 @@ fn imports_legacy_once_without_changing_source_files() {
 fn existing_invalid_or_future_document_never_reimports() {
     let (_temp, project, store) = setup();
     for (bytes, code) in [
-        (br#"{"schemaVersion":5,"futureField":true}"#.as_slice(), ErrorCode::UnsupportedSchema),
+        (br#"{"schemaVersion":6,"futureField":true}"#.as_slice(), ErrorCode::UnsupportedSchema),
         (b"invalid JSON".as_slice(), ErrorCode::InvalidDocument),
     ] {
         fs::write(project.join("project.json"), bytes).unwrap();

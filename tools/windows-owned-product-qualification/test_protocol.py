@@ -11,6 +11,32 @@ import run
 
 
 class Protocol(unittest.TestCase):
+    def test_failed_command_retains_final_exact_handle_cleanup_after_fallback(self):
+        driver_code="""import json,os,sys,time
+from pathlib import Path
+d=Path(sys.argv[1])/'session-0/without';d.mkdir(parents=True)
+(d/'owned.json').write_text(json.dumps(dict(parent=os.getpid(),worker=101,encoder=102,qpc=123)))
+while not (d/'handles-open').exists():time.sleep(.005)
+sys.exit(7)
+"""
+        handles=[]
+        class Handle:
+            def __init__(self,pid):self.pid=pid;self.dead=False;self.closed=False;handles.append(self)
+            def signaled(self):return self.dead
+            def kill(self):self.dead=True
+            def close(self):self.closed=True
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);driver=root/'driver.py';driver.write_text(driver_code)
+            with patch('run.ExactHandle',Handle),patch('run.native_qpc',return_value=456),self.assertRaises(RuntimeError):
+                run.execute([sys.executable,driver,root/'case'],root,'cursor-borderless-even',4,observe=root/'case')
+            receipt=json.loads((root/'cursor-borderless-even-command.json').read_text())
+            self.assertEqual(receipt['exitCode'],7);self.assertIsNotNone(receipt['error'])
+            self.assertEqual(receipt['ownership'][0]['signaled'],[False,False])
+            self.assertTrue(receipt['ownership'][0]['fallback'])
+            cleanup=receipt['cleanup'];self.assertTrue(cleanup['parent']['signaled']);self.assertEqual(cleanup['parent']['exitCode'],7)
+            self.assertEqual(cleanup['owned'],[dict(parent=cleanup['parent']['pid'],worker=101,encoder=102,qpc=123,path='session-0/without/owned.json',signaled=[True,True])])
+            self.assertTrue(all(h.closed for h in handles));self.assertEqual(cleanup['sources'],[])
+
     def test_cargo_metadata_utf8_child_under_cp1252_default(self):
         repo=Path(__file__).resolve().parents[2]
         metadata={'packages':[{'name':'windows-capture','source':None,'manifest_path':str(repo/'FocusFlow/vendor/windows-capture/Cargo.toml'),'description':'\u0101'}]}

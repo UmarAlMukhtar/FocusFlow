@@ -41,7 +41,7 @@ pub fn fixture_project() -> focusflow_core::project::ProjectDocument {
         frame_style: Default::default(), schema_version: 1, project_id: "fixture".into(), revision: 0,
         cursor: None, cursor_settings: Default::default(),
         video: VideoAsset { cursor: CursorMode::Embedded, path: "screen.mp4".into(), width: 100, height: 50, duration_us: 5_000_000 },
-        microphone: None,
+        audio_tracks: None, microphone: None,
         timing: Timing { provenance: TimingProvenance::LegacyUnknown, audio_offset_us: None },
         camera: CameraDefaults { pan_transition_us: 200_000, settle_us: 100_000 },
         clips: vec![Clip { id: "clip-0".into(), in_us: 0, out_us: 5_000_000 }],

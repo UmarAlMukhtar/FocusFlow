@@ -16,7 +16,7 @@ impl Fixture {
             frame_style: Default::default(), schema_version: 1, project_id: "fixture".into(), revision: 0,
             cursor: None, cursor_settings: Default::default(),
         video: VideoAsset { cursor: CursorMode::Embedded, path: "screen.mp4".into(), width, height, duration_us: 3_000_000 },
-            microphone: None, timing: Timing { provenance: TimingProvenance::Measured, audio_offset_us: Some(0) },
+            audio_tracks: None, microphone: None, timing: Timing { provenance: TimingProvenance::Measured, audio_offset_us: Some(0) },
             camera: CameraDefaults { pan_transition_us: 180_000, settle_us: 120_000 },
             clips: vec![Clip { id: "first".into(), in_us: 0, out_us: 3_000_000 }],
             zooms: vec![], clicks: vec![], warnings: vec![],
@@ -323,7 +323,11 @@ fn accepted_click_boundary_builds_every_ring_in_a_bounded_graph() {
     let graph = render::filter_graph(&s, &plan, false).unwrap();
     assert_eq!(graph.matches("overlay=x=").count(), 8192);
     assert!(graph.len() <= 32 * 1024 * 1024);
-    assert!(graph.contains("[click63_127]zoompan="));
+    let final_click = "[click63_127]";
+    assert!(graph.split(';').any(|chain| chain.trim().ends_with(final_click)), "Final click must be produced");
+    let camera = graph.split(';').map(str::trim).find(|chain| chain.starts_with(final_click))
+        .expect("Final click output must feed the camera chain");
+    assert!(camera.contains("zoompan="), "Final click chain must retain the camera transform");
 }
 
 #[test]
