@@ -208,7 +208,7 @@ def execute(argv,root,name,timeout=600,env=None,observe=None,parent_death=False)
                 if observe:
                     sources.poll(proc.pid)
                     ownership_paths=list(observe.glob('session-*/owned.json'))
-                    ownership_paths+=list(observe.glob('session-*/without/owned.json'))+list(observe.glob('session-*/with/owned.json'))+list(observe.glob('session-*/alpha-without/owned.json'))+list(observe.glob('session-*/alpha-with/owned.json'))+list(observe.glob('session-*/challenge/owned.json'))+list(observe.glob('session-*/closed/owned.json'))
+                    ownership_paths+=list(observe.glob('session-*/without/owned.json'))+list(observe.glob('session-*/with/owned.json'))+list(observe.glob('session-*/alpha-without/owned.json'))+list(observe.glob('session-*/alpha-with/owned.json'))+list(observe.glob('session-*/challenge/owned.json'))+list(observe.glob('session-*/resize/owned.json'))+list(observe.glob('session-*/closed/owned.json'))
                     ownership_paths+=list(observe.glob('session-0/startup-probe/metadata-owned.json'))
                     for path in ownership_paths:
                         if path in opened:continue
@@ -285,10 +285,10 @@ def execute(argv,root,name,timeout=600,env=None,observe=None,parent_death=False)
     if error:raise RuntimeError(error)
     return log
 
-def require_private_cleanup(root,receipt):
+def require_private_cleanup(root,receipt,complete=False):
     data=json.loads(receipt.read_text(encoding='utf-8'));cleanup=data['cleanup'];parent=cleanup['parent']
     assert parent['signaled'] is True and type(parent['pid']) is int and parent['pid']>0 and type(parent['exitCode']) is int,'private parent cleanup unconfirmed'
-    allowed={f'session-0/{mode}/owned.json' for mode in ['without','with','alpha-without','alpha-with','challenge','closed']}
+    allowed={f'session-0/{mode}/owned.json' for mode in ['without','with','alpha-without','alpha-with','challenge','resize','closed']}
     paths={p.relative_to(root).as_posix():p for p in root.rglob('owned.json')}
     assert all((root/p).is_file() for p in allowed if (root/p).parent.exists()),'private proof started without observed owner'
     owned=cleanup['owned'];assert paths and set(paths)<=allowed and len(owned)==len(paths),'unknown/unobserved private owner'
@@ -306,6 +306,14 @@ def require_private_cleanup(root,receipt):
     source=sources[0];saved=json.loads((root/'session-0/source-cleanup.json').read_text(encoding='utf-8'))
     assert type(source['pid']) is int and source['pid']>0 and source['pid'] not in pids and source['observed'] is True and source['signaled'] is True and type(source['exitCode']) is int,'private source cleanup unconfirmed'
     assert all(saved[k]==source[k] for k in ['pid','observed','signaled','exitCode']),'private source cleanup identity disagrees'
+    if complete:
+        assert set(paths)==allowed and len(pids)==15,'successful private profile requires seven distinct named worker/encoder pairs'
+        assert data['error'] is None and data['exitCode']==parent['exitCode']==source['exitCode']==0,'successful private profile did not exit normally'
+        observations=data['ownership'];keys=['parent','worker','encoder','qpc']
+        identities={tuple(row[k] for k in keys) for row in owned}
+        observed=[tuple(row[k] for k in keys) for row in observations]
+        assert len(observed)==len(set(observed))==7 and set(observed)==identities,'successful private profile lacks seven matching independent owner observations'
+        assert all(type(row['qpc']) is int and row['qpc']>=0 and row['signaled']==[True,True] and all(value is True for value in row['signaled']) and row['fallback'] is False for row in observations),'successful private owner observation lacks normal exact-handle completion'
 
 def build_exe(repo,evidence,manifest,name,test=False):
     args=['cargo','+1.89.0','test' if test else 'build','--locked','--manifest-path',manifest,'--message-format=json','--test' if test else '--bin',name]
@@ -424,6 +432,7 @@ def run(a):
             for label,w,h,nonce in [('cursor-borderless-even',320,240,500),('cursor-decorated-even',320,240,501),('cursor-borderless-odd',641,359,502),('cursor-decorated-odd',641,359,503)]:
                 def private_case(label=label,w=w,h=h,nonce=nonce):
                     root=evidence/label;execute([harness,root,'cursor-private',w,h,nonce,a.ffmpeg,harness],evidence,label,45,observe=root)
+                    require_private_cleanup(root,evidence/(label+'-command.json'),complete=True)
                     cursor_check.check(root/'session-0',a.ffmpeg,a.ffprobe)
                 attempt(label,private_case)
                 before_cleanup=len(failures)

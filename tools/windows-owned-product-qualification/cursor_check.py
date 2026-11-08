@@ -168,6 +168,79 @@ def movie(directory,info,ffmpeg,ffprobe,rawanchors,reference=None,crop=None):
                 if child.poll() is None:child.kill();child.wait(timeout=5)
     return clock,len(picks),diagnostics
 
+EXPECTED_ACTIONS=['alpha','restore-cursor','alpha','hidden','restore-cursor','occlude','unocclude','move-away-back','move','move-back','minimize-restore','resize','close']
+
+def resize_attribution(trace,summary,first_write,observation,actions):
+    def integer(value,label,minimum=0,maximum=2**63):
+        assert type(value) is int and minimum<=value<maximum,'invalid resize scalar: '+label
+        return value
+    def qpc(row,key):return integer(row[key],key)
+    frequency=integer(trace['frequency'],'frequency',1)
+    assert actions['overflow'] is False and integer(actions['qpcFrequency'],'source frequency',1)==frequency,'resize action clock/overflow disagreement'
+    records=actions['records']
+    assert [r['action'] for r in records]==EXPECTED_ACTIONS,'resize source action schedule changed'
+    previous=0
+    for index,row in enumerate(records):
+        assert integer(row['sequence'],'action sequence',1)==index+1 and row['win32Succeeded'] is True,'resize source action failed/sequence changed'
+        before,after=qpc(row,'operationBeforeQpc'),qpc(row,'operationAfterQpc')
+        assert previous<=before<=after,'resize source operations reordered'
+        previous=after
+    action=records[11];close=records[12]
+    assert integer(observation['actionSequence'],'observed action sequence',1)==action['sequence'],'resize observation belongs to another action'
+    rectangles=[]
+    for key in ['windowRectBefore','windowRectAfter']:
+        r=action[key];assert isinstance(r,list) and len(r)==4,'missing actual resize rectangle'
+        for value in r:integer(value,key,-2**31,2**31)
+        assert r[0]<r[2] and r[1]<r[3],'invalid actual resize rectangle'
+        rectangles.append(r)
+    before,after=rectangles;delta=[(after[i+2]-after[i])-(before[i+2]-before[i]) for i in [0,1]]
+    assert before[:2]==after[:2] and delta==[2,2],'resize must retain actual origin and grow exactly 2+2'
+    assert observation['workerAliveBeforeResize'] is True and observation['workerEndedBeforeFinish'] is True and observation['manualStopRequested'] is False,'resize was not live and automatically ended before Finish'
+    admission=qpc(trace,'admission');cutoff=qpc(trace,'cutoff');first=qpc(first_write,'qpc')
+    live_before=qpc(observation,'liveCheckBeforeQpc');live_after=qpc(observation,'liveCheckAfterQpc');ended=qpc(observation,'endedObservedQpc')
+    read_before=qpc(action,'commandReadBeforeQpc');read_after=qpc(action,'commandReadAfterQpc');operation_before=qpc(action,'operationBeforeQpc');operation_after=qpc(action,'operationAfterQpc')
+    assert qpc(records[10],'operationAfterQpc')<=qpc(trace['startup'],'startQpc')<=admission,'restore overlaps resize worker startup'
+    assert admission<=first<=live_before<=live_after<=read_before<=read_after<=operation_before,'resize lacks fresh admission/first write/exact-child liveness'
+    assert operation_before<=operation_after<=ended,'resize end predates native operation completion'
+    assert ended<qpc(close,'commandReadBeforeQpc')<=qpc(close,'commandReadAfterQpc')<=qpc(close,'operationBeforeQpc'),'source closed before resize worker ended'
+    geometry=[e for e in trace['events'] if e['kind']=='geometry']
+    assert len(geometry)==1,'resize requires exactly one geometry cutoff'
+    event=geometry[0];event_qpc=qpc(event,'qpc')
+    assert operation_before<event_qpc==cutoff<=ended,'geometry cutoff does not follow this live resize action'
+    raw=[integer(trace[k],k,2,limit+1) for k,limit in [('width',1920),('height',1080)]]
+    assert trace['startup']['frozen']==raw,'resize frozen grid disagrees'
+    content=[integer(event[k],k,1,16385) for k in ['contentWidth','contentHeight']]
+    texture=[integer(event[k],k,1,16385) for k in ['textureWidth','textureHeight']]
+    assert content==[v+d for v,d in zip(raw,delta)],'rejected content is unrelated to measured resize delta'
+    sources=[e for e in trace['events'] if e['kind']=='source']
+    assert sources and trace['writes'],'resize has no admitted source/write'
+    for source in sources:
+        assert [source['contentWidth'],source['contentHeight']]==[source['textureWidth'],source['textureHeight']]==raw,'resize admitted changed geometry'
+        assert admission<=qpc(source,'qpc')<cutoff,'resize source publication outside admission/cutoff'
+    sequence=integer(first_write['seq'],'first write sequence')
+    decisions=[e for e in trace['events'] if e['kind']=='decision']
+    assert decisions and sequence==trace['writes'][0]['seq']==decisions[0]['seq'],'resize first write/selection sequence disagrees'
+    selected=[source for source in sources if source['seq']==sequence]
+    assert len(selected)==1 and qpc(selected[0],'qpc')<=first,'resize first write lacks causal publication'
+    clock=summary['clock']
+    assert all(clock[k]==trace[k] for k in ['frequency','admission','epoch','cutoff','selected','written']),'resize summary/trace clock disagreement'
+    assert trace['sourceClosed'] is False and trace['sourceAvailabilityEnd'] is None and clock['geometry_changed'] is True and clock['closed'] is False and clock['source_availability'] is None,'resize has wrong automatic terminal cause'
+    return dict(actionSequence=action['sequence'],frozenSize=raw,rejectedContentSize=content,rejectedTextureSize=texture,windowSizeDelta=delta,operationBeforeQpc=operation_before,operationAfterQpc=operation_after,cutoffQpc=cutoff,firstWriteQpc=first,liveCheckBeforeQpc=live_before,liveCheckAfterQpc=live_after,endedObservedQpc=ended,workerEndedBeforeFinish=True,manualStopRequested=False,oldTextureNewContentObserved=texture==raw and content!=raw)
+
+def challenge_termination(trace,summary,rows):
+    clock=summary['clock'];cutoff=trace['cutoff']
+    assert type(cutoff) is int and cutoff>=0 and clock['cutoff']==cutoff,'challenge cutoff disagreement'
+    assert trace['sourceClosed'] is False and trace['sourceAvailabilityEnd'] is None and clock['closed'] is False and clock['source_availability'] is None,'unexpected automatic challenge termination'
+    events=[e for e in trace['events'] if e['kind']=='geometry']
+    assert type(clock['geometry_changed']) is bool,'invalid challenge termination flag'
+    if clock['geometry_changed']:assert len(events)==1 and events[0]['qpc']==cutoff,'challenge geometry/summary termination disagreement'
+    else:assert not events,'challenge manual Finish has geometry event'
+    before=[]
+    for index,row in enumerate(rows):
+        assert all(type(row[k]) is int and row[k]>=0 for k in ['q0','q1']) and row['q0']<=row['q1'],'invalid challenge observation clocks'
+        if trace['admission']<=row['q0']<=row['q1']<cutoff:before.append(index)
+    return dict(terminationCause='geometryChanged' if events else 'manualFinish',cutoffQpc=cutoff,observationsWhollyBeforeCutoff=before,observationsOutsideRecordingInterval=[i for i in range(len(rows)) if i not in before])
+
 def check(case,ffmpeg,ffprobe):
     private_only(case);results={};raw={};controls={}
     for mode in ['without','with','alpha-without','alpha-with']:
@@ -200,7 +273,7 @@ def check(case,ffmpeg,ffprobe):
     assert controls['with'][:7]==controls['alpha-with'][:7],'alpha pair moved the source or physical hotspot'
     challenge=case/'challenge';control=json.loads((challenge/'challenges.json').read_text());assert control['telemetry']==[] and control['prefix']=='rejectedAll' and control['noResumeAfterEqualPolls'] is True
     rows=control['observations'];actions=json.loads((case/'source-actions.json').read_text());assert actions['overflow'] is False
-    expected_actions=['alpha','restore-cursor','alpha','hidden','restore-cursor','occlude','unocclude','move-away-back','move','move-back','minimize-restore','resize','close']
+    expected_actions=EXPECTED_ACTIONS
     assert [r['action'] for r in actions['records']]==expected_actions and all(r['win32Succeeded'] for r in actions['records'])
     assert len(rows)==9 and all(r['telemetryAccepted'] is False and r['q0']<=r['q1'] for r in rows)
     assert rows[0]['shape'] is not None and rows[0]['imageError'] is None;alpha=raster(challenge,0,rows[0]['shape']);assert any(0<a<255 for a in alpha[3::4]),'partial alpha fixture never observed'
@@ -209,10 +282,16 @@ def check(case,ffmpeg,ffprobe):
     assert rows[5]['before']==rows[5]['after'] and rows[5]['telemetryAccepted'] is False,'move-away/back equal polls resumed cursor'
     assert rows[6]['before']['window']!=rows[7]['before']['window'],'same-size move not observed'
     assert rows[7]['before']['window']==info['geometry']['window'],'move-back did not restore fixture geometry'
-    trace=json.loads((challenge/'trace.json').read_text());assert any(r['kind']=='geometry' for r in trace['events']),'resize cutoff not observed'
+    trace=json.loads((challenge/'trace.json').read_text());termination=challenge_termination(trace,json.loads((challenge/'proof-summary.json').read_text()),rows)
     challenge_info=json.loads((case/'with/geometry.json').read_text());challenge_info['observations']=rows
     _,challenge_frames,challenge_diagnostics=movie(challenge,challenge_info,ffmpeg,ffprobe,results['with']['rawAnchors'])
     visibility=json.loads((case/'visibility/visibility.json').read_text());assert visibility['telemetry']==[] and visibility['prefix']=='rejectedAll';v=visibility['observations'];assert len(v)==3 and all(row['telemetryAccepted'] is False for row in v);assert v[2]['hitRoot']!=info['selectedHwnd'],'outside point still belongs to target'
+    resize=case/'resize';resize_trace=json.loads((resize/'trace.json').read_text())
+    attribution=resize_attribution(resize_trace,json.loads((resize/'proof-summary.json').read_text()),json.loads((resize/'first-write-started.json').read_text()),json.loads((resize/'resize-observation.json').read_text()),actions)
+    resize_raw=[resize_trace['width'],resize_trace['height']];resize_info=dict(withCursor=True,rawSize=resize_raw,encodedSize=[v+v%2 for v in resize_raw])
+    rw,rh,resize_pixels=pam(resize/'raw-0.pam');assert [rw,rh]==resize_info['encodedSize'],'resize raw proof dimensions disagree'
+    _,resize_frames,resize_diagnostics=movie(resize,resize_info,ffmpeg,ffprobe,anchors(rw,rh,resize_pixels,*resize_raw))
+    results['explicitResize']=dict(attribution,frames=resize_frames,movieDiagnostics=resize_diagnostics)
     closed=case/'closed';close=json.loads((closed/'close-observation.json').read_text());assert close['workerEndedBeforeFinish'] and close['manualStopRequested'] is False
     trace_close=json.loads((closed/'trace.json').read_text());assert trace_close['sourceClosed'] is True or trace_close['sourceAvailabilityEnd']=='unavailable','close lacks automatic cause'
     close_info=dict(withCursor=True,encodedSize=[trace_close['width']+trace_close['width']%2,trace_close['height']+trace_close['height']%2])
@@ -222,7 +301,7 @@ def check(case,ffmpeg,ffprobe):
     results['automaticClose']=dict(frames=closed_frames,movieDiagnostics=closed_diagnostics,cause='wgcClosed' if trace_close['sourceClosed'] else 'sourceUnavailableStop')
     resource=json.loads((case/'resource-paths.json').read_text());assert resource['iterations']==16 and resource['before']==resource['after'] and resource['partialAcquisitionsOwned'] is True and resource['afterDibitsFailure'] is True and resource['afterColorRasterFailure'] is True and resource['afterColorDrawFailure'] is True and resource['nativeXorRejected'] is True
     topology=json.loads((case/'native-topology.json').read_text());assert topology['actualMonitors'] and topology['profileAwareness']=='PMv2 only'
-    results['challenges']=dict(frames=challenge_frames,movieDiagnostics=challenge_diagnostics,actions=expected_actions,telemetryAccepted=0)
+    results['challenges']=dict(frames=challenge_frames,movieDiagnostics=challenge_diagnostics,actions=expected_actions,telemetryAccepted=0,**termination)
     result=json.loads((case/'proof-result.json').read_text());assert result['gdiStart']==result['gdiEnd'] and result['positionRestored'] and result['dpiRestored'] and result['showCountMutated'] is False
     results['scope']='private raw/clock/static cursor controls only';results['telemetryAccepted']=0;results['productionCursorQualified']=False
     (case/'cursor-analysis.json').write_text(json.dumps(results,indent=2)+'\n');return results

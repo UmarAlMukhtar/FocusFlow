@@ -105,13 +105,17 @@ fn source(dir:&Path,w:u32,h:u32,nonce:u16,animated:bool,private_profile:Option<&
     match value["action"].as_str(){
      Some("close")=>{close_ack=Some((sequence,value,read_before,read_after));break;},
      Some("resize")=>{
-      let (width,height)=if private_profile.is_some(){
-       // Grow the outer window so decorated fixtures retain the client fiducials.
-       let mut rect=RECT::default();unsafe{GetWindowRect(hwnd,&mut rect)?;}(rect.right-rect.left,rect.bottom-rect.top)
-      }else{(w as i32,h as i32)};
+      let rect_before=if private_profile.is_some(){let mut r=RECT::default();unsafe{GetWindowRect(hwnd,&mut r)?;}Some(r)}else{None};
+      // Grow the observed outer window so decorated fixtures retain the client fiducials.
+      let (width,height)=rect_before.map_or((w as i32,h as i32),|r|(r.right-r.left,r.bottom-r.top));
       let before=observation_qpc();let resized=unsafe{SetWindowPos(hwnd,None,0,0,width+2,height+2,SWP_NOMOVE|SWP_NOZORDER)};let after=observation_qpc();
-      actions.push(serde_json::json!({"sequence":sequence,"action":"resize","commandReadBeforeQpc":read_before,"commandReadAfterQpc":read_after,"operationBeforeQpc":before,"operationAfterQpc":after,"win32Succeeded":resized.is_ok(),"errorHresult":resized.as_ref().err().map(|e|e.code().0)}));
-      source_actions(dir,frequency,&actions,false,action_limit)?;resized?;
+      let mut action=serde_json::json!({"sequence":sequence,"action":"resize","commandReadBeforeQpc":read_before,"commandReadAfterQpc":read_after,"operationBeforeQpc":before,"operationAfterQpc":after,"win32Succeeded":resized.is_ok(),"errorHresult":resized.as_ref().err().map(|e|e.code().0)});
+      let rect_after=if let Some(r)=rect_before{let mut actual=RECT::default();unsafe{GetWindowRect(hwnd,&mut actual)?;}action["windowRectBefore"]=serde_json::json!([r.left,r.top,r.right,r.bottom]);action["windowRectAfter"]=serde_json::json!([actual.left,actual.top,actual.right,actual.bottom]);Some(actual)}else{None};
+      actions.push(action);source_actions(dir,frequency,&actions,false,action_limit)?;resized?;
+      if let (Some(a),Some(b))=(rect_before,rect_after){
+       if [read_before,read_after,before,after].iter().any(Option::is_none){return Err("Private resize QPC unavailable".into());}
+       if a.left!=b.left||a.top!=b.top||b.right-a.right!=2||b.bottom-a.bottom!=2{return Err("Private resize did not retain origin and grow the actual window by 2+2".into());}
+      }
      },
      Some(action @ ("alpha"|"hidden"|"restore-cursor"|"occlude"|"unocclude"|"move-away-back"|"move"|"move-back"|"minimize-restore")) if private_profile.is_some()=>{
       cursor::require_disposable()?;let before=observation_qpc();

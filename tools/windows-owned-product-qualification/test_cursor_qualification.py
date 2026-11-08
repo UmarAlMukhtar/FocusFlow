@@ -59,10 +59,18 @@ class PrivateChecks(unittest.TestCase):
             (probe/'native-color-12.pam').write_bytes(data)
             alpha=case/'alpha-with';alpha.mkdir();(alpha/'native-color-0.pam').write_bytes(data)
             (alpha/'native-color-12.pam').write_bytes(data);(case/'source-command-17.json').write_text('{}')
+            resize=case/'resize';resize.mkdir()
+            resize_names=['trace.json','proof-summary.json','owned.json','first-write-started.json','resize-observation.json','raw-0.pam','raw-1.pam','proof-with-cursor.mp4']
+            for name in resize_names:(resize/name).write_bytes(data if name.endswith('.pam') else b'private' if name.endswith('.mp4') else b'{}')
+            (resize/'private.json').write_text('not named');(resize/'nested').mkdir();(resize/'nested/trace.json').write_text('not named')
             hashes=package(ev,root/'absent',root/'qualification-upload')
             expected={f'cases/cursor-borderless-even/session-0/with/{n}' for n in ['raw-0.pam','cursor-0.pam','raster-0-0.pam','native-color-0.pam','native-color-11.pam','proof-with-cursor.mp4','geometry.json']}|{'cases/cursor-borderless-even/session-0/source-command-13.json','cases/cursor-borderless-even/session-0/alpha-with/native-color-0.pam'}
             expected|={f'cases/cursor-borderless-even/session-0/alpha-probe/{n}' for n in ['cursor-10.pam','native-color-10.pam']+[f'raster-10-{i}.pam' for i in range(4)]}
+            expected|={f'cases/cursor-borderless-even/session-0/resize/{name}' for name in resize_names}
             self.assertEqual(set(hashes),expected)
+            import hashlib,json
+            manifest=json.loads((root/'qualification-upload/upload-manifest.json').read_text());self.assertEqual(manifest['sha256'],hashes);self.assertFalse(manifest['omitted'])
+            for name,value in hashes.items():self.assertEqual(value,hashlib.sha256((root/'qualification-upload'/name).read_bytes()).hexdigest())
             uploaded={p.relative_to(root/'qualification-upload').as_posix() for glob in globs for p in root.glob(glob) if p.is_file()};self.assertTrue(expected<=uploaded)
             self.assertEqual(c.pam(d/'raw-0.pam'),(1,1,bytes([1,2,3,255])))
             (probe/'capture.json').write_text('{}')
@@ -104,7 +112,7 @@ class PrivateRouting(unittest.TestCase):
     def test_private_scope_builds_one_harness_and_stops_on_unknown_cleanup(self):
         import json,tempfile
         from types import SimpleNamespace
-        for fail in [False,True]:
+        for fail in [False,True,'missing-resize','missing-observation']:
             with self.subTest(fail=fail),tempfile.TemporaryDirectory() as tmp:
                 repo=Path(__file__).resolve().parents[2];root=Path(tmp);args=SimpleNamespace(evidence=root/'evidence',ffmpeg=root/'f',ffprobe=root/'p',scope='cursor-private')
                 metadata={'packages':[{'name':'windows-capture','source':None,'manifest_path':str(repo/'FocusFlow/vendor/windows-capture/Cargo.toml')}]};calls=[];builds=[]
@@ -113,17 +121,20 @@ class PrivateRouting(unittest.TestCase):
                     if name in {'cursor-portable','cursor-renderer'}|STARTUP_UNIT_LOGS.keys():
                         log=evidence/(name+'.log');log.write_text(STARTUP_UNIT_LOGS.get(name,'test result: ok. '+('6' if name=='cursor-portable' else '1')+' passed; 0 failed; 0 ignored;'));return log
                     self.assertTrue(name.startswith('cursor-'));self.assertEqual(argv[2],'cursor-private')
-                    if fail:raise RuntimeError('required first native profile failed')
-                    case=evidence/name/'session-0';d=case/'without';d.mkdir(parents=True);owned=dict(parent=10,worker=20,encoder=30,qpc=123);run.write(d/'owned.json',owned)
-                    source=dict(pid=40,observed=True,signaled=True,exitCode=0);run.write(case/'source-cleanup.json',source)
-                    run.write(evidence/(name+'-command.json'),dict(cleanup=dict(parent=dict(pid=10,signaled=True,exitCode=0),owned=[dict(**owned,path='session-0/without/owned.json',signaled=[True,True])],sources=[source])))
+                    if fail is True:raise RuntimeError('required first native profile failed')
+                    case=evidence/name;receipt=evidence/(name+'-command.json');data=private_owner_fixture(case,receipt)
+                    if fail=='missing-resize':
+                        import shutil
+                        shutil.rmtree(case/'session-0/resize');data['cleanup']['owned']=[row for row in data['cleanup']['owned'] if '/resize/' not in row['path']];data['ownership'].pop(5)
+                    if fail=='missing-observation':data['ownership'].pop(5)
+                    run.write(receipt,data)
                 def build(repo,evidence,manifest,name,test):builds.append((name,test));return root/'harness'
                 with patch('run.sys.platform','win32'),patch.dict(os.environ,{'GITHUB_REF':'refs/heads/codex-windows-cursor-qualification'}),patch('run.require_cursor_disposable_context',return_value={'sha':'a'*40}),patch('run.os.chdir'),patch('run.source_manifest',return_value={}),patch('run.sha',side_effect=lambda p:run.FFMPEG_SHA if p==args.ffmpeg else run.FFPROBE_SHA if p==args.ffprobe else 'fixture-hash'),patch('run.subprocess.check_output',side_effect=lambda argv,**kw:json.dumps(metadata) if argv[0]=='cargo' else 'a'*40),patch('run.execute',side_effect=execute),patch('run.build_exe',side_effect=build),patch('cursor_check.check') as checker:
                     if fail:
                         with self.assertRaises(RuntimeError):run.run(args)
                     else:run.run(args)
                 self.assertEqual(builds,[('windows_owned_qualification',True)])
-                self.assertEqual(len(calls),6 if fail else 9);self.assertEqual(checker.call_count,0 if fail else 4)
+                self.assertEqual(len(calls),6 if fail is True else 9);self.assertEqual(checker.call_count,0 if fail else 4)
                 result=json.loads((args.evidence/'result.json').read_text());self.assertFalse(result['passed']);self.assertFalse(result['productionCursorQualified']);self.assertEqual(result['cursorProofPassed'],not fail)
                 self.assertNotIn('core-publication',calls);self.assertNotIn('native-platform',calls)
 
@@ -160,7 +171,7 @@ class PrivateRouting(unittest.TestCase):
                 self.assertEqual([c[1] for c in calls],[[320,240,500],[320,240,501],[641,359,502],[641,359,503]] if cleanup=='confirmed' else [[320,240,500]])
                 result=json.loads((args.evidence/'result.json').read_text());self.assertFalse(result['cursorProofPassed']);self.assertFalse(result['passed']);self.assertFalse(result['productionCursorQualified'])
                 if failed_profile is not None:self.assertTrue(any('profile failed after owned cleanup' in f['error'] for f in result['failures']))
-                else:self.assertEqual(result['failures'][0]['name'],profiles[0]+'-cleanup')
+                else:self.assertIn(profiles[0]+'-cleanup',[failure['name'] for failure in result['failures']])
 
     def test_missing_or_mismatched_context_rejected_before_tools_and_output(self):
         import tempfile
@@ -199,9 +210,13 @@ class AlphaPairChecks(unittest.TestCase):
             save(d/'geometry.json',info)
             if mode=='challenge':
                 rows[1]['flags']=0;rows[3]['hitRoot']=4;rows[6]['before']=dict(g,window=[23,17,119,113])
-                save(d/'challenges.json',dict(observations=rows,telemetry=[],prefix='rejectedAll',noResumeAfterEqualPolls=True));save(d/'trace.json',dict(events=[dict(kind='geometry')]))
+                save(d/'challenges.json',dict(observations=rows,telemetry=[],prefix='rejectedAll',noResumeAfterEqualPolls=True));save(d/'trace.json',dict(admission=2999000,cutoff=6000000,sourceClosed=False,sourceAvailabilityEnd=None,events=[dict(kind='geometry',qpc=6000000)]));save(d/'proof-summary.json',dict(clock=dict(cutoff=6000000,geometry_changed=True,closed=False,source_availability=None)))
         actions=['alpha','restore-cursor','alpha','hidden','restore-cursor','occlude','unocclude','move-away-back','move','move-back','minimize-restore','resize','close']
-        save(root/'source-actions.json',dict(overflow=False,records=[dict(action=a,win32Succeeded=True) for a in actions]))
+        trace,summary,first,observation,actions=resize_fixture((96,96))
+        save(root/'source-actions.json',actions)
+        for name,value in [('trace.json',trace),('proof-summary.json',summary),('first-write-started.json',first),('resize-observation.json',observation)]:save(root/'resize'/name,value)
+        for i in range(2):pam(root/'resize'/f'raw-{i}.pam',96,96,base)
+        (root/'resize/proof-with-cursor.mp4').write_bytes(b'external codec fixture')
         save(root/'visibility/visibility.json',dict(telemetry=[],prefix='rejectedAll',observations=[dict(telemetryAccepted=False,hitRoot=4)]*3))
         save(root/'closed/close-observation.json',dict(workerEndedBeforeFinish=True,manualStopRequested=False));save(root/'closed/trace.json',dict(width=96,height=96,sourceClosed=True))
         pam(root/'closed/raw-0.pam',96,96,base)
@@ -251,10 +266,10 @@ class AlphaObserverPaths(unittest.TestCase):
         driver_code="""import json,os,sys,time
 from pathlib import Path
 root=Path(sys.argv[1]);gates=[]
-for i,name in enumerate(['without','with','alpha-without','alpha-with','challenge','closed','alpha-probe','unexpected','nested/alpha-with']):
+for i,name in enumerate(['without','with','alpha-without','alpha-with','challenge','resize','closed','alpha-probe','unexpected','nested/alpha-with']):
     d=root/'session-0'/name;d.mkdir(parents=True,exist_ok=True)
-    (d/'owned.json').write_text(json.dumps(dict(parent=os.getpid(),worker=100+i*2,encoder=101+i*2)))
-    if i<6:gates.append(d/'handles-open')
+    (d/'owned.json').write_text(json.dumps(dict(parent=os.getpid(),worker=100+i*2,encoder=101+i*2,qpc=123+i)))
+    if i<7:gates.append(d/'handles-open')
 while not all(p.exists() for p in gates):time.sleep(.005)
 """
         handles=[]
@@ -267,10 +282,18 @@ while not all(p.exists() for p in gates):time.sleep(.005)
             root=Path(tmp);driver=root/'driver.py';driver.write_text(driver_code)
             with patch('run.ExactHandle',Handle),patch('run.native_qpc',return_value=123):
                 run.execute([sys.executable,driver,root/'case'],root,'cursor-borderless-even',3,observe=root/'case')
-            self.assertEqual([h.pid for h in handles],list(range(100,112)));self.assertTrue(all(h.closed for h in handles))
+            self.assertEqual([h.pid for h in handles],list(range(100,114)));self.assertTrue(all(h.closed for h in handles))
             receipt=json.loads((root/'cursor-borderless-even-command.json').read_text())
-            self.assertEqual(len(receipt['ownership']),6);self.assertIsNone(receipt['error'])
+            self.assertEqual(len(receipt['ownership']),7);self.assertIsNone(receipt['error'])
             self.assertTrue(all(r['signaled']==[True,True] and r['fallback'] is False for r in receipt['ownership']))
+            expected={f'session-0/{name}/owned.json' for name in PRIVATE_PROOFS}
+            self.assertEqual({row['path'] for row in receipt['cleanup']['owned']},expected)
+            for row in receipt['cleanup']['owned']:
+                original=json.loads((root/'case'/row['path']).read_text())
+                self.assertTrue((root/'case'/row['path']).with_name('handles-open').is_file())
+                self.assertTrue(all(row[key]==original[key] for key in original))
+                self.assertEqual(row['signaled'],[True,True])
+            for name in ['alpha-probe','unexpected','nested/alpha-with']:self.assertFalse((root/'case/session-0'/name/'handles-open').exists())
 
 
 class PendingFileBounds(unittest.TestCase):
@@ -485,3 +508,215 @@ class StartupChecks(unittest.TestCase):
                     with self.assertRaises(AssertionError):c.anchors(w,h,bad,65,65)
                 else:
                     with self.assertRaises(AssertionError):c.anchors(w,h,bad)
+
+
+def resize_fixture(raw=(322,272)):
+    # Two complete 30Hz cells on a 3MHz clock, with a cutoff during SetWindowPos.
+    w,h=raw
+    stages=['startQpc','freezeQpc','probeQpc','preparedQpc','gate2Qpc','encoderQpc','gate4Qpc','parkEnterQpc','parkLeaveQpc','supervisorQpc','writerQpc','armQpc']
+    startup=dict(zip(stages,range(2989000,3000001,1000)))
+    startup.update(allocation=[w+14,h+7],frozen=[w,h],itemCreations=1,captureStarts=1,cleanupConsumptions=1,metadataCallbacks=5,mismatches=1,pixelCopies=2,preArmPixelCopies=0,preAdmissionPixelCopies=0,sourcePublications=2,preArmSourcePublications=0,proofWrites=2,preArmProofWrites=0)
+    events=[dict(kind='source',order=i,seq=i,native=10000000+i,qpc=3000010+i*10,contentWidth=w,contentHeight=h,textureWidth=w,textureHeight=h) for i in range(2)]
+    events += [dict(kind='decision',order=2+i,ordinal=i,seq=i,qpc=3100000+i*100000) for i in range(2)]
+    events.append(dict(kind='geometry',order=4,qpc=3200000,contentWidth=w+2,contentHeight=h+2,textureWidth=w,textureHeight=h))
+    trace=dict(startup=startup,frequency=3000000,admission=3000000,epoch=10000000,cutoff=3200000,selected=2,written=2,width=w,height=h,overflow=False,sourceClosed=False,sourceAvailabilityEnd=None,events=events,writes=[dict(ordinal=i,seq=i,bytes=(w+w%2)*(h+h%2)*4,ok=True) for i in range(2)])
+    summary=dict(privateProof=True,neverImport=True,workerExit=0,encoderSignaled=True,clock={k:trace[k] for k in ['frequency','admission','epoch','cutoff','selected','written']})
+    summary['clock'].update(geometry_changed=True,closed=False,source_availability=None)
+    first=dict(qpc=3100001,seq=0)
+    observation=dict(actionSequence=12,liveCheckBeforeQpc=3100010,liveCheckAfterQpc=3100020,workerAliveBeforeResize=True,workerEndedBeforeFinish=True,endedObservedQpc=3200100,manualStopRequested=False)
+    names=['alpha','restore-cursor','alpha','hidden','restore-cursor','occlude','unocclude','move-away-back','move','move-back','minimize-restore','resize','close']
+    records=[dict(action=a,sequence=i+1,operationBeforeQpc=100000+i*10000,operationAfterQpc=100001+i*10000,win32Succeeded=True) for i,a in enumerate(names)]
+    records[11].update(commandReadBeforeQpc=3199950,commandReadAfterQpc=3199960,operationBeforeQpc=3199980,operationAfterQpc=3200010,windowRectBefore=[-40,40,w-40,h+40],windowRectAfter=[-40,40,w-38,h+42])
+    records[12].update(commandReadBeforeQpc=3300000,commandReadAfterQpc=3300001,operationBeforeQpc=3300002,operationAfterQpc=3300003)
+    return trace,summary,first,observation,dict(qpcFrequency=3000000,overflow=False,records=records)
+
+class ResizeAttributionChecks(unittest.TestCase):
+    def checker(self,*args):
+        import cursor_check as c
+        self.assertTrue(callable(getattr(c,'resize_attribution',None)),'shared checker lacks explicit resize attribution')
+        return c.resize_attribution(*args)
+
+    def test_non10mhz_borderless_decorated_and_during_call_cutoffs(self):
+        import analyze
+        for raw in [(320,240),(641,359),(322,272),(643,391)]:
+            for new_texture in [False,True]:
+                for during in [False,True]:
+                    with self.subTest(raw=raw,new_texture=new_texture,during=during):
+                        t,s,f,o,a=resize_fixture(raw)
+                        if new_texture:t['events'][-1].update(textureWidth=raw[0]+2,textureHeight=raw[1]+2)
+                        if not during:a['records'][11]['operationAfterQpc']=3199990
+                        self.assertEqual(len(analyze.expected(t)),2)
+                        result=self.checker(t,s,f,o,a)
+                        self.assertEqual(result['frozenSize'],list(raw));self.assertEqual(result['actionSequence'],12)
+                        self.assertEqual(result['oldTextureNewContentObserved'],not new_texture)
+
+    def test_rejects_earlier_unrelated_manual_and_wrong_clock_resize_claims(self):
+        def cutoff_at(t,s,value):
+            t['cutoff']=s['clock']['cutoff']=t['events'][-1]['qpc']=value
+        faults={
+            'missing-live':lambda t,s,f,o,a:o.pop('workerAliveBeforeResize'),
+            'false-live':lambda t,s,f,o,a:o.update(workerAliveBeforeResize=False),
+            'manual-stop':lambda t,s,f,o,a:o.update(manualStopRequested=True),
+            'not-ended':lambda t,s,f,o,a:o.update(workerEndedBeforeFinish=False),
+            'end-before-action':lambda t,s,f,o,a:o.update(endedObservedQpc=3199970),
+            'first-after-action':lambda t,s,f,o,a:f.update(qpc=3199990),
+            'first-before-publication':lambda t,s,f,o,a:f.update(qpc=3000005),
+            'wrong-written-seq':lambda t,s,f,o,a:t['writes'][0].update(seq=1),
+            'wrong-decision-seq':lambda t,s,f,o,a:t['events'][2].update(seq=1),
+            'wrong-first-seq':lambda t,s,f,o,a:f.update(seq=1),
+            'late-admission':lambda t,s,f,o,a:t.update(admission=3199990),
+            'earlier-cutoff':lambda t,s,f,o,a:cutoff_at(t,s,3199970),
+            'same-tick-cutoff':lambda t,s,f,o,a:cutoff_at(t,s,3199980),
+            'second-event':lambda t,s,f,o,a:t['events'].append(dict(t['events'][-1])),
+            'missing-event':lambda t,s,f,o,a:t['events'].pop(),
+            'wrong-cutoff':lambda t,s,f,o,a:t.update(cutoff=3200001),
+            'failed-action':lambda t,s,f,o,a:a['records'][11].update(win32Succeeded=False),
+            'missing-action':lambda t,s,f,o,a:a['records'].pop(11),
+            'duplicate-action':lambda t,s,f,o,a:a['records'].append(dict(a['records'][11])),
+            'wrong-sequence':lambda t,s,f,o,a:a['records'][11].update(sequence=11),
+            'wrong-observed-sequence':lambda t,s,f,o,a:o.update(actionSequence=13),
+            'wrong-frequency':lambda t,s,f,o,a:a.update(qpcFrequency=10000000),
+            'bool-frequency':lambda t,s,f,o,a:a.update(qpcFrequency=True),
+            'overflow':lambda t,s,f,o,a:a.update(overflow=True),
+            'restore-overlaps-startup':lambda t,s,f,o,a:a['records'][10].update(operationAfterQpc=3000001),
+            'close-before-end':lambda t,s,f,o,a:a['records'][12].update(commandReadBeforeQpc=3200099),
+            'unchanged-window':lambda t,s,f,o,a:a['records'][11].update(windowRectAfter=a['records'][11]['windowRectBefore']),
+            'moved-window':lambda t,s,f,o,a:a['records'][11].update(windowRectAfter=[-39,40,285,314]),
+            'bool-rect':lambda t,s,f,o,a:a['records'][11]['windowRectAfter'].__setitem__(0,True),
+            'unchanged-content':lambda t,s,f,o,a:t['events'][-1].update(contentWidth=322,contentHeight=272),
+            'unrelated-plus7':lambda t,s,f,o,a:t['events'][-1].update(contentHeight=279),
+            'client-grid':lambda t,s,f,o,a:t['events'][-1].update(contentWidth=322,contentHeight=242),
+            'late-publication':lambda t,s,f,o,a:t['events'][0].update(qpc=3200000),
+            'changed-source':lambda t,s,f,o,a:t['events'][1].update(textureHeight=279),
+            'wrong-summary':lambda t,s,f,o,a:s['clock'].update(geometry_changed=False),
+            'closed':lambda t,s,f,o,a:t.update(sourceClosed=True),
+            'unavailable':lambda t,s,f,o,a:s['clock'].update(source_availability='unavailable'),
+        }
+        for name,row,key in [('admission',0,'admission'),('cutoff',0,'cutoff'),('frequency',0,'frequency'),('first-write',2,'qpc')]:
+            for value in [None,True,-1]:faults[f'{name}-{value}']=lambda *args,row=row,key=key,value=value:args[row].update({key:value})
+        for kind,index in [('source',0),('geometry',-1)]:
+            for value in [None,True,-1]:faults[f'{kind}-qpc-{value}']=lambda t,s,f,o,a,index=index,value=value:t['events'][index].update(qpc=value)
+        for field in ['liveCheckBeforeQpc','liveCheckAfterQpc','endedObservedQpc']:
+            for value in [None,True,-1]:faults[f'{field}-{value}']=lambda t,s,f,o,a,field=field,value=value:o.update({field:value})
+        for field in ['commandReadBeforeQpc','commandReadAfterQpc','operationBeforeQpc','operationAfterQpc']:
+            for value in [None,True,-1]:faults[f'{field}-{value}']=lambda t,s,f,o,a,field=field,value=value:a['records'][11].update({field:value})
+        for name,mutate in faults.items():
+            with self.subTest(fault=name):
+                args=resize_fixture();mutate(*args)
+                with self.assertRaises((AssertionError,KeyError),msg=name):self.checker(*args)
+
+    def test_connected_path_requires_resize_receipt_and_raw_exemplars(self):
+        import cursor_check as c
+        import tempfile,shutil,io,json
+        for fault in [None,'directory','receipt','first-write','raw-0','raw-1','earlier-event']:
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);clock=AlphaPairChecks().fixture(root)
+                if fault=='directory':shutil.rmtree(root/'resize',ignore_errors=True)
+                elif fault in ['receipt','first-write','raw-0','raw-1']:
+                    name='resize-observation.json' if fault=='receipt' else 'first-write-started.json' if fault=='first-write' else fault+'.pam';(root/'resize'/name).unlink(missing_ok=True)
+                elif fault=='earlier-event':
+                    import json
+                    p=root/'resize/trace.json';t=json.loads(p.read_text());t['events'][-1]['qpc']=3199970;p.write_text(json.dumps(t))
+                movie=c.movie
+                class Decoder:
+                    def __init__(self,*unused,**kwargs):
+                        _,_,rgba=c.pam(root/'resize/raw-0.pam');rgb=b''.join(rgba[i:i+3] for i in range(0,len(rgba),4));self.stdout=io.BytesIO(rgb*2)
+                    def poll(self):return 0
+                    def wait(self,**kwargs):return 0
+                    def kill(self):raise AssertionError('fixture decoder should have finished')
+                def output(argv,**unused):
+                    if '-version' in argv:return 'fixture decoder\n'
+                    return json.dumps(dict(streams=[dict(width=96,height=96,codec_name='h264',pix_fmt='yuv420p',time_base='1/30')],packets=[dict(pts=i,dts=i,duration=1) for i in range(2)]))
+                def media(directory,*args,**kwargs):return movie(directory,*args,**kwargs) if directory.name=='resize' else (clock,30,{})
+                with patch('cursor_check.movie',side_effect=media),patch('cursor_check.subprocess.check_output',side_effect=output),patch('cursor_check.subprocess.Popen',Decoder):
+                    if fault is None:self.assertIn('explicitResize',c.check(root,None,None))
+                    else:
+                        with self.assertRaises((AssertionError,KeyError,FileNotFoundError)):c.check(root,None,None)
+
+    def test_challenge_termination_does_not_claim_explicit_resize_or_postcutoff_live_interval(self):
+        import cursor_check as c
+        import tempfile,json
+        for cause in ['geometry','manual','contradictory','closed','unavailable']:
+            with self.subTest(cause=cause),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);clock=AlphaPairChecks().fixture(root)
+                p=root/'challenge/trace.json';t=json.loads(p.read_text());t['cutoff']=3000003
+                if cause=='manual':t['events']=[]
+                if cause=='closed':t['sourceClosed']=True
+                if cause=='unavailable':t['sourceAvailabilityEnd']='unavailable'
+                if t['events']:t['events'][0]['qpc']=t['cutoff']
+                p.write_text(json.dumps(t));p=root/'challenge/proof-summary.json';s=json.loads(p.read_text());s['clock'].update(cutoff=t['cutoff'],geometry_changed=cause!='manual')
+                if cause=='contradictory':s['clock']['geometry_changed']=False
+                p.write_text(json.dumps(s))
+                with patch('cursor_check.movie',return_value=(clock,30,{})):
+                    if cause in ['geometry','manual']:
+                        result=c.check(root,None,None)['challenges'];self.assertIn('terminationCause',result);self.assertEqual(result['terminationCause'],'geometryChanged' if cause=='geometry' else 'manualFinish');self.assertEqual(result['observationsWhollyBeforeCutoff'],[]);self.assertEqual(result['observationsOutsideRecordingInterval'],list(range(9)));self.assertNotIn('explicitResize',result)
+                    else:
+                        with self.assertRaises(AssertionError):c.check(root,None,None)
+
+
+class ResizeActionBounds(unittest.TestCase):
+    def test_actual_rectangle_receipt_fits_existing_source_action_cap_at_scalar_limits(self):
+        import json
+        actions=resize_fixture()[4];actions['qpcFrequency']=2**63-1
+        for row in actions['records']:
+            for key in list(row):
+                if key.endswith('Qpc'):row[key]=2**63-1
+        actions['records'][11].update(windowRectBefore=[-2**31,-2**31,2**31-3,2**31-3],windowRectAfter=[-2**31,-2**31,2**31-1,2**31-1],errorHresult=None)
+        actions['records'][12]['errorHresult']=None
+        self.assertEqual(len(actions['records']),13)
+        self.assertLessEqual(len(json.dumps(actions,separators=(',',':')).encode()),4096)
+
+
+PRIVATE_PROOFS=['without','with','alpha-without','alpha-with','challenge','resize','closed']
+
+def private_owner_fixture(root,receipt):
+    case=root/'session-0';case.mkdir(parents=True);owned=[];observations=[]
+    for index,name in enumerate(PRIVATE_PROOFS):
+        d=case/name;d.mkdir();value=dict(parent=10,worker=100+index*2,encoder=101+index*2,qpc=123+index);run.write(d/'owned.json',value)
+        owned.append(dict(value,path=f'session-0/{name}/owned.json',signaled=[True,True]))
+        observations.append(dict(value,signaled=[True,True],fallback=False))
+    source=dict(pid=40,observed=True,signaled=True,exitCode=0);run.write(case/'source-cleanup.json',source)
+    data=dict(exitCode=0,error=None,ownership=observations,cleanup=dict(parent=dict(pid=10,signaled=True,exitCode=0),owned=owned,sources=[source]));run.write(receipt,data);return data
+
+class ResizeOwnership(unittest.TestCase):
+    def test_seven_named_owner_observations_are_required_only_for_complete_success(self):
+        import tempfile,inspect,shutil
+        self.assertIn('complete',inspect.signature(run.require_private_cleanup).parameters,'driver lacks successful seven-worker completion gate')
+        for fault in [None,'missing-resize','mismatched-tuple','unsignaled-resize','missing-seventh-observation','unknown-owner','duplicate-observation','fallback','aliased-worker']:
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp)/'case';receipt=Path(tmp)/'command.json';data=private_owner_fixture(root,receipt)
+                if fault=='missing-resize':
+                    shutil.rmtree(root/'session-0/resize');data['cleanup']['owned'].pop(5);data['ownership'].pop(5)
+                if fault=='mismatched-tuple':data['ownership'][5]['worker']=999
+                if fault=='unsignaled-resize':data['ownership'][5]['signaled'][0]=False
+                if fault=='missing-seventh-observation':data['ownership'].pop(5)
+                if fault=='unknown-owner':
+                    p=root/'session-0/unknown/owned.json';p.parent.mkdir();run.write(p,dict(parent=10,worker=999,encoder=998,qpc=0))
+                if fault=='duplicate-observation':data['ownership'][5]=dict(data['ownership'][4])
+                if fault=='fallback':data['ownership'][5]['fallback']=True
+                if fault=='aliased-worker':
+                    data['cleanup']['owned'][5]['worker']=100;data['ownership'][5]['worker']=100;run.write(root/'session-0/resize/owned.json',{key:data['cleanup']['owned'][5][key] for key in ['parent','worker','encoder','qpc']})
+                run.write(receipt,data)
+                if fault is None:run.require_private_cleanup(root,receipt,complete=True)
+                else:
+                    with self.assertRaises(AssertionError,msg=fault):run.require_private_cleanup(root,receipt,complete=True)
+                if fault=='missing-resize':run.require_private_cleanup(root,receipt) # A cleaned failed attempt can allow collection, never success.
+
+    def test_resize_package_retains_symlink_file_and_aggregate_caps(self):
+        import tempfile,json
+        from package_evidence import package
+        for fault in ['symlink','trace-cap','pam-cap','movie-cap','aggregate-cap']:
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);ev=root/'e';d=ev/'cursor-borderless-even/session-0/resize';d.mkdir(parents=True)
+                if fault=='symlink':
+                    target=root/'target';target.write_text('{}');(d/'resize-observation.json').symlink_to(target)
+                elif fault=='aggregate-cap':
+                    # Sparse generated files exercise the real 255MiB accounting without filling the disk.
+                    for mode in ['without','with','alpha-without','resize']:
+                        p=d.parent/mode/'proof-with-cursor.mp4';p.parent.mkdir(exist_ok=True)
+                        with p.open('wb') as f:f.truncate(64*1024*1024)
+                else:
+                    name,limit={'trace-cap':('trace.json',4*1024*1024),'pam-cap':('raw-1.pam',9*1024*1024),'movie-cap':('proof-with-cursor.mp4',64*1024*1024)}[fault]
+                    with (d/name).open('wb') as f:f.truncate(limit+1)
+                with self.assertRaises(RuntimeError):package(ev,root/'absent',root/'out')
+                manifest=json.loads((root/'out/upload-manifest.json').read_text());self.assertTrue(manifest['capFailure']);self.assertTrue(manifest['omitted']);self.assertLessEqual(manifest['bytes'],255*1024*1024)
