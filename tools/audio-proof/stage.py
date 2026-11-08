@@ -156,9 +156,13 @@ def active_job(observed):
         while True:
             if time.monotonic() >= deadline:
                 raise ValueError('Job observation deadline exceeded')
+            if response.isclosed():
+                break
             response.fp.raw._sock.settimeout(max(0.001, deadline-time.monotonic()))
             block = response.read1(16384)
             if not block:
+                if response.length:
+                    raise ValueError('Incomplete job observation response')
                 break
             raw.extend(block)
             if len(raw) > 1024 * 1024:

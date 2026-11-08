@@ -1,4 +1,6 @@
 import importlib.util
+import http.client
+import io
 import json
 from pathlib import Path
 import sys
@@ -11,7 +13,118 @@ spec = importlib.util.spec_from_file_location('audio_stage', Path(__file__).with
 stage = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(stage)
 
+class MemoryHTTPBody(io.BytesIO):
+    def __init__(self, raw, sock):
+        super().__init__(raw)
+        self.raw = self
+        self._sock = sock
+
+    def read1(self, count):
+        self._sock.read_sizes.append(count)
+        self._sock.clock[0] += self._sock.read_seconds
+        if self._sock.read_error:
+            raise self._sock.read_error
+        return super().read1(count)
+
+
+class MemoryHTTPSocket:
+    def __init__(self, raw, clock, read_seconds, read_error):
+        self.clock = clock
+        self.read_seconds = read_seconds
+        self.read_error = read_error
+        self.read_sizes = []
+        self.timeouts = []
+        self.body = MemoryHTTPBody(raw, self)
+
+    def makefile(self, mode):
+        assert mode == 'rb'
+        return self.body
+
+    def settimeout(self, seconds):
+        assert 0.001 <= seconds <= 10
+        self.timeouts.append(seconds)
+
+
 class StageTests(unittest.TestCase):
+    JOB_BODY = b'{"total_count":1,"jobs":[{"id":45,"name":"native-discovery","status":"in_progress","run_id":10,"run_attempt":1,"runner_name":"Hosted Agent"}]}'
+
+    def active_job_from_http(self, raw, *, read_seconds=0, read_error=None, response_url=None):
+        url = 'https://api.github.com/repos/UmarAlMukhtar/FocusFlow/actions/runs/10/attempts/1/jobs?per_page=100'
+        clock = [0]
+        sock = MemoryHTTPSocket(raw, clock, read_seconds, read_error)
+        response = http.client.HTTPResponse(sock, method='GET', url=response_url or url)
+        response.url = response_url or url  # urllib attaches this to HTTPResponse.
+        response.begin()
+        def open_request(request, timeout):
+            self.assertEqual(request.full_url, url)
+            self.assertEqual(request.get_method(), 'GET')
+            self.assertEqual(dict(request.header_items()), {
+                'Accept': 'application/vnd.github+json',
+                'User-agent': 'FocusFlow-private-audio-source-stage'})
+            self.assertEqual(timeout, 10)
+            return response
+        class Opener:
+            open = staticmethod(open_request)
+        def build_opener(handler):
+            self.assertIsInstance(handler, stage.NoRedirect)
+            return Opener()
+        with patch.object(stage.urllib.request, 'build_opener', build_opener), patch.object(stage.time, 'monotonic', lambda: clock[0]):
+            result = stage.active_job({'run_id': 10, 'attempt': 1, 'runner_name': 'Hosted Agent'})
+        self.assertTrue(response.isclosed())
+        self.assertTrue(sock.timeouts)
+        self.assertTrue(all(0 <= size <= 16384 for size in sock.read_sizes))
+        return result
+
+    def test_active_job_content_length_eof_uses_real_http_response(self):
+        body = self.JOB_BODY
+        raw = b'HTTP/1.1 200 OK\r\nContent-Length: ' + str(len(body)).encode() + b'\r\n\r\n' + body
+        self.assertEqual(self.active_job_from_http(raw), 45)
+
+    def test_active_job_eof_delimited_chunked_and_exact_cap(self):
+        body = self.JOB_BODY
+        for raw in [b'HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n' + body,
+                    b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n' + format(len(body), 'x').encode() + b'\r\n' + body + b'\r\n0\r\n\r\n',
+                    b'HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\n\r\n' + body + b' ' * (1048576-len(body))]:
+            with self.subTest(header=raw.split(b'\r\n\r\n')[0]):
+                self.assertEqual(self.active_job_from_http(raw), 45)
+
+    def test_active_job_truncated_content_length_rejects_complete_json(self):
+        body = self.JOB_BODY
+        raw = b'HTTP/1.1 200 OK\r\nContent-Length: ' + str(len(body)+1).encode() + b'\r\n\r\n' + body
+        with self.assertRaisesRegex(ValueError, 'Incomplete job observation response'):
+            self.active_job_from_http(raw)
+
+    def test_active_job_empty_malformed_and_truncated_chunked_fail_closed(self):
+        for body in [b'', b'{']:
+            with self.subTest(body=body), self.assertRaises(json.JSONDecodeError):
+                self.active_job_from_http(b'HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n' + body)
+        with self.assertRaises(json.JSONDecodeError):
+            self.active_job_from_http(b'HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n')
+        raw = b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n' + format(len(self.JOB_BODY), 'x').encode() + b'\r\n' + self.JOB_BODY
+        with self.assertRaises(http.client.IncompleteRead):
+            self.active_job_from_http(raw)
+
+    def test_active_job_rejects_body_over_cap(self):
+        raw = b'HTTP/1.1 200 OK\r\nContent-Length: 1048577\r\n\r\n' + self.JOB_BODY + b' ' * (1048577-len(self.JOB_BODY))
+        with self.assertRaisesRegex(ValueError, 'Job observation cap exceeded'):
+            self.active_job_from_http(raw)
+
+    def test_active_job_deadline_including_final_read_and_read_errors(self):
+        raw = b'HTTP/1.1 200 OK\r\nContent-Length: ' + str(len(self.JOB_BODY)).encode() + b'\r\n\r\n' + self.JOB_BODY
+        with self.assertRaisesRegex(ValueError, 'Job observation deadline exceeded'):
+            self.active_job_from_http(raw, read_seconds=10)
+        for error in [OSError('injected read failure'), TimeoutError('injected timeout')]:
+            with self.subTest(error=error), self.assertRaises(type(error)):
+                self.active_job_from_http(raw, read_error=error)
+
+    def test_active_job_response_identity_and_status_stay_fixed(self):
+        with self.assertRaisesRegex(ValueError, 'Unexpected job observation response'):
+            self.active_job_from_http(b'HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n')
+        with self.assertRaisesRegex(ValueError, 'Unexpected job observation response'):
+            self.active_job_from_http(b'HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n', response_url='https://elsewhere.invalid/')
+        with self.assertRaisesRegex(ValueError, 'redirects are forbidden'):
+            stage.NoRedirect().redirect_request(None, None, 302, 'Found', {}, 'https://elsewhere.invalid/')
+
     def test_host_observations_never_grant_permission(self):
         env = {'GITHUB_REPOSITORY': stage.REPOSITORY, 'GITHUB_REF': stage.SOURCE_REF,
                'GITHUB_WORKFLOW_REF': stage.WORKFLOW_REF, 'GITHUB_WORKFLOW_SHA': 'a'*40,
