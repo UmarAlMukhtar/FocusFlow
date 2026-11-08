@@ -45,6 +45,52 @@ class MemoryHTTPSocket:
         self.timeouts.append(seconds)
 
 
+class WindowsSDKTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.lib = Path(temp.name) / 'Lib'
+        self.lib.mkdir()
+
+    def test_ignores_non_ascii_or_non_four_part_numeric_directories(self):
+        selected = self.lib / '10.0.2.0'
+        selected.mkdir()
+        for name in ['wdf', '10.0.3', '10.0.3.0.0', '10.0.x.0',
+                     '10.0.+3.0', '10.0.3.0\n', '10.0.\u0663.0']:
+            with self.subTest(name=name):
+                invalid = self.lib / name
+                invalid.mkdir()
+                try:
+                    self.assertEqual(stage.select_windows_sdk(self.lib), selected)
+                except ValueError as error:
+                    self.fail('Valid SDK directory rejected: ' + str(error))
+                finally:
+                    invalid.rmdir()
+
+    def test_ignores_numeric_version_files(self):
+        selected = self.lib / '10.0.2.0'
+        selected.mkdir()
+        (self.lib / '99.0.0.0').write_bytes(b'not a directory')
+        self.assertEqual(stage.select_windows_sdk(self.lib), selected)
+
+    def test_selects_latest_version_numerically(self):
+        for name in ['10.0.2.0', '10.0.10.0', '9.99.99.99']:
+            (self.lib / name).mkdir()
+        self.assertEqual(stage.select_windows_sdk(self.lib), self.lib / '10.0.10.0')
+
+    def test_rejects_empty_or_ineligible_sdk_lib_clearly(self):
+        for populated in [False, True]:
+            with self.subTest(populated=populated):
+                if populated:
+                    (self.lib / 'wdf').mkdir()
+                    (self.lib / '10.0.3').mkdir()
+                    (self.lib / '99.0.0.0').write_bytes(b'not a directory')
+                with self.assertRaises((ValueError, IndexError)) as caught:
+                    stage.select_windows_sdk(self.lib)
+                self.assertIsInstance(caught.exception, ValueError)
+                self.assertRegex(str(caught.exception), 'No eligible Windows SDK version directories')
+
+
 class VisualStudioTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()

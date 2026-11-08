@@ -440,6 +440,14 @@ def select_visual_studio(directory, vswhere, env):
                      'inspect vswhere.log, vswhere.json and vswhere-summary.json; build stopped')
 
 
+def select_windows_sdk(lib):
+    versions = [p for p in lib.iterdir()
+                if p.is_dir() and re.fullmatch(r'[0-9]+(?:\.[0-9]+){3}', p.name)]
+    if not versions:
+        raise ValueError('No eligible Windows SDK version directories in ' + str(lib))
+    return max(versions, key=lambda p: tuple(map(int,p.name.split('.'))))
+
+
 def build(root, observed):
     directory = root / STAGE
     directory.mkdir()
@@ -468,7 +476,7 @@ def build(root, observed):
     msvc = versions[-1]
     linker = msvc / 'bin/Hostx64/x64/link.exe'
     sdk = Path('C:/Program Files (x86)/Windows Kits/10')
-    sdk_version = sorted((sdk / 'Lib').iterdir(), key=lambda p: tuple(map(int,p.name.split('.'))))[-1]
+    sdk_version = select_windows_sdk(sdk / 'Lib')
     lib_dirs = [msvc / 'lib/x64', sdk_version / 'um/x64', sdk_version / 'ucrt/x64']
     if any(not p.is_dir() for p in lib_dirs):
         raise ValueError('Selected linker/SDK libraries unavailable')
