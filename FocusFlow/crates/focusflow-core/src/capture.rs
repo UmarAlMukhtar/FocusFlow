@@ -16,6 +16,7 @@ macro_rules! literals {
     };
 }
 pub mod windows;
+pub mod windows_observations;
 pub use windows::{decode_windows, publish_windows_incomplete, validate_windows_finalized_assets, publish_windows_finalized_assets};
 
 literals!(Backend { LinuxX11 => "linuxX11" });
@@ -141,7 +142,7 @@ pub struct CursorTimingV1 {
 }
 
 // Preserve duplicate detection before native shape checks and the existing project decoder consume a Value.
-struct UniqueJson(serde_json::Value);
+pub(crate) struct UniqueJson(pub(crate) serde_json::Value);
 impl<'de> Deserialize<'de> for UniqueJson {
     fn deserialize<D:serde::Deserializer<'de>>(de:D)->Result<Self,D::Error> {
         struct Visitor;
@@ -269,7 +270,7 @@ pub fn decode(bytes:&[u8],id:&str)->CoreResult<CaptureManifestV1> {
 fn path_error(message:&str)->CoreError {CoreError{code:ErrorCode::InvalidPath,message:message.into(),field:Some("capture.path".into())}}
 fn io_error(error:std::io::Error)->CoreError {CoreError{code:ErrorCode::Io,message:format!("Could not access native capture: {error}"),field:Some("capture.json".into())}}
 // Native authority disallows aliases even when their targets happen to be contained today.
-fn asset(dir:&Path,relative:&str)->CoreResult<Option<PathBuf>> {
+pub(crate) fn asset(dir:&Path,relative:&str)->CoreResult<Option<PathBuf>> {
     require(relative.len()<=512&&project::valid_asset_name(relative),"capture.path","Expected a safe native relative asset path")?;
     let mut path=dir.to_path_buf();
     for component in relative.split('/') {
@@ -289,30 +290,33 @@ pub(crate) fn read(dir:&Path,id:&str)->CoreResult<Option<CaptureManifestV1>> {
     let mut bytes=Vec::new();fs::File::open(path).and_then(|f|f.take(MAX_JSON_BYTES+1).read_to_end(&mut bytes)).map_err(io_error)?;
     decode(&bytes,id).map(Some)
 }
-pub(crate) enum CaptureAuthority {LinuxV1(CaptureManifestV1),WindowsV2(windows::WindowsCaptureManifestV2)}
+pub(crate) enum CaptureAuthority {LinuxV1(CaptureManifestV1),WindowsV2(windows::WindowsCaptureManifestV2),WindowsV3(windows_observations::WindowsCaptureManifestV3)}
 impl CaptureAuthority {
     pub(crate) fn finalized_project(&self)->CoreResult<&ProjectDocument> {
-        match self {Self::LinuxV1(m)=>m.finalized_project(),Self::WindowsV2(m)=>m.finalized_project()}
+        match self {Self::LinuxV1(m)=>m.finalized_project(),Self::WindowsV2(m)=>m.finalized_project(),Self::WindowsV3(m)=>m.finalized_project()}
     }
 }
 pub(crate) fn read_authority(dir:&Path,id:&str)->CoreResult<Option<CaptureAuthority>> {
     let marker=windows::read_marker(dir)?;
+    let observation_marker=windows_observations::read_marker(dir)?;
+    require(!(marker&&observation_marker),"capture.json","Conflicting Windows intent markers; retain files for recovery")?;
     let Some(path)=asset(dir,"capture.json")? else {
-        require(!marker,"capture.json","Windows capture.json is missing; retain files for recovery")?;return Ok(None)
+        require(!marker&&!observation_marker,"capture.json","Windows capture.json is missing; retain files for recovery")?;return Ok(None)
     };
     let mut bytes=Vec::new();fs::File::open(path).and_then(|f|f.take(MAX_JSON_BYTES+1).read_to_end(&mut bytes)).map_err(io_error)?;
     require(bytes.len() as u64<=MAX_JSON_BYTES,"capture.json","Native capture JSON exceeds 8 MiB")?;
     let UniqueJson(value)=serde_json::from_slice(&bytes).map_err(|error| {let mut message=format!("Invalid native capture manifest; retain its files and correct capture.json: {error}");store::truncate_text(&mut message,1024);invalid("capture.json",message)})?;
-    named_object_shapes(&value,&mut Vec::new()).map_err(|e|invalid("capture.json",e))?;
+    if value.get("schemaVersion").and_then(serde_json::Value::as_u64)!=Some(3) {named_object_shapes(&value,&mut Vec::new()).map_err(|e|invalid("capture.json",e))?;}
     let authority=match value.get("schemaVersion").and_then(serde_json::Value::as_u64) {
-        Some(1)=>{require(!marker,"capture.json","Windows intent marker conflicts with Linux authority; retain files for recovery")?;CaptureAuthority::LinuxV1(decode(&bytes,id)?)},
-        Some(2)=>{require(marker,"capture.json","Windows capture intent marker is missing; retain files for recovery")?;CaptureAuthority::WindowsV2(decode_windows(&bytes,id)?)},
+        Some(1)=>{require(!marker&&!observation_marker,"capture.json","Windows intent marker conflicts with Linux authority; retain files for recovery")?;CaptureAuthority::LinuxV1(decode(&bytes,id)?)},
+        Some(2)=>{require(marker&&!observation_marker,"capture.json","Windows capture intent marker is missing; retain files for recovery")?;CaptureAuthority::WindowsV2(decode_windows(&bytes,id)?)},
+        Some(3)=>{require(observation_marker&&!marker,"capture.json","Windows V3 intent marker is missing")?;CaptureAuthority::WindowsV3(windows_observations::decode_windows_observations(&bytes,id)?)},
         _=>return Err(invalid("schemaVersion","Unsupported or missing capture schema; retain files for recovery")),
     };
     Ok(Some(authority))
 }
 pub(crate) fn import_authority(dir:&Path,authority:CaptureAuthority,ffmpeg:&Path)->CoreResult<ProjectDocument> {
-    match authority {CaptureAuthority::LinuxV1(m)=>import(dir,m,ffmpeg),CaptureAuthority::WindowsV2(m)=>windows::import_windows(dir,m,ffmpeg)}
+    match authority {CaptureAuthority::LinuxV1(m)=>import(dir,m,ffmpeg),CaptureAuthority::WindowsV2(m)=>windows::import_windows(dir,m,ffmpeg),CaptureAuthority::WindowsV3(m)=>windows_observations::import_windows_observations(dir,m,ffmpeg)}
 }
 
 pub(crate) fn import(dir:&Path,manifest:CaptureManifestV1,ffmpeg_path:&Path)->CoreResult<ProjectDocument> {
@@ -408,6 +412,7 @@ fn publish_with(dir:&Path,manifest:&CaptureManifestV1,before_write:impl FnOnce(&
     manifest.validate(id)?;
     let store=store::ProjectStore::new(dir.parent().ok_or_else(||path_error("Capture directory needs a parent"))?)?;
     let _lock=store.lock(id,"document")?;
+    require(!windows::read_marker(dir)?&&!windows_observations::read_marker(dir)?,"capture.json","Linux publication cannot replace Windows intent; retain files for recovery")?;
     if let Some(previous)=read(dir,id)? {
         require(matches!(previous.state,CaptureStateV1::Incomplete{..}),"capture.json","Finalized capture authority is immutable; reload before retrying")?;
         require(previous.capture_id==manifest.capture_id&&previous.source==manifest.source,"capture.json","Capture identity and source are immutable; reload before retrying")?;

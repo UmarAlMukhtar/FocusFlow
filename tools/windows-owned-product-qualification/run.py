@@ -8,6 +8,7 @@ import os
 import re
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -20,6 +21,7 @@ FFPROBE_SHA='192a1d6899059765ac8c39764fc3148d4e6049955956dc2029f81f4bd6a8972d'
 WINDOWS_IMPORT_TEST_COUNT=15
 ALLOW_ROOTS=['FocusFlow/src-tauri/src','FocusFlow/src-tauri/tests','FocusFlow/src-tauri/capabilities','FocusFlow/src-tauri/icons','FocusFlow/crates/focusflow-core/src','FocusFlow/crates/focusflow-core/tests','FocusFlow/vendor/windows-capture','tools/windows-owned-product-qualification']
 ALLOW_FILES=['README.md','FocusFlow/src-tauri/Cargo.toml','FocusFlow/src-tauri/Cargo.lock','FocusFlow/src-tauri/build.rs','FocusFlow/src-tauri/tauri.conf.json','FocusFlow/crates/focusflow-core/Cargo.toml','FocusFlow/crates/focusflow-core/Cargo.lock','.superpowers/sdd/2026-10-27-windows-owned-product/fix-1-native-harness/Cargo.toml','.superpowers/sdd/2026-10-27-windows-owned-product/fix-1-native-harness/Cargo.lock','.github/workflows/windows-owned-product-qualification.yml']
+PRODUCTION_STATIC_CASES=[(prefix+'-r'+str(repetition),w,h,nonce+4*repetition,profile) for repetition in range(2) for prefix,w,h,nonce,profile in [('production-popup-even',320,240,700,'popup'),('production-decorated-even',320,240,701,'decorated'),('production-popup-odd',641,359,702,'popup'),('production-decorated-odd',641,359,703,'decorated')]]
 EXTENSIONS={'.rs','.toml','.lock','.md','.json','.png','.ico','.icns','.py','.yml','.txt','.orig'}
 
 def require_cursor_disposable_context():
@@ -74,15 +76,31 @@ def require_exit7(case):
     assert all(w['ok'] is True and w['bytes']==frame_bytes for w in trace['writes']), 'exit7 had an incomplete writer result'
     assert prefix['eof'] is True and prefix['notWriterProgress'] is True and prefix['consumerBytes']==trace['written']*frame_bytes, 'exit7 consumer did not reach EOF after all frames'
 
-def bound(root):
-    size=0
+def bound(root,production_parent=None):
+    import package_evidence
+    if production_parent is not None:assert production_parent[0] in package_evidence.PRODUCTION_MODES and type(production_parent[1]) is int and production_parent[1]>0
+    size=0;production_records={}
     for p in root.rglob('*'):
         is_link=False
         try:
             is_link=p.is_symlink()
+            relative=p.relative_to(root).parts
+            if relative and relative[0] in package_evidence.PRODUCTION_MODES:
+                production_file(p,root/relative[0])
+                if len(relative)>1:
+                    parent=production_parent[1] if production_parent is not None and production_parent[0]==relative[0] else None
+                    limit=package_evidence.production_limit(Path(*relative[1:]),parent)
+                    if limit is None:assert p.is_dir()
+                    else:assert p.is_file() and p.stat().st_size<=limit,'production file cap'
+
             if not p.is_file():continue
             n=p.stat().st_size
         except FileNotFoundError:
+            relative=p.relative_to(root).parts
+            if len(relative)>1 and relative[0] in package_evidence.PRODUCTION_MODES and production_parent is not None and production_parent[0]==relative[0] and not is_link:
+                if package_evidence.production_transient(Path(*relative[1:]),production_parent[1]) is not None:continue
+            if len(relative)==3 and relative[0] in {row[0] for row in PRODUCTION_STATIC_CASES} and relative[1]=='source'  and relative[2] in {name+'.pending' for name in ['source-request','source-ready','source-observed','source-selection','source-exit','source-cleanup','source-actions','source-command-1','source-ack-1']} and not is_link:continue
+            if len(relative)==2 and relative[0] in {row[0] for row in PRODUCTION_STATIC_CASES} and relative[1] in {name+'.pending' for name in ['production-source-ready','production-start-authorized','production-actions-complete','production-placement','production-geometry','production-armed','production-observer-completion','production-source-receipt','production-phase']} and not is_link:continue
             # The owned initial handshake atomically renames this one transient file.
             relative=p.relative_to(root).parts
             if len(relative)==3 and relative[0] in {'cursor-borderless-even','cursor-decorated-even','cursor-borderless-odd','cursor-decorated-odd'} and relative[1:]==('session-0','source-request.pending') and not is_link:continue
@@ -91,6 +109,19 @@ def bound(root):
                 if len(relative)==4 and relative[2]=='startup-probe' and relative[3] in {'startup-phase.pending','startup-metadata.pending','metadata-owned.pending','metadata-cleanup.pending'}:continue
             raise
         size+=n
+        relative=p.relative_to(root).parts
+        if relative and relative[0] in {row[0] for row in PRODUCTION_STATIC_CASES}:
+            production_file(p,root/relative[0])
+            if p.name.startswith('production-') and p.suffix in {'.json','.pending'}:
+                assert n<=package_evidence.PRODUCTION_ROOT.get(p.name,4096),'production receipt cap'
+            if p.name in {'observations.ndjson','input-observations.ndjson'}:
+                assert n<=128*1024*1024,'production stream cap'
+                limit=2048 if p.name=='observations.ndjson' else 1024
+                with p.open('rb') as stream:
+                    for line in iter(lambda:stream.readline(limit+1),b''):
+                        production_records[relative[0]]=production_records.get(relative[0],0)+1
+                        assert production_records[relative[0]]<=8192 and len(line)<=limit,'production stream record cap'
+            if p.name in {'index.json','resources.json'}:assert n<=64*1024,'production index/resource cap'
         if p.name in {'startup-metadata.json','startup-analysis.json'}:assert n<=64*1024,'64KiB metadata cap reached'
         if p.name in {'startup-phase.json','metadata-owned.json'}:assert n<=4096,'4KiB metadata control cap reached'
         if p.name=='metadata-cleanup.json':assert n<=16*1024,'16KiB metadata cleanup cap reached'
@@ -133,14 +164,176 @@ def window_pid(hwnd):
     pid=wintypes.DWORD();assert user.GetWindowThreadProcessId(hwnd,ctypes.byref(pid)),'source HWND unavailable'
     return pid.value
 
+def production_tuple(root):
+    cases={label:(w,h,nonce,profile) for label,w,h,nonce,profile in PRODUCTION_STATIC_CASES}
+    assert root.name in cases,'unexpected production static case'
+    return cases[root.name]
+
+def production_file(path,root):
+    assert path.is_relative_to(root),'foreign production control'
+    for part in [root,*list(path.relative_to(root).parents)[:-1]]:
+        candidate=part if part==root else root/part
+        assert not candidate.is_symlink() and not (candidate.stat().st_file_attributes & 0x400 if hasattr(candidate.stat(),'st_file_attributes') else False),'linked production directory'
+    assert not path.is_symlink() and not (path.stat().st_file_attributes & 0x400 if hasattr(path.stat(),'st_file_attributes') else False),'linked production file'
+    assert path.resolve().is_relative_to(root.resolve()),'foreign production file'
+
+def production_stat(info):
+    return (info.st_dev,info.st_ino,info.st_mode,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+
+def production_read(path,root):
+    production_file(path,root);initial=production_stat(path.lstat())
+    assert stat.S_ISREG(initial[2]) and initial[3]<=4096,'production control must be a regular file <=4KiB'
+    def unique(pairs):
+        result={}
+        for key,value in pairs:
+            assert key not in result,'duplicate production control key'
+            result[key]=value
+        return result
+    # Value, identity and digest are taken from this one bounded open file.
+    with path.open('rb') as control:
+        before=production_stat(os.fstat(control.fileno()))
+        assert stat.S_ISREG(before[2]) and before[3]<=4096,'production control must be a regular file <=4KiB'
+        raw=control.read(4097);assert len(raw)<=4096,'production control cap'
+        error=None
+        try:value=json.loads(raw,object_pairs_hook=unique)
+        except json.JSONDecodeError as exc:error=exc
+        after=production_stat(os.fstat(control.fileno()))
+        production_file(path,root);current=production_stat(path.lstat())
+        assert initial[:3]==before[:3]==after[:3]==current[:3],'production control replaced during read'
+        assert after[3]<=4096 and current[3]<=4096,'production control cap'
+        if before==after==current:assert len(raw)==after[3],'production control byte count changed'
+        snapshot=(before,after,current,hashlib.sha256(raw).hexdigest())
+    if error is not None:
+        error.production_snapshot=snapshot
+        raise error
+    return value,snapshot
+
+def production_remember(path,root,value,snapshot,controls):
+    production_file(path,root)
+    assert snapshot[0]==snapshot[1]==snapshot[2]==production_stat(path.lstat()),'production control changed before observation'
+    assert path not in controls or controls[path]==snapshot,'production control replaced'
+    controls[path]=snapshot
+    return value
+
+def production_control(path,root,controls=None):
+    value,snapshot=production_read(path,root)
+    return production_remember(path,root,value,snapshot,{} if controls is None else controls)
+
+def incomplete_owned_json(error):
+    text=error.doc.rstrip()
+    return error.pos>=len(text) or (error.msg.startswith('Unterminated string') and not text.endswith(('}',']')))
+
+def initial_owned_snapshot(state,snapshot):
+    identity=snapshot[0][:3]
+    assert state.setdefault('initialOwnedIdentity',identity)==identity,'initial production ownership control replaced'
+    assert time.monotonic()-state['initialOwnedAt']<2,'initial ownership publication deadline'
+    return snapshot[0]==snapshot[1]==snapshot[2]
+
+def production_payload(data,expected):
+    return type(data) is dict and set(data)==set(expected) and all(type(data[k]) is type(v) and data[k]==v for k,v in expected.items())
+
+def production_request(root,data):
+    w,h,nonce,profile=production_tuple(root)
+    expected=dict(width=w,height=h,nonce=nonce,animated=False,privateProfile='borderless' if profile=='popup' else profile)
+    assert production_payload(data,expected),'production static tuple/profile mismatch'
+
+def complete_production_raw(path,root):
+    if not path.exists():return False
+    production_file(path,root);size=path.stat().st_size
+    assert size<=9*1024*1024,'production PAM cap'
+    with path.open('rb') as source:header=source.read(256)
+    end=header.find(b'ENDHDR\n')
+    if end<0:
+        assert size<256,'invalid production PAM header'
+        return False
+    header=header[:end+7]
+    match=re.fullmatch(rb'P7\nWIDTH ([0-9]+)\nHEIGHT ([0-9]+)\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n',header)
+    assert match,'invalid production PAM header'
+    w,h=map(int,match.groups());assert 0<w<=1920 and 0<h<=1080,'production PAM dimensions'
+    expected=len(header)+w*h*4
+    assert size<=expected,'extra production PAM bytes'
+    return size==expected
+
+def poll_production_static(root,driver_pid,sources,opened,state):
+    now=time.monotonic();w,h,nonce,profile=production_tuple(root)
+    source=root/'source';assert all(p.name=='source-command-1.json' for p in source.glob('source-command-*.json')),'unexpected production source command'
+    assert len(sources.children)<=1 and set(sources.children)<={source},'unexpected production source owner'
+    if not sources.children:
+        assert now-state.get('driverStartedAt',now)<5,'production source request deadline'
+        return
+    item=sources.children[source];proc=item['proc']
+    assert now-item.get('launchedAt',item.get('readyAt',now))<38 or state.get('phase')=='postcapture' or (root/'production-phase.json').exists(),'production source lifetime watchdog'
+    if not item['observed']:
+        assert proc.poll() is None,'production source died before observation'
+        assert now-item.get('launchedAt',now)<5,'production source observation deadline'
+        return
+    def control(path):
+        return production_control(path,root,state.setdefault('controls',{}))
+    production_request(root,control(source/'source-request.json'))
+    ready=control(source/'source-ready.json');observed=control(source/'source-observed.json')
+    assert production_payload(observed,ready) and set(ready)=={'pid','hwnd'} and all(type(ready[k]) is int and ready[k]>0 for k in ready),'wrong production source identity'
+    assert ready['pid']==proc.pid!=driver_pid,'wrong production source PID'
+    identity=dict(hwnd=ready['hwnd'],sourcePid=proc.pid)
+    if 'identity' not in state:state.update(identity=identity,sourceReadyAt=item['readyAt'],phase='source')
+    assert state['identity']==identity,'production owner changed'
+    phase=root/'production-phase.json'
+    if phase.exists():
+        value=control(phase)
+        assert production_payload(value,dict(phase='postcapture',**identity,workerEncoderJoined=True,sourceClosed=True,qpc=value.get('qpc'))) and type(value['qpc']) is int and value['qpc']>0,'invalid postcapture phase'
+        assert state.get('holdCompleteAt') is not None and len(opened)==1 and all(handle.signaled() for _,handles in opened.values() for handle in handles),'postcapture without joined exact owners'
+        assert proc.poll()==0 and production_payload(control(source/'source-exit.json'),dict(pid=proc.pid,exitCode=0)),'postcapture source not normally closed'
+        state['phase']='postcapture'
+        return
+    assert now-state['sourceReadyAt']<38,'production capture-phase watchdog'
+    # close() writes the command after finish and waits for this owner to observe source exit.
+    closing=source/'source-command-1.json'
+    if closing.exists():
+        assert state.get('holdCompleteAt') is not None and len(opened)==1 and all(handle.signaled() for _,handles in opened.values() for handle in handles),'premature production source close'
+        assert production_payload(control(closing),dict(sequence=1,action='close')),'unexpected production source command'
+        assert proc.poll() in (None,0),'production source close failed'
+        state['phase']='closing'
+        return
+    assert proc.poll() is None,'production source exited before finish'
+    assert window_pid(identity['hwnd'])==proc.pid,'production HWND changed owner'
+    selected=source/'source-selection.json'
+    if not selected.exists():return
+    assert production_payload(control(selected),dict(driverPid=driver_pid,**identity)),'production source selection mismatch'
+    start=root/'production-start-authorized.json';complete=root/'production-actions-complete.json'
+    if state['phase']=='source':
+        assert not start.exists() and not start.is_symlink() and not complete.exists() and not complete.is_symlink(),'stale production authorization'
+        marker=root/'production-source-ready.json'
+        if not marker.exists():return
+        assert production_payload(control(marker),identity),'production source-ready mismatch'
+        fixture_write(start,dict(action='static-owned-canvas-v1',**identity));state.update(phase='authorized',authorizedAt=now)
+    assert production_payload(control(start),dict(action='static-owned-canvas-v1',**identity)),'malformed production start authorization'
+    if 'armedAt' not in state:assert now-state['authorizedAt']<15,'production prepare/arm deadline'
+    armed=root/'production-armed.json'
+    if armed.exists():
+        assert production_payload(control(armed),dict(**identity,profile='pmv2_96_single_monitor_'+profile,candidateOnly=True)),'production armed identity/profile mismatch'
+        owned=root/'session-0/owned.json'
+        assert set(opened)=={owned},'production armed before exact ownership observation'
+        data,handles=opened[owned]
+        assert control(owned)==data and set(data)=={'parent','worker','encoder','qpc'} and data['parent']==driver_pid and len(handles)==2,'production owned identity changed'
+        assert all(type(data[k]) is int and data[k]>0 for k in ['parent','worker','encoder']) and len({data[k] for k in ['parent','worker','encoder']}|{proc.pid})==4,'invalid production owner tuple'
+        state.setdefault('armedAt',now)
+        if 'holdCompleteAt' not in state:
+            assert not complete.exists() and not complete.is_symlink(),'stale production completion'
+            assert now-state['armedAt']<3,'production static hold deadline'
+            if now-state['armedAt']>=.5 and all(complete_production_raw(root/f'session-0/raw-{i}.pam',root) for i in [0,1]):
+                fixture_write(complete,dict(action='static-hold-complete-v1',**identity));state.update(phase='held',holdCompleteAt=now)
+    if 'holdCompleteAt' in state:
+        assert production_payload(control(complete),dict(action='static-hold-complete-v1',**identity)),'malformed production hold authorization'
+    else:assert not complete.exists() and not complete.is_symlink(),'premature production completion'
+
 class GeneratedSources:
-    def __init__(self,harness,root,env):self.harness=harness;self.root=root;self.env=env;self.children={}
+    def __init__(self,harness,root,env,production_static=False):self.harness=harness;self.root=root;self.env=env;self.children={};self.production_static=production_static;self.controls={}
     def poll(self,driver_pid):
-        for request in self.root.glob('session-*/source-request.json'):
+        for request in ([self.root/'source/source-request.json'] if self.production_static and (self.root/'source/source-request.json').exists() else [] if self.production_static else self.root.glob('session-*/source-request.json')):
             case=request.parent
             if case in self.children:continue
-            assert not case.is_symlink() and case.name in {'session-0','session-1','session-2'} and len(self.children)<3,'unexpected source session'
-            data=fixture_read(request)
+            assert not case.is_symlink() and case.name in ({'source'} if self.production_static else {'session-0','session-1','session-2'}) and len(self.children)<(1 if self.production_static else 3),'unexpected source session'
+            data=production_control(request,self.root,self.controls) if self.production_static else fixture_read(request)
+            if self.production_static:production_request(self.root,data)
             private='privateProfile' in data
             if private:
                 if data.get('privateProfile')=='startup-metadata':require_metadata_disposable_context()
@@ -156,7 +349,7 @@ class GeneratedSources:
             with (case/'source.log').open('wb') as out:
                 proc=subprocess.Popen(argv,stdin=subprocess.DEVNULL,stdout=out,stderr=subprocess.STDOUT,env=self.env)
             # Retained Popen owns the exact process handle even before the HWND handshake succeeds.
-            self.children[case]=dict(proc=proc,argv=argv,observed=False,aliveBeforeParentKillQpc=None,aliveAfterProductExitQpc=None)
+            self.children[case]=dict(proc=proc,argv=argv,observed=False,launchedAt=time.monotonic(),aliveBeforeParentKillQpc=None,aliveAfterProductExitQpc=None)
         for case,item in self.children.items():
             proc=item['proc'];code=proc.poll()
             if code is not None:
@@ -165,11 +358,11 @@ class GeneratedSources:
                 continue
             ready=case/'source-ready.json'
             if not item['observed'] and ready.is_file():
-                data=fixture_read(ready)
+                data=production_control(ready,self.root,self.controls) if self.production_static else fixture_read(ready)
                 assert set(data)=={'pid','hwnd'} and type(data['pid']) is int and type(data['hwnd']) is int
                 assert data['pid']==proc.pid!=driver_pid and data['hwnd']>0,'wrong source process identity'
                 assert window_pid(data['hwnd'])==proc.pid,'HWND does not belong to exact source process'
-                fixture_write(case/'source-observed.json',data);item['observed']=True
+                fixture_write(case/'source-observed.json',data);item['observed']=True;item['readyAt']=time.monotonic()
     def require_alive(self,stage=None):
         assert self.children and all(x['observed'] and x['proc'].poll() is None for x in self.children.values()),'source died before product Job observation'
         assert not any(fixture_read(p).get('action')=='close' for case in self.children for p in case.glob('source-command-*.json')),'source close preceded product Job observation'
@@ -194,16 +387,20 @@ class GeneratedSources:
                 except BaseException as exc:failures.append(repr(exc))
         assert not failures,failures
 
-def execute(argv,root,name,timeout=600,env=None,observe=None,parent_death=False):
+def execute(argv,root,name,timeout=600,env=None,observe=None,parent_death=False,production_static=False):
     if name=='startup-metadata':require_metadata_disposable_context()
+    if production_static:
+        require_cursor_disposable_context();assert observe is not None and not parent_death and timeout<=120
+        production_tuple(observe)
     started=time.monotonic();opened={};media={};killed_at=None;kill_qpc=None;receipts=[];error=None;error_filename=None;error_traceback=None
     log=root/(name+'.log');receipt=root/(name+'-command.json')
-    sources=GeneratedSources(argv[0],observe,env) if observe else None
+    sources=GeneratedSources(argv[0],observe,env,production_static=production_static) if observe else None
+    production_state=dict(driverStartedAt=started,deadlines=dict(driverSeconds=timeout,sourceObservationSeconds=5,capturePhaseSeconds=38,prepareArmSeconds=15,holdSeconds=3,minimumHoldMs=500,initialOwnedSeconds=2),controls=sources.controls) if production_static else {}
     with log.open('wb') as out:
         proc=subprocess.Popen([str(x) for x in argv],stdout=out,stderr=subprocess.STDOUT,env=env)
         try:
             while proc.poll() is None:
-                bound(root)
+                bound(root,production_parent=(observe.name,proc.pid)) if production_static else bound(root)
                 assert time.monotonic()-started<timeout,'outer watchdog fired; never product success'
                 if observe:
                     sources.poll(proc.pid)
@@ -212,8 +409,24 @@ def execute(argv,root,name,timeout=600,env=None,observe=None,parent_death=False)
                     ownership_paths+=list(observe.glob('session-0/startup-probe/metadata-owned.json'))
                     for path in ownership_paths:
                         if path in opened:continue
-                        try:data=json.loads(path.read_text(encoding='utf-8'))
-                        except (OSError,ValueError):continue
+                        if production_static:
+                            assert path==observe/'session-0/owned.json','unexpected production ownership layout'
+                            production_state.setdefault('initialOwnedAt',time.monotonic())
+                            try:data,snapshot=production_read(path,observe)
+                            except json.JSONDecodeError as exc:
+                                if not incomplete_owned_json(exc):raise
+                                initial_owned_snapshot(production_state,exc.production_snapshot)
+                                continue
+                            assert type(data) is dict and set(data)=={'parent','worker','encoder','qpc'} and all(type(data[k]) is int and data[k]>0 for k in ['parent','worker','encoder']) and type(data['qpc']) is int and data['qpc']>=0,'invalid production ownership tuple'
+                            assert data['parent']==proc.pid,'foreign production ownership parent'
+                            sources.require_alive()
+                            assert len({data[k] for k in ['parent','worker','encoder']}|{item['proc'].pid for item in sources.children.values()})==4,'production owner identities overlap'
+                            if not initial_owned_snapshot(production_state,snapshot):continue
+                            production_remember(path,observe,data,snapshot,production_state['controls'])
+                            assert not path.with_name('handles-open').exists() and not path.with_name('handles-open').is_symlink(),'stale production exact-handle gate'
+                        else:
+                            try:data=json.loads(path.read_text(encoding='utf-8'))
+                            except (OSError,ValueError):continue
                         metadata=path.name=='metadata-owned.json'
                         if metadata:
                             require_metadata_disposable_context();assert name=='startup-metadata' and set(data)=={'parent','worker','qpc'},'unexpected metadata ownership receipt'
@@ -226,6 +439,7 @@ def execute(argv,root,name,timeout=600,env=None,observe=None,parent_death=False)
                             raise
                         opened[path]=(data,handles)
                         path.with_name('metadata-handles-open' if metadata else 'handles-open').write_text('independently held exact noninheritable process handles\n',encoding='utf-8')
+                    if production_static:poll_production_static(observe,proc.pid,sources,opened,production_state)
                     for gate in observe.glob('session-*/before-publish'):
                         if gate not in media:
                             media[gate]=sha(gate.with_name('screen.mp4'))
@@ -238,6 +452,9 @@ def execute(argv,root,name,timeout=600,env=None,observe=None,parent_death=False)
                 time.sleep(.005)
             code=proc.wait(timeout=3)
             if parent_death:assert killed_at is not None,'parent died before isolation gate'
+            if production_static:
+                sources.poll(proc.pid);poll_production_static(observe,proc.pid,sources,opened,production_state)
+                assert production_state.get('phase')=='postcapture' and len(media)==1,'production did not complete postcapture/hash handshake'
             for path,(data,handles) in opened.items():
                 deadline=(killed_at if parent_death else time.monotonic())+2
                 while not all(h.signaled() for h in handles) and time.monotonic()<deadline:time.sleep(.005)
@@ -281,7 +498,7 @@ def execute(argv,root,name,timeout=600,env=None,observe=None,parent_death=False)
                             if error is None:error=repr(exc);error_traceback=traceback.format_exc(limit=8)[-8192:]
                 cleanup.append(dict(**data,path=path.relative_to(observe).as_posix(),signaled=signaled))
             final=dict(parent=dict(pid=proc.pid,signaled=proc.poll() is not None,exitCode=proc.returncode),owned=cleanup,sources=[dict(pid=item['proc'].pid,observed=item['observed'],signaled=item['proc'].poll() is not None,exitCode=item['proc'].poll()) for item in sources.children.values()] if sources else [])
-            write(receipt,dict(argv=[str(x) for x in argv],exitCode=proc.returncode,seconds=time.monotonic()-started,error=error,errorFilename=error_filename,errorTraceback=error_traceback,logSha256=sha(log),ownership=receipts,cleanup=final))
+            write(receipt,dict(argv=[str(x) for x in argv],exitCode=proc.returncode,seconds=time.monotonic()-started,error=error,errorFilename=error_filename,errorTraceback=error_traceback,logSha256=sha(log),ownership=receipts,cleanup=final,productionStaticPhase={k:v for k,v in production_state.items() if k!='controls'} if production_static else None,cleanupUnknown=bool(production_static and error)))
     if error:raise RuntimeError(error)
     return log
 
@@ -315,6 +532,29 @@ def require_private_cleanup(root,receipt,complete=False):
         assert len(observed)==len(set(observed))==7 and set(observed)==identities,'successful private profile lacks seven matching independent owner observations'
         assert all(type(row['qpc']) is int and row['qpc']>=0 and row['signaled']==[True,True] and all(value is True for value in row['signaled']) and row['fallback'] is False for row in observations),'successful private owner observation lacks normal exact-handle completion'
 
+def require_production_cleanup(root,receipt,complete=False)->dict:
+    data=json.loads(receipt.read_text(encoding='utf-8'));cleanup=data['cleanup'];parent=cleanup['parent']
+    assert not data.get('cleanupUnknown',False),'production descendant cleanup unknown; abort lane'
+    assert parent['signaled'] is True and type(parent['pid']) is int and parent['pid']>0 and type(parent['exitCode']) is int,'production parent cleanup unconfirmed'
+    assert {p.relative_to(root).as_posix() for p in root.rglob('owned.json')}=={'session-0/owned.json'},'unknown production owner'
+    rows=cleanup['owned'];assert len(rows)==1 and rows[0]['path']=='session-0/owned.json','production exact owner missing'
+    row=rows[0];original=production_control(root/'session-0/owned.json',root)
+    assert set(original)=={'parent','worker','encoder','qpc'} and all(row[k]==original[k] for k in original),'production owner changed'
+    assert row['parent']==parent['pid'] and row['signaled']==[True,True] and all(x is True for x in row['signaled']),'production worker/encoder cleanup unconfirmed'
+    sources=cleanup['sources'];assert len(sources)==1,'production source owner missing'
+    assert {p.relative_to(root).as_posix() for p in root.rglob('source-cleanup.json')}=={'source/source-cleanup.json'},'unexpected production source cleanup'
+    source=sources[0];saved=production_control(root/'source/source-cleanup.json',root)
+    assert source['observed'] is True and source['signaled'] is True and type(source['exitCode']) is int and saved['fallback'] is False and saved['error'] is None,'production source cleanup unconfirmed'
+    assert all(saved[k]==source[k] for k in ['pid','observed','signaled','exitCode']),'production source identity changed'
+    ids=[parent['pid'],row['worker'],row['encoder'],source['pid']]
+    assert all(type(pid) is int and pid>0 for pid in ids) and len(set(ids))==4,'invalid production owner identities'
+    if complete:
+        assert data['error'] is None and data['exitCode']==parent['exitCode']==source['exitCode']==0,'production did not exit normally'
+        observed=data['ownership'];assert len(observed)==1 and all(observed[0][k]==original[k] for k in original),'production independent owner observation missing'
+        assert observed[0]['signaled']==[True,True] and all(x is True for x in observed[0]['signaled']) and observed[0]['fallback'] is False,'production exact handle fallback'
+        assert data['productionStaticPhase']['phase']=='postcapture','production postcapture phase missing'
+    return saved
+
 def build_exe(repo,evidence,manifest,name,test=False):
     args=['cargo','+1.89.0','test' if test else 'build','--locked','--manifest-path',manifest,'--message-format=json','--test' if test else '--bin',name]
     if test:args.append('--no-run')
@@ -347,19 +587,19 @@ def uninstrumented(case,ffmpeg,ffprobe):
 
 def run(a):
     assert sys.platform=='win32','native lane must run on Windows'
-    scope=getattr(a,'scope','full');assert scope in {'full','close-diagnostic','cursor-private','startup-metadata'},'unknown qualification scope'
-    cursor_private=scope=='cursor-private';startup_metadata=scope=='startup-metadata'
-    disposable=require_metadata_disposable_context() if startup_metadata else require_cursor_disposable_context() if cursor_private else None
+    scope=getattr(a,'scope','full');assert scope in {'full','close-diagnostic','cursor-private','startup-metadata','cursor-production-static'},'unknown qualification scope'
+    cursor_private=scope=='cursor-private';startup_metadata=scope=='startup-metadata';production_static=scope=='cursor-production-static'
+    disposable=require_metadata_disposable_context() if startup_metadata else require_cursor_disposable_context() if cursor_private or production_static else None
     diagnostic=scope=='close-diagnostic'
-    expected_branch='codex-windows-startup-metadata' if startup_metadata else 'codex-windows-cursor-qualification' if cursor_private else 'codex-windows-owned-close-diagnostic' if diagnostic else 'codex-windows-owned-product-qualification'
+    expected_branch='codex-windows-startup-metadata' if startup_metadata else 'codex-windows-cursor-qualification' if cursor_private or production_static else 'codex-windows-owned-close-diagnostic' if diagnostic else 'codex-windows-owned-product-qualification'
     observed_ref=os.getenv('GITHUB_REF')
     assert observed_ref is None or observed_ref=='refs/heads/'+expected_branch,'qualification scope/ref mismatch'
     if diagnostic:print('DIAGNOSTIC SUBSET: close only; cannot establish full qualification PASS')
     repo=Path(__file__).resolve().parents[2];os.chdir(repo)
-    if cursor_private or startup_metadata:assert subprocess.check_output(['git','rev-parse','HEAD'],text=True,encoding='ascii').strip()==disposable['sha'],'checkout/run SHA mismatch before native tools'
+    if cursor_private or production_static or startup_metadata:assert subprocess.check_output(['git','rev-parse','HEAD'],text=True,encoding='ascii').strip()==disposable['sha'],'checkout/run SHA mismatch before native tools'
     evidence=a.evidence.resolve();evidence.mkdir();assert sha(a.ffmpeg)==FFMPEG_SHA and sha(a.ffprobe)==FFPROBE_SHA
     before=source_manifest(repo);write(evidence/'source-manifest.json',before)
-    write(evidence/'provenance.json',dict(scope=scope,privateCursorProof=cursor_private,disposableContext=disposable,diagnosticOnly=diagnostic or startup_metadata,metadataOnly=startup_metadata,expectedBranch=expected_branch,observedRef=observed_ref,commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True,encoding='ascii').strip(),runnerImage=os.getenv('ImageVersion'),runnerOS=os.getenv('RUNNER_OS'),ffmpegSha256=sha(a.ffmpeg),ffprobeSha256=sha(a.ffprobe),archiveSha256=ARCHIVE_SHA,python=sys.version,platform=sys.platform,toolchain='1.89.0',profile='scalar metadata only; no encoder/ARM/admission' if startup_metadata else 'debug; H264 libx264 veryfast CRF23 yuv420p B0 30fps 30000-timescale',environment={k:os.getenv(k) for k in ['CARGO_TARGET_DIR','VCToolsVersion','WindowsSDKVersion','PROCESSOR_IDENTIFIER']}))
+    write(evidence/'provenance.json',dict(scope=scope,privateCursorProof=cursor_private,productionStatic=production_static,checkerHashes={name:sha(repo/"tools/windows-owned-product-qualification"/name) for name in ["production_cursor_check.py","cursor_check.py","analyze.py","package_evidence.py","run.py"]},disposableContext=disposable,diagnosticOnly=diagnostic or startup_metadata,metadataOnly=startup_metadata,expectedBranch=expected_branch,observedRef=observed_ref,commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True,encoding='ascii').strip(),runnerImage=os.getenv('ImageVersion'),runnerOS=os.getenv('RUNNER_OS'),ffmpegSha256=sha(a.ffmpeg),ffprobeSha256=sha(a.ffprobe),archiveSha256=ARCHIVE_SHA,python=sys.version,platform=sys.platform,toolchain='1.89.0',profile='scalar metadata only; no encoder/ARM/admission' if startup_metadata else 'debug; H264 libx264 veryfast CRF23 yuv420p B0 30fps 30000-timescale',environment={k:os.getenv(k) for k in ['CARGO_TARGET_DIR','VCToolsVersion','WindowsSDKVersion','PROCESSOR_IDENTIFIER']}))
     metadata=json.loads(subprocess.check_output(['cargo','+1.89.0','metadata','--locked','--manifest-path','FocusFlow/src-tauri/Cargo.toml','--format-version','1'],text=True,encoding='utf-8'))
     vendor=[x for x in metadata['packages'] if x['name']=='windows-capture'];assert len(vendor)==1 and vendor[0]['source'] is None
     assert Path(vendor[0]['manifest_path']).resolve()==repo/'FocusFlow/vendor/windows-capture/Cargo.toml'
@@ -373,14 +613,14 @@ def run(a):
     def require_tests(argv,name,count,names=()):
         log=execute(argv,evidence,name)
         require_test_count(log.read_text(encoding='utf-8',errors='replace'),count,names)
-    if not diagnostic and not cursor_private and not startup_metadata:
+    if not diagnostic and not cursor_private and not startup_metadata and not production_static:
         attempt('core-publication',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',core,'--lib','capture::windows::tests::','--','--test-threads=1','--nocapture'],'core-publication',10))
         attempt('core-import',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',core,'--test','windows_capture','--','--test-threads=1','--nocapture','--skip','common::child_writer'],'core-import',WINDOWS_IMPORT_TEST_COUNT))
         attempt('mapping-debug',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',mapping,'--lib','frame::mapping_tests::','--','--test-threads=1','--nocapture'],'mapping-debug',4))
     def pipes():
         exe=build_exe(repo,evidence,core,'cfr_grid_windows',True);env=os.environ.copy();env['CORE_QUAL_EVIDENCE']=str(evidence/'core-pipes')
         execute([exe],evidence,'core-pipes',90,env)
-    if not diagnostic and not cursor_private and not startup_metadata:attempt('core-pipes',pipes)
+    if not diagnostic and not cursor_private and not startup_metadata and not production_static:attempt('core-pipes',pipes)
     if cursor_private:attempt('cursor-renderer',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',core,'--test','cursor_render','lossless_rgba_compositing_isolates_alpha_and_hotspot','--','--test-threads=1'],'cursor-renderer',1))
     if cursor_private:attempt('cursor-portable',lambda:require_tests(['cargo','+1.89.0','test','--locked','--manifest-path',core,'--test','windows_cursor_private','--','--test-threads=1','--nocapture','--skip','common::child_writer'],'cursor-portable',6))
     if cursor_private:
@@ -401,7 +641,7 @@ def run(a):
     def product():
         if cursor_private and failures:return
         built={}
-        targets=[('windows_owned_qualification',True)] if diagnostic or cursor_private or startup_metadata else [('FocusFlow',False),('windows_owned_qualification',True),('windows_encoder_fixture',True)]
+        targets=[('windows_owned_qualification',True)] if diagnostic or cursor_private or production_static or startup_metadata else [('FocusFlow',False),('windows_owned_qualification',True),('windows_encoder_fixture',True)]
         for name,test in targets:
             attempt('build-'+name,lambda name=name,test=test:built.update({name:build_exe(repo,evidence,app,name,test)}))
         actual=built.get('FocusFlow');harness=built.get('windows_owned_qualification');fixture=built.get('windows_encoder_fixture')
@@ -413,7 +653,7 @@ def run(a):
                 root=evidence/'startup-metadata';execute([harness,'--startup-metadata',root,harness],evidence,'startup-metadata',30,observe=root)
                 startup_check.check(root/'session-0',evidence/'startup-metadata-command.json')
             attempt('startup-metadata',metadata_case);return
-        if not diagnostic and not cursor_private and not startup_metadata:attempt('native-platform',lambda:execute([harness,'--platform',evidence/'native-platform.json'],evidence,'native-platform',20))
+        if not diagnostic and not cursor_private and not startup_metadata and not production_static:attempt('native-platform',lambda:execute([harness,'--platform',evidence/'native-platform.json'],evidence,'native-platform',20))
         def one(label,mode,w,h,nonce,worker,encoder):
             root=evidence/label
             execute([harness,root,mode,w,h,nonce,encoder,worker],evidence,label,45,observe=root,parent_death=mode=='parent-death')
@@ -427,6 +667,19 @@ def run(a):
             for case in root.glob('session-*'):
                 if worker==actual:uninstrumented(case,a.ffmpeg,a.ffprobe)
                 else:analyze.analyze(case,a.ffmpeg,a.ffprobe)
+        if production_static:
+            import production_cursor_check
+            for label,w,h,nonce,profile in PRODUCTION_STATIC_CASES:
+                def static_case(label=label,w=w,h=h,nonce=nonce):
+                    root=evidence/label
+                    execute([harness,root,'cursor-production',w,h,nonce,a.ffmpeg,harness],evidence,label,120,observe=root,production_static=True)
+                    require_production_cleanup(root,evidence/(label+'-command.json'),complete=True)
+                    result=production_cursor_check.check(root,a.ffmpeg,a.ffprobe)
+                    # A static subset never establishes complete family qualification.
+                    assert result.get('productionStaticCasesPassed') is True and result.get('productionCursorQualified') is False,'independent static media checker incomplete or rejected'
+                before_case=len(failures);attempt(label,static_case)
+                if len(failures)!=before_case:break # Unknown cleanup or any failed case forbids the next owned source.
+            return
         if cursor_private:
             import cursor_check
             for label,w,h,nonce in [('cursor-borderless-even',320,240,500),('cursor-decorated-even',320,240,501),('cursor-borderless-odd',641,359,502),('cursor-decorated-odd',641,359,503)]:
@@ -457,8 +710,8 @@ def run(a):
     assert source_manifest(repo)==before,'build changed qualified source inputs'
     bound(evidence)
     write(evidence/'artifact-hashes.json',{p.relative_to(evidence).as_posix():sha(p) for p in evidence.rglob('*') if p.is_file()})
-    write(evidence/'result.json',dict(scope=scope,privateCursorProof=cursor_private,productionCursorQualified=False,diagnosticOnly=diagnostic or startup_metadata,metadataCollected=(not failures if startup_metadata else None),passed=not failures and not diagnostic and not cursor_private and not startup_metadata,cursorProofPassed=(not failures if cursor_private else None),diagnosticPassed=(not failures if diagnostic else None),failures=failures,nativeEquality='not a frame equality/admission lane' if startup_metadata else 'inspect each analysis; missing equality is an open coverage gate',geometryTransition='metadata observations only; no geometry is admitted' if startup_metadata else 'inspect resize analysis; old-pool/new-content may remain unobserved',limitations=['Scalar metadata only; no encoder/ARM/epoch/pixels/import or production qualification'] if startup_metadata else ['No actual Tauri/WebView2 Record Stop Edit Play','No microphone/pointer/device/packaging claim','WARP debug-layer failure is unqualified, never skipped']))
+    write(evidence/'result.json',dict(scope=scope,privateCursorProof=cursor_private,productionCursorQualified=False,diagnosticOnly=diagnostic or startup_metadata,metadataCollected=(not failures if startup_metadata else None),productionStaticCasesPassed=(not failures if production_static else None),passed=not failures and not diagnostic and not cursor_private and not startup_metadata and not production_static,cursorProofPassed=(not failures if cursor_private else None),diagnosticPassed=(not failures if diagnostic else None),failures=failures,nativeEquality='not a frame equality/admission lane' if startup_metadata else 'inspect each analysis; missing equality is an open coverage gate',geometryTransition='metadata observations only; no geometry is admitted' if startup_metadata else 'inspect resize analysis; old-pool/new-content may remain unobserved',limitations=['Scalar metadata only; no encoder/ARM/epoch/pixels/import or production qualification'] if startup_metadata else ['No actual Tauri/WebView2 Record Stop Edit Play','No microphone/pointer/device/packaging claim','WARP debug-layer failure is unqualified, never skipped']))
     if failures:raise RuntimeError(f'{len(failures)} required gates failed')
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--scope',choices=['full','close-diagnostic','cursor-private','startup-metadata'],default='full');p.add_argument('--evidence',type=Path,required=True);p.add_argument('--ffmpeg',type=Path,required=True);p.add_argument('--ffprobe',type=Path,required=True);a=p.parse_args();a.ffmpeg=a.ffmpeg.resolve();a.ffprobe=a.ffprobe.resolve();run(a)
+    p=argparse.ArgumentParser();p.add_argument('--scope',choices=['full','close-diagnostic','cursor-private','startup-metadata','cursor-production-static'],default='full');p.add_argument('--evidence',type=Path,required=True);p.add_argument('--ffmpeg',type=Path,required=True);p.add_argument('--ffprobe',type=Path,required=True);a=p.parse_args();a.ffmpeg=a.ffmpeg.resolve();a.ffprobe=a.ffprobe.resolve();run(a)

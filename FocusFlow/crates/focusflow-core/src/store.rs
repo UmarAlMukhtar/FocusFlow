@@ -492,6 +492,7 @@ pub struct ProjectCapabilities {
     pub cursor_replacement: bool, pub cursor_smoothing: bool, pub cursor_follow: bool,
     pub cursor_native_style: bool,
     pub cursor_unavailable_reason: String,
+    pub cursor_observation_quality: Option<crate::cursor_observation::CursorObservationQuality>,
 }
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -509,6 +510,7 @@ pub struct ProjectPage { pub projects: Vec<ProjectSummary>, pub issues: Vec<Proj
 impl Default for ProjectCapabilities {
     fn default() -> Self { Self { fixed_zoom: true, frame_style: true,
         cursor_replacement: false, cursor_smoothing: false, cursor_follow: false, cursor_native_style: false,
+        cursor_observation_quality: None,
         cursor_unavailable_reason: "Recordings contain an embedded cursor and no separate continuous cursor telemetry".into() } }
 }
 fn next_revision(revision: u64) -> CoreResult<u64> {

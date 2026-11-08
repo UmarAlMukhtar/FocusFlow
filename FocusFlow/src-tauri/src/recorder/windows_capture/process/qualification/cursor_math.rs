@@ -1,6 +1,8 @@
 //! Private proof arithmetic only; never grants capture authority or a stationary interval.
-#[derive(Debug,Clone,PartialEq,Eq)]
-pub struct Shape {pub width:u32,pub height:u32,pub hotspot:[u32;2],pub rgba:Vec<u8>}
+// This leaf is also compiled by portable core tests without the Tauri module tree.
+#[path="../../cursor/image.rs"]
+mod resource_image;
+pub use resource_image::{Shape,color,monochrome};
 pub fn origin(raw:&[[i32;2]],physical:&[[i32;2]])->Result<[i32;2],&'static str>{
  if raw.len()!=physical.len()||raw.len()<3||raw.len()>16{return Err("Need 3..16 independent anchors");}
  let delta=[i64::from(physical[0][0])-i64::from(raw[0][0]),i64::from(physical[0][1])-i64::from(raw[0][1])];
@@ -29,21 +31,6 @@ pub fn timestamp(q:[i64;2],frequency:i64,epoch:i64,admission:i64,stop:i64,frames
  let n=relative(lo+(hi-lo)/2)?.checked_mul(1_000_000).ok_or("Clock overflow")?;
  let us=n/(f*10_000_000);if us<0||us>=i128::from(frames)*1_000_000/30{return Err("Outside saved microsecond end");}
  i64::try_from(us).map_err(|_|"Clock overflow")
-}
-fn shape(w:u32,h:u32,hotspot:[u32;2])->Result<Shape,&'static str>{
- if w==0||h==0||w>512||h>512||hotspot[0]>=w||hotspot[1]>=h{return Err("Invalid cursor dimensions/hotspot");}
- Ok(Shape{width:w,height:h,hotspot,rgba:Vec::with_capacity(w as usize*h as usize*4)})
-}
-pub fn color(w:u32,h:u32,hotspot:[u32;2],bgra:&[u8])->Result<Shape,&'static str>{
- let mut s=shape(w,h,hotspot)?;if bgra.len()!=w as usize*h as usize*4||!bgra.chunks_exact(4).any(|p|p[3]!=0){return Err("Missing or ambiguous alpha");}
- for p in bgra.chunks_exact(4){let a=u32::from(p[3]);if a==0{s.rgba.extend_from_slice(&[0;4]);continue;}
-  if p[..3].iter().any(|v|u32::from(*v)>a){return Err("Not premultiplied alpha");}
-  for v in [p[2],p[1],p[0]]{s.rgba.push(((u32::from(v)*255+a/2)/a) as u8);}s.rgba.push(p[3]);
- }Ok(s)
-}
-pub fn monochrome(w:u32,h:u32,hotspot:[u32;2],and:&[bool],xor:&[bool])->Result<Shape,&'static str>{
- let mut s=shape(w,h,hotspot)?;if and.len()!=w as usize*h as usize||xor.len()!=and.len(){return Err("Truncated masks");}
- for (&a,&x) in and.iter().zip(xor){if a&&x{return Err("Destination-dependent XOR is unsupported");}s.rgba.extend_from_slice(if a{&[0,0,0,0]}else if x{&[255;4]}else{&[0,0,0,255]});}Ok(s)
 }
 /// No polling sequence alone establishes a historical stationary boundary.
 #[derive(Default)] pub struct Prefix {ended:bool}

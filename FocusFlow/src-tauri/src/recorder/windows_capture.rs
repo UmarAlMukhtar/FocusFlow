@@ -4,6 +4,7 @@ use focusflow_core::{capture::{*, windows::*}, ffmpeg::SavedCfrGrid, legacy::Leg
 use serde::{Deserialize, Serialize};
 use std::{io::{self, Read}, path::Path};
 mod lifecycle;
+pub(in crate::recorder) mod cursor;
 #[cfg(windows)]
 mod process;
 #[cfg(windows)]
@@ -49,11 +50,18 @@ impl Summary {
 }
 #[derive(Debug,Serialize,Deserialize)]
 #[serde(tag="event",deny_unknown_fields)]
-enum Message {Prepared {width:u32,height:u32}, Encoder {pid:u32}, Ready {}, Ack {cutoff:i64}, Terminal {summary:Summary}, Error {message:String}}
+enum Message {Prepared {width:u32,height:u32,cursor:cursor::Admission}, Encoder {pid:u32}, Ready {}, Ack {cutoff:i64}, Terminal {summary:Summary,cursor:cursor::Terminal}, Error {message:String}}
 fn read_message(reader:&mut impl Read)->Result<Message,String>{
  let mut bytes=Vec::new();loop {let mut b=[0];match reader.read(&mut b){Ok(0)=>return Err("Worker pipe ended without complete protocol".into()),Ok(_)=>{if b[0]==b'\n'{break;}if bytes.len()>=4096{return Err("Worker message exceeded 4096 bytes".into());}bytes.push(b[0]);},Err(e) if e.kind()==io::ErrorKind::Interrupted=>{},Err(e)=>return Err(e.to_string())}}
  let shape:serde_json::Value=serde_json::from_slice(&bytes).map_err(|e|format!("Invalid worker message: {e}"))?;
  if !shape.is_object()||shape.get("summary").is_some_and(|value|!value.is_object()){return Err("Worker protocol requires named objects".into());}
+ if let Some(cursor)=shape.get("cursor"){
+  if !cursor.is_object(){return Err("Cursor protocol requires named objects".into());}
+  if let Some(completion)=cursor.get("completion"){
+   if !completion.is_object()||["pose","input","poseStats","inputStats","terminal"].iter().any(|key|!completion.get(key).is_some_and(|v|v.is_object())){return Err("Cursor completion requires named objects".into());}
+   for key in ["poseBarrier","inputBarrier"]{if !completion["terminal"].get(key).is_some_and(|v|v.is_null()||v.is_object()){return Err("Cursor terminal barrier requires named object or explicit null".into());}}
+  }
+ }
  // Decode original bytes again so duplicate named fields are not hidden by the shape check.
  serde_json::from_slice(&bytes).map_err(|e|format!("Invalid worker message: {e}"))
 }
@@ -64,20 +72,28 @@ fn incomplete(id:&str,window:u64,width:u32,height:u32,bounds:Bounds,defaults:Leg
  manifest.validate(id).map_err(recovery)?;Ok(manifest)
 }
 #[derive(Debug)]
-pub(super) struct Completion {manifest:WindowsCaptureManifestV2,clock:WindowsOwnedClockV1,pub(super) notice:Option<String>}
+pub(super) struct Completion {manifest:WindowsCaptureManifestV2,clock:WindowsOwnedClockV1,pub(super) notice:Option<String>,cursor:Option<(focusflow_core::capture::windows_observations::WindowsCaptureManifestV3,cursor::CursorObservationCompletion)>}
 impl Completion {
  fn new(manifest:WindowsCaptureManifestV2,summary:Summary,worker_exit:i32)->RecorderResult<Self>{
   let clock=summary.clock(worker_exit).map_err(recovery)?;
   let notice=summary.source_availability.map(|reason|reason.notice().into()).or_else(||summary.geometry_changed.then(||"The selected window changed size. Complete frames were saved; start a new recording at the new size.".into()));
-  Ok(Self{manifest,clock,notice})
+  Ok(Self{manifest,clock,notice,cursor:None})
  }
+ fn from_worker(manifest:WindowsCaptureManifestV2,defaults:LegacyDefaults,admission:&cursor::Admission,terminal:cursor::Terminal,summary:Summary,worker_exit:i32)->RecorderResult<Self>{
+  terminal.validate(admission,summary.cutoff).map_err(recovery)?;
+  let mut result=Self::new(manifest,summary,worker_exit)?;
+  if let cursor::Terminal::Separate{completion}=terminal{result.cursor=Some((cursor::incomplete(&result.manifest,defaults),completion));}
+  result.notice=result.notice.or_else(||admission.notice());Ok(result)
+ }
+ #[cfg(test)] pub(in crate::recorder) fn observation_receipt(&self)->RecorderResult<Option<serde_json::Value>>{self.cursor.as_ref().map(|(_,completion)|serde_json::to_value(completion).map_err(recovery)).transpose()}
  pub(super) fn count(&self)->u64{self.clock.completed_frames}
- pub(super) fn publish(mut self,dir:&Path,grid:&SavedCfrGrid,has_mic:bool)->RecorderResult<()>{
+ pub(super) fn publish(mut self,dir:&Path,grid:&SavedCfrGrid,has_mic:bool)->RecorderResult<Option<String>>{
+  if let Some((manifest,completion))=self.cursor.take(){return cursor::publish(dir,manifest,self.clock,grid,completion,has_mic,self.notice).map_err(recovery);}
   let saved=grid.video;let duration=saved.video.duration_us;
   let project=ProjectDocument{audio_tracks:None,schema_version:3,project_id:self.manifest.capture_id.clone(),revision:0,video:VideoAsset{path:"screen.mp4".into(),width:saved.video.width,height:saved.video.height,duration_us:duration,cursor:CursorMode::Embedded},cursor:None,cursor_settings:Default::default(),microphone:has_mic.then_some(AudioAsset{path:"mic.wav".into()}),timing:Timing{provenance:TimingProvenance::LegacyUnknown,audio_offset_us:None},camera:self.manifest.initial_defaults.camera.clone(),frame_style:self.manifest.initial_defaults.frame_style.clone(),clips:vec![Clip{id:"clip-0".into(),in_us:0,out_us:duration}],zooms:vec![],clicks:vec![],warnings:vec![ProjectWarning::EmbeddedCursor,ProjectWarning::LegacyTimingUnknown]};
   self.manifest.diagnostic=self.notice.map(|message|CaptureDiagnosticV1{stage:DiagnosticStage::Clock,message});
   self.manifest.state=WindowsCaptureStateV2::Finalized{video_timing:WindowsVideoTimingV2{endpoint:WindowsSavedEndpointV2{provenance:WindowsEndpointProvenance::SavedPacketFullGrid,end_pts:saved.endpoint.ticks,time_base:TimeBase{numerator:saved.endpoint.numerator,denominator:saved.endpoint.denominator},interval:Interval::HalfOpen},clock:self.clock},cursor_timing:NullOnly,initial_project:project};
-  publish_windows_finalized_assets(dir,&self.manifest,grid).map_err(recovery)?;Ok(())
+  publish_windows_finalized_assets(dir,&self.manifest,grid).map_err(recovery)?;Ok(None)
  }
 }
 #[cfg(test)]

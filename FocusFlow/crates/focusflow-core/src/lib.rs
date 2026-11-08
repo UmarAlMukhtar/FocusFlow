@@ -19,3 +19,6 @@ pub mod preview;
 pub mod cursor;
 
 pub mod capture;
+
+pub mod interaction_timeline;
+pub mod cursor_observation;

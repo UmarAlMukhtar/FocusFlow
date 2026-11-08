@@ -104,7 +104,7 @@ fn canonical_decimal(text:&str, min:u64, max:u64, field:&str)->CoreResult<u64> {
     require((min..=max).contains(&value),field,"Decimal is outside the permitted range")?;Ok(value)
 }
 impl WindowsOwnedClockV1 {
-    fn validate(&self,endpoint:&WindowsSavedEndpointV2)->CoreResult<()> {
+    pub(crate) fn validate(&self,endpoint:&WindowsSavedEndpointV2)->CoreResult<()> {
         let frequency=canonical_decimal(&self.qpc_frequency,1,i64::MAX as u64,"videoTiming.clock.qpcFrequency")?;
         let admission=canonical_decimal(&self.admission_qpc,0,i64::MAX as u64,"videoTiming.clock.admissionQpc")?;
         let epoch=canonical_decimal(&self.epoch_100ns,0,i64::MAX as u64,"videoTiming.clock.epoch100ns")?;
@@ -122,22 +122,65 @@ impl WindowsOwnedClockV1 {
         require(equal_time(endpoint.packet_time(),ffmpeg::PacketTime {ticks:n,numerator:1,denominator:30})?,"videoTiming.endpoint","Saved endpoint must equal completedFrames / 30")
     }
 }
+pub(super) fn validate_source(
+    source: &WindowsSourceV2,
+    defaults: &WindowsInitialDefaults,
+) -> CoreResult<()> {
+    canonical_decimal(&source.window_id, 1, u64::MAX, "source.windowId")?;
+    for (raw, encoded) in [
+        (source.raw_size.width, source.encoded_size.width),
+        (source.raw_size.height, source.encoded_size.height),
+    ] {
+        require(
+            (2..=16384).contains(&raw)
+                && (2..=16384).contains(&encoded)
+                && encoded == raw + raw % 2,
+            "source.encodedSize",
+            "Raw dimensions must be 2..16384 with only right/bottom even padding",
+        )?;
+    }
+    require(
+        source.content_rect
+            == Bounds {
+                x: 0,
+                y: 0,
+                width: source.raw_size.width,
+                height: source.raw_size.height,
+            },
+        "source.contentRect",
+        "Content must cover exactly the raw pixels at origin zero",
+    )?;
+    if let Some(b) = &source.observed_window_bounds {
+        require(
+            (1..=i32::MAX as u32).contains(&b.width) && (1..=i32::MAX as u32).contains(&b.height),
+            "source.observedWindowBounds",
+            "Observed dimensions must be positive signed-32-bit values",
+        )?;
+        require(
+            b.x.checked_add(b.width as i32).is_some() && b.y.checked_add(b.height as i32).is_some(),
+            "source.observedWindowBounds",
+            "Observed bounds overflow signed coordinates",
+        )?;
+    }
+    crate::frame::geometry(
+        &defaults.frame_style,
+        source.encoded_size.width,
+        source.encoded_size.height,
+    )?;
+    require(
+        defaults.camera.pan_transition_us <= project::MAX_DURATION_US
+            && defaults.camera.settle_us <= project::MAX_DURATION_US,
+        "initialDefaults.camera",
+        "Camera times must not exceed 24 hours",
+    )?;
+    Ok(())
+}
 impl WindowsCaptureManifestV2 {
     pub fn validate(&self,id:&str)->CoreResult<()> {
         if self.schema_version!=2 {return Err(CoreError {code:ErrorCode::UnsupportedSchema,message:"Only Windows capture schema 2 is supported".into(),field:Some("schemaVersion".into())});}
         require(project::valid_id(id)&&self.capture_id==id,"captureId","Capture ID must equal its real containing directory ID")?;
+        validate_source(&self.source,&self.initial_defaults)?;
         let source=&self.source;
-        canonical_decimal(&source.window_id,1,u64::MAX,"source.windowId")?;
-        for (raw,encoded) in [(source.raw_size.width,source.encoded_size.width),(source.raw_size.height,source.encoded_size.height)] {
-            require((2..=16384).contains(&raw)&&(2..=16384).contains(&encoded)&&encoded==raw+raw%2,"source.encodedSize","Raw dimensions must be 2..16384 with only right/bottom even padding")?;
-        }
-        require(source.content_rect==Bounds {x:0,y:0,width:source.raw_size.width,height:source.raw_size.height},"source.contentRect","Content must cover exactly the raw pixels at origin zero")?;
-        if let Some(b)=&source.observed_window_bounds {
-            require((1..=i32::MAX as u32).contains(&b.width)&&(1..=i32::MAX as u32).contains(&b.height),"source.observedWindowBounds","Observed dimensions must be positive signed-32-bit values")?;
-            require(b.x.checked_add(b.width as i32).is_some()&&b.y.checked_add(b.height as i32).is_some(),"source.observedWindowBounds","Observed bounds overflow signed coordinates")?;
-        }
-        crate::frame::geometry(&self.initial_defaults.frame_style,source.encoded_size.width,source.encoded_size.height)?;
-        require(self.initial_defaults.camera.pan_transition_us<=project::MAX_DURATION_US&&self.initial_defaults.camera.settle_us<=project::MAX_DURATION_US,"initialDefaults.camera","Camera times must not exceed 24 hours")?;
         if let Some(d)=&self.diagnostic {require(!d.message.is_empty()&&d.message.len()<=1024,"diagnostic.message","Capture diagnostic must contain 1..1024 UTF-8 bytes")?;}
         if let WindowsCaptureStateV2::Finalized {video_timing,initial_project:doc,..}=&self.state {
             let duration=video_timing.endpoint.duration_us()?;video_timing.clock.validate(&video_timing.endpoint)?;
@@ -220,12 +263,14 @@ fn publish_windows_with(dir:&Path,manifest:&WindowsCaptureManifestV2,grid:Option
     let parent=dir.parent().ok_or_else(||path_error("Capture directory needs a parent"))?;
     let store=store::ProjectStore::new(parent)?;let _lock=store.lock(id,"document")?;
     let marker=read_marker(dir)?;
+    require(!super::windows_observations::read_marker(dir)?,"capture.json","Windows V2 publication cannot replace V3 intent; retain files for recovery")?;
     let previous=if asset(dir,"capture.json")?.is_some() {read_authority(dir,id)?}else{None};
     match previous {
         Some(CaptureAuthority::WindowsV2(previous))=>{
             require(matches!(previous.state,WindowsCaptureStateV2::Incomplete {..}),"capture.json","Finalized Windows authority is immutable; reload before retrying")?;
             require(previous.capture_id==manifest.capture_id&&previous.source==manifest.source&&previous.initial_defaults==manifest.initial_defaults,"capture.json","Capture identity, source and Start defaults are immutable; reload before retrying")?;
         },
+        Some(CaptureAuthority::WindowsV3(_))=>return Err(recovery("Windows V2 publication cannot replace observation authority")),
         Some(CaptureAuthority::LinuxV1(_))=>return Err(recovery("Windows publication cannot replace Linux authority")),
         None=>require(matches!(manifest.state,WindowsCaptureStateV2::Incomplete {..}),"capture.json","Finalization requires prior Windows incomplete authority")?,
     }

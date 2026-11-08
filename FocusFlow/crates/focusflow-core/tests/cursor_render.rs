@@ -218,3 +218,138 @@ fn two_track_mix_and_corrupt_sibling_preserve_video_in_all_consumers(){
   assert!(!dir.join("exports").join(done.job_id).join("audio-scratch").exists());for(name,bytes)in before{assert_eq!(fs::read(dir.join(name)).unwrap(),bytes,"{name}");}
  }}
 }
+
+#[path = "support/observations.rs"]
+mod observations;
+#[test]
+fn observation_native_missing_raster_requires_explicit_arrow_or_overlay_off() {
+    use std::sync::atomic::AtomicBool;
+    let t = common::TestDir::new();
+    let mut i = observations::index();
+    i.shapes = vec![focusflow_core::cursor::CursorShape {
+        id: "resource".into(),
+        path: "cursor/shapes/resource.pam".into(),
+        width: 8,
+        height: 8,
+        hotspot_x: 4,
+        hotspot_y: 4,
+    }];
+    let mut row = observations::pose(0);
+    if let focusflow_core::cursor_observation::WindowsCursorRowV2::Observed { shape_id, .. } =
+        &mut row
+    {
+        *shape_id = Some("resource".into());
+    }
+    let mut doc = observations::write_project(t.path(), i, vec![row]);
+    doc.cursor_settings.enabled = true;
+    doc.cursor_settings.style = CursorStyle::Native;
+    assert!(
+        focusflow_core::cursor::prepare_cursor(t.path(), &doc, &AtomicBool::new(false)).is_err()
+    );
+    doc.cursor_settings.style = CursorStyle::Arrow;
+    let c = focusflow_core::cursor::prepare_cursor(t.path(), &doc, &AtomicBool::new(false))
+        .expect("Arrow recovery must prepare observations")
+        .unwrap();
+    assert!(c.sample_at(0, 1).is_some());
+    doc.cursor_settings.style = CursorStyle::Native;
+    fs::write(
+        t.path().join("cursor/shapes/resource.pam"),
+        b"unsupported monochrome raster",
+    )
+    .unwrap();
+    assert!(
+        focusflow_core::cursor::prepare_cursor(t.path(), &doc, &AtomicBool::new(false)).is_err()
+    );
+    doc.cursor_settings.enabled = false;
+    doc.schema_version = 4;
+    doc.zooms = vec![ZoomElement {
+        id: "follow".into(),
+        clip_id: "clip-0".into(),
+        mode: ZoomMode::Follow,
+        start_us: 0,
+        end_us: 1_000_000,
+        x: 0.5,
+        y: 0.5,
+        scale: 2.0,
+        intro_us: 0,
+        hold_us: 0,
+        outro_us: 0,
+    }];
+    let c = focusflow_core::cursor::prepare_cursor(t.path(), &doc, &AtomicBool::new(false))
+        .unwrap()
+        .unwrap();
+    assert_eq!(c.position_at(0, 1), Some([9.0 / 322.0, 39.0 / 272.0]));
+}
+#[test]
+fn observation_preparation_rejects_unbound_or_changed_frozen_source() {
+    use std::sync::atomic::AtomicBool;
+    let t = common::TestDir::new();
+    let mut doc =
+        observations::write_project(t.path(), observations::index(), vec![observations::pose(0)]);
+    doc.cursor_settings.enabled = true;
+    doc.cursor_settings.style = CursorStyle::Arrow;
+    assert!(
+        focusflow_core::cursor::prepare_cursor(t.path(), &doc, &AtomicBool::new(false)).is_ok()
+    );
+    fs::remove_file(t.path().join("capture.json")).unwrap();
+    assert!(
+        focusflow_core::cursor::prepare_cursor(t.path(), &doc, &AtomicBool::new(false)).is_err()
+    );
+    let mut doc =
+        observations::write_project(t.path(), observations::index(), vec![observations::pose(0)]);
+    doc.cursor_settings.enabled = true;
+    doc.cursor_settings.style = CursorStyle::Arrow;
+    doc.video.width = 324;
+    assert!(
+        focusflow_core::cursor::prepare_cursor(t.path(), &doc, &AtomicBool::new(false)).is_err()
+    );
+}
+#[test]
+fn observation_native_preparation_owns_pixels_and_callback_cancel_is_preserved() {
+    use std::sync::atomic::AtomicBool;
+    let t = common::TestDir::new();
+    let mut i = observations::index();
+    i.shapes = vec![focusflow_core::cursor::CursorShape {
+        id: "resource".into(),
+        path: "cursor/shapes/resource.pam".into(),
+        width: 1,
+        height: 1,
+        hotspot_x: 0,
+        hotspot_y: 0,
+    }];
+    let mut row = observations::pose(0);
+    if let focusflow_core::cursor_observation::WindowsCursorRowV2::Observed { shape_id, .. } =
+        &mut row
+    {
+        *shape_id = Some("resource".into());
+    }
+    let mut d = observations::write_project(t.path(), i, vec![row]);
+    d.cursor_settings.enabled = true;
+    d.cursor_settings.style = CursorStyle::Native;
+    let path = t.path().join("cursor/shapes/resource.pam");
+    fs::write(
+        &path,
+        b"P7\nWIDTH 1\nHEIGHT 1\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n\x0b\x16\x21\xff",
+    )
+    .unwrap();
+    let c = focusflow_core::cursor::prepare_cursor(t.path(), &d, &AtomicBool::new(false))
+        .unwrap()
+        .unwrap();
+    fs::remove_file(path).unwrap();
+    assert_eq!(
+        &c.shapes[c.sample_at(0, 1).unwrap().shape_index].pixels[..],
+        &[11, 22, 33, 255]
+    );
+    let e =
+        focusflow_core::cursor::prepare_cursor_with_cancel(t.path(), &d, &|| Ok(true)).unwrap_err();
+    assert_eq!(e.code, focusflow_core::ErrorCode::Cancelled);
+    let e = focusflow_core::cursor::prepare_cursor_with_cancel(t.path(), &d, &|| {
+        Err(focusflow_core::CoreError {
+            code: focusflow_core::ErrorCode::Io,
+            message: "observation cancel read failed".into(),
+            field: None,
+        })
+    })
+    .unwrap_err();
+    assert_eq!(e.message, "observation cancel read failed");
+}

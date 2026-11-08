@@ -1,3 +1,8 @@
+use focusflow_core::interaction_timeline::{
+    ClickButton, ClickEvent, DragInteraction, DragPoint, InteractionEvents, TimelineSegment,
+    DRAG_FORCE_SAMPLE_DISTANCE_PX, DRAG_MIN_DISTANCE_PX, DRAG_POINT_INTERVAL,
+    DRAG_POINT_MIN_DISTANCE_PX,
+};
 mod video_clock;
 mod session_path;
 #[cfg(any(windows, test))]
@@ -58,19 +63,6 @@ const OUTPUT_RECORDINGS_DIR_NAME: &str = "Recordings";
 const SESSION_FILE_NAME: &str = "session.json";
 const TIMELINE_FILE_NAME: &str = "timeline.json";
 const CLICK_POLL_INTERVAL: Duration = Duration::from_millis(8);
-const DRAG_POINT_INTERVAL: Duration = Duration::from_millis(50);
-const DRAG_MIN_DISTANCE_PX: i32 = 4;
-const DRAG_POINT_MIN_DISTANCE_PX: i32 = 2;
-const DRAG_FORCE_SAMPLE_DISTANCE_PX: i32 = 12;
-const PRE_CLICK_ZOOM_SECONDS: f64 = 0.3;
-const IDLE_BEFORE_ZOOM_OUT_SECONDS: f64 = 1.0;
-const ZOOM_OUT_SECONDS: f64 = 0.35;
-const MIN_TIMELINE_SEGMENT_SECONDS: f64 = 0.001;
-/// Two adjacent camera sequences are merged into one continuous sequence when
-/// the gap between them is shorter than this value.  This avoids a zoom-out
-/// followed immediately by a zoom-in when the user clicks or drags in quick
-/// succession.
-const TIMELINE_MERGE_WINDOW_SECONDS: f64 = 0.3;
 const TARGET_FPS: u32 = 30;
 const STOP_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_CAPTURED_LOG_BYTES: usize = 96 * 1024;
@@ -327,6 +319,12 @@ impl<'a> StartReservation<'a> {
         self.directory = None;
         focusflow_core::capture::publish_windows_incomplete(dir,manifest).map_err(windows_capture::recovery)
     }
+    #[cfg(any(windows,test))]
+    fn publish_windows_observations_incomplete(&mut self,dir:&Path,manifest:&focusflow_core::capture::windows_observations::WindowsCaptureManifestV3)->RecorderResult<()> {
+        // A failed durable attempt may already have installed intent; never delete its session.
+        self.directory=None;
+        focusflow_core::capture::windows_observations::publish_windows_observations_incomplete(dir,manifest).map_err(windows_capture::recovery)
+    }
     #[cfg(target_os = "linux")]
     fn publish_incomplete(&mut self, dir:&Path, manifest:&focusflow_core::capture::CaptureManifestV1) -> RecorderResult<()> {
         // A failed sync can follow a successful rename; never delete after an attempt.
@@ -353,7 +351,7 @@ struct ActiveRecording {
     audio_recorder: Option<AudioRecorder>,
     /// Human-readable name of the mic device that was selected.
     mic_device_name: Option<String>,
-    click_tracker: ClickTracker,
+    click_tracker: Option<ClickTracker>,
     output_path: PathBuf,
     started_at: Instant,
     monitor: MonitorInfo,
@@ -429,44 +427,6 @@ struct ProcessExit {
     event_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct ClickEvent {
-    timestamp: f64,
-    x: i32,
-    y: i32,
-    button: ClickButton,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct DragInteraction {
-    start: f64,
-    end: f64,
-    button: ClickButton,
-    points: Vec<DragPoint>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct DragPoint {
-    timestamp: f64,
-    x: i32,
-    y: i32,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum ClickButton {
-    Left,
-    Right,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct TimelineSegment {
-    start: f64,
-    end: f64,
-    x: i32,
-    y: i32,
-    scale: f64,
-}
 
 struct ClickTracker {
     stop_requested: Arc<AtomicBool>,
@@ -475,11 +435,6 @@ struct ClickTracker {
     join_handle: Option<JoinHandle<()>>,
 }
 
-#[derive(Clone)]
-struct InteractionEvents {
-    clicks: Vec<ClickEvent>,
-    drags: Vec<DragInteraction>,
-}
 
 struct PendingDrag {
     button: ClickButton,
@@ -790,8 +745,14 @@ async fn start_prepared_recording(state:&RecorderState, reservation:&mut StartRe
     } else { None };
     #[cfg(target_os = "linux")]
     let notice = native_capture.is_none().then(||native_capture::EMBEDDED_NOTICE.to_owned());
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    let notice=windows_session.as_ref().and_then(|s|s.notice());
+    #[cfg(not(any(target_os="linux",windows)))]
     let notice = None;
+    #[cfg(windows)]
+    let windows_observed=windows_session.as_ref().is_some_and(|s|s.separate_cursor());
+    #[cfg(not(windows))]
+    let windows_observed=false;
 
     // ── Microphone recording ───────────────────────────────────────────────
     //
@@ -878,7 +839,7 @@ async fn start_prepared_recording(state:&RecorderState, reservation:&mut StartRe
     let pid = capture.pid();
 
     let click_filter = click_filter_for_source(&capture_plan);
-    let click_tracker = ClickTracker::start(started_at, click_filter);
+    let click_tracker = (!windows_observed).then(||ClickTracker::start(started_at, click_filter));
 
     let active = ActiveRecording {
         #[cfg(target_os = "linux")]
@@ -902,13 +863,13 @@ async fn start_prepared_recording(state:&RecorderState, reservation:&mut StartRe
         if let Some(audio) = active.audio_recorder.as_mut() {
             audio.request_stop();
         }
-        active.click_tracker.request_stop();
+        if let Some(tracker)=active.click_tracker.as_ref(){tracker.request_stop();}
         match active.capture {
             ActiveCapture::Ffmpeg { child, .. } => crate::capture_guard::close_and_reap(child),
             #[cfg(windows)]
             ActiveCapture::WindowsCapture { capture } => {let _ = tauri::async_runtime::spawn_blocking(move || drop(capture)).await;}
         }
-        let _ = active.click_tracker.finish();
+        if let Some(tracker)=active.click_tracker{let _ = tracker.finish();}
         #[cfg(target_os = "linux")]
         drop(active.native_capture);
         if let Some(audio) = active.audio_recorder {let _ = audio.stop();}
@@ -1071,14 +1032,15 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
     if let Some(audio) = audio_recorder.as_mut() {
         audio.request_stop();
     }
-    click_tracker.request_stop();
+    if let Some(tracker)=click_tracker.as_ref(){tracker.request_stop();}
 
     let backend = capture.backend();
     let capture_stop = stop_capture_backend(capture, &log).await;
     video_clock.request_stop();
     #[cfg(target_os = "linux")]
     if let Some(session) = native_capture.as_mut() {session.request_stop();session.join();}
-    let interactions = click_tracker.finish();
+    let windows_observed=click_tracker.is_none();
+    let interactions = click_tracker.map(|tracker|tracker.finish()).unwrap_or_else(||Ok(InteractionEvents{clicks:vec![],drags:vec![]}));
 
     // ── Stop microphone recording ─────────────────────────────────────────
     //
@@ -1109,7 +1071,8 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
         Some(tauri::async_runtime::spawn_blocking(move || focusflow_core::ffmpeg::probe_cfr_grid(&executable,&path,count,&AtomicBool::new(false),Instant::now()+Duration::from_secs(600)))
             .await.map_err(windows_capture::recovery)?.map_err(windows_capture::recovery)?)
     } else {None};
-    let notice = match mic_result {
+    #[allow(unused_mut)]
+    let mut notice = match mic_result {
         Err(error) => Some(format!("{}Microphone audio was not saved: {error}. Any partial microphone recording was retained for recovery.", notice.map(|message| format!("{message} ")).unwrap_or_default())),
         Ok(_) => notice,
     };
@@ -1178,6 +1141,7 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
 
     if !windows_completion {persist_clock_interactions(&output_path, evidence.as_mut(), separate, &mut interactions);}
 
+    if !windows_observed {
     if let Err(error) = write_clicks_json(&output_path, &interactions.clicks) {
         eprintln!("[FocusFlow recorder] Video saved; optional interaction write failed: {error}");
     }
@@ -1194,6 +1158,8 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
     } else {write_timeline_json(&output_path)};
     if let Err(error) = timeline_write {
         eprintln!("[FocusFlow recorder] Video saved; optional interaction write failed: {error}");
+    }
+
     }
 
     if let Err(error) = write_session_json(
@@ -1223,7 +1189,9 @@ async fn stop_active_recording(state: &RecorderState) -> RecorderResult<Recordin
     }
     #[cfg(windows)]
     if let Ok(CaptureCompletion::Windows(completion)) = capture_stop {
-        completion.publish(session_output_dir(&output_path)?,grid.as_ref().ok_or_else(||windows_capture::recovery("Saved grid missing"))?,has_mic_audio)?;
+        if let Some(cursor_notice)=completion.publish(session_output_dir(&output_path)?,grid.as_ref().ok_or_else(||windows_capture::recovery("Saved grid missing"))?,has_mic_audio)?{
+            notice=Some(match notice{Some(existing) if !existing.contains(&cursor_notice)=>format!("{existing} {cursor_notice}"),Some(existing)=>existing,None=>cursor_notice});
+        }
     }
     let completed = CompletedRecording {
         notice: notice.clone(),
@@ -1965,274 +1933,12 @@ fn build_timeline_segments(
 ) -> Vec<TimelineSegment> {
     println!("[FocusFlow timeline] raw click count: {}", clicks.len());
     println!("[FocusFlow timeline] raw drag count: {}", drags.len());
-
-    let mut timeline = build_click_timeline_segments(clicks);
-    timeline.extend(build_drag_timeline_segments(drags));
-
-    println!(
-        "[FocusFlow timeline] segment count before cleanup: {}",
-        timeline.len()
-    );
-
-    let timeline = cleanup_timeline_segments(timeline);
-
+    let timeline = focusflow_core::interaction_timeline::build_timeline_segments(clicks, drags);
     println!(
         "[FocusFlow timeline] segment count after cleanup: {}",
         timeline.len()
     );
-
     timeline
-}
-
-/// Converts a raw, potentially overlapping list of [`TimelineSegment`]s
-/// (produced by independently merging click and drag segments) into a clean,
-/// non-overlapping, sorted list suitable for the export pipeline.
-///
-/// Steps (all in a single pass after sorting):
-///
-/// 1. **Sort** by `start` ascending.
-/// 2. **Deduplicate**: when two segments share the same `start` time, keep
-///    the one with the later `end` (wider coverage).
-/// 3. **Merge nearby sequences**: if the gap between the end of the current
-///    accumulator segment and the start of the next segment is within
-///    [`TIMELINE_MERGE_WINDOW_SECONDS`], extend the accumulator instead of
-///    starting a new zoom-out/zoom-in cycle.  The new segment is appended to
-///    the accumulator's chain so the camera pans smoothly.
-/// 4. **Clip overlaps**: if a following segment still starts before the
-///    previous segment ends, trim the previous segment's `end` to the
-///    following segment's `start`.
-/// 5. **Drop invalid segments**: remove any segment where `end <= start`.
-fn cleanup_timeline_segments(mut raw: Vec<TimelineSegment>) -> Vec<TimelineSegment> {
-    if raw.is_empty() {
-        return raw;
-    }
-
-    // Step 1 — sort by start time, break ties by preferring later end (wider).
-    raw.sort_by(|a, b| {
-        a.start
-            .partial_cmp(&b.start)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                b.end
-                    .partial_cmp(&a.end)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-    });
-
-    // Step 2 — deduplicate same-start segments (keep the one with the later end).
-    raw.dedup_by(|later, earlier| {
-        if (later.start - earlier.start).abs() <= MIN_TIMELINE_SEGMENT_SECONDS {
-            // `dedup_by` removes `later` when returning true.  We want to keep
-            // the one with the later `end`, so copy its fields into `earlier`
-            // (which survives) if `later` is wider.
-            if later.end > earlier.end {
-                earlier.end = later.end;
-                earlier.x = later.x;
-                earlier.y = later.y;
-            }
-            true
-        } else {
-            false
-        }
-    });
-
-    // Steps 3 & 4 — single forward pass: merge nearby sequences, clip overlaps.
-    let mut out: Vec<TimelineSegment> = Vec::with_capacity(raw.len());
-
-    for seg in raw {
-        if let Some(prev) = out.last_mut() {
-            let gap = seg.start - prev.end;
-
-            if gap <= TIMELINE_MERGE_WINDOW_SECONDS {
-                // The two sequences are close enough to merge: extend `prev`
-                // to cover `seg` without zooming out in between.  We update
-                // the camera target to `seg`'s position and widen the window.
-                // (The export pipeline's `timeline_sequences` groups contiguous
-                // segments into one sequence, so no artificial boundary is
-                // needed here.)
-                if seg.end > prev.end {
-                    // Push a new segment starting where prev ends (or at
-                    // seg.start if that is later) so the export pipeline sees
-                    // a smooth pan rather than a jump.
-                    let pan_start = prev.end.max(seg.start);
-                    if pan_start < seg.end - MIN_TIMELINE_SEGMENT_SECONDS {
-                        out.push(TimelineSegment {
-                            start: pan_start,
-                            end: seg.end,
-                            x: seg.x,
-                            y: seg.y,
-                            scale: seg.scale,
-                        });
-                    } else {
-                        // The window is too narrow to add a segment; just
-                        // extend the previous one.
-                        prev.end = seg.end;
-                        prev.x = seg.x;
-                        prev.y = seg.y;
-                    }
-                }
-                // If seg is entirely contained within prev, discard it.
-                continue;
-            }
-
-            // Gap is wide enough for a separate sequence.  Before appending,
-            // clip any leftover overlap (shouldn't happen after dedup but
-            // defends against floating-point edge cases).
-            if seg.start < prev.end {
-                prev.end = seg.start;
-            }
-        }
-
-        // Only push segments that still have positive duration.
-        if seg.end > seg.start + MIN_TIMELINE_SEGMENT_SECONDS {
-            out.push(seg);
-        }
-    }
-
-    // Step 5 — final pass: drop any zero-width or inverted segments that
-    // slipped through (defensive).
-    out.retain(|seg| seg.end > seg.start + MIN_TIMELINE_SEGMENT_SECONDS);
-
-    out
-}
-
-fn build_click_timeline_segments(mut clicks: Vec<ClickEvent>) -> Vec<TimelineSegment> {
-    clicks.sort_by(|left, right| {
-        left.timestamp
-            .partial_cmp(&right.timestamp)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let mut timeline = Vec::new();
-    let mut sequence_complete_at = 0.0;
-
-    for click in clicks
-        .into_iter()
-        .filter(|click| click.button == ClickButton::Left)
-    {
-        let segment_end = click.timestamp + IDLE_BEFORE_ZOOM_OUT_SECONDS;
-
-        if timeline.is_empty() {
-            timeline.push(TimelineSegment {
-                start: (click.timestamp - PRE_CLICK_ZOOM_SECONDS).max(0.0),
-                end: segment_end,
-                x: click.x,
-                y: click.y,
-                scale: 2.0,
-            });
-            sequence_complete_at = segment_end + ZOOM_OUT_SECONDS;
-            continue;
-        }
-
-        if click.timestamp <= sequence_complete_at {
-            if let Some(last_segment) = timeline.last_mut() {
-                if click.timestamp > last_segment.start + MIN_TIMELINE_SEGMENT_SECONDS {
-                    last_segment.end = click.timestamp;
-                    timeline.push(TimelineSegment {
-                        start: click.timestamp,
-                        end: segment_end,
-                        x: click.x,
-                        y: click.y,
-                        scale: 2.0,
-                    });
-                } else {
-                    last_segment.end = segment_end;
-                    last_segment.x = click.x;
-                    last_segment.y = click.y;
-                }
-            }
-        } else {
-            let segment_start = (click.timestamp - PRE_CLICK_ZOOM_SECONDS)
-                .max(0.0)
-                .max(sequence_complete_at + MIN_TIMELINE_SEGMENT_SECONDS)
-                .min(click.timestamp);
-
-            timeline.push(TimelineSegment {
-                start: segment_start,
-                end: segment_end,
-                x: click.x,
-                y: click.y,
-                scale: 2.0,
-            });
-        }
-
-        sequence_complete_at = segment_end + ZOOM_OUT_SECONDS;
-    }
-
-    timeline
-}
-
-fn build_drag_timeline_segments(mut drags: Vec<DragInteraction>) -> Vec<TimelineSegment> {
-    drags.sort_by(|left, right| {
-        left.start
-            .partial_cmp(&right.start)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let mut timeline = Vec::new();
-
-    for drag in drags
-        .into_iter()
-        .filter(|drag| drag.button == ClickButton::Left)
-    {
-        let points = normalized_drag_points(drag.points);
-
-        if points.len() < 2 {
-            continue;
-        }
-
-        let drag_start = drag.start.min(points[0].timestamp);
-        let drag_end = drag.end.max(
-            points
-                .last()
-                .map(|point| point.timestamp)
-                .unwrap_or(drag.end),
-        );
-        let sequence_start = (drag_start - PRE_CLICK_ZOOM_SECONDS).max(0.0);
-        let sequence_end = drag_end + IDLE_BEFORE_ZOOM_OUT_SECONDS;
-        let mut previous_segment_start = sequence_start;
-
-        for index in 0..points.len() {
-            let point = &points[index];
-            let segment_start = if index == 0 {
-                sequence_start
-            } else {
-                point
-                    .timestamp
-                    .max(previous_segment_start + MIN_TIMELINE_SEGMENT_SECONDS)
-            };
-            let segment_end = points
-                .get(index + 1)
-                .map(|next_point| next_point.timestamp)
-                .unwrap_or(sequence_end)
-                .max(segment_start + MIN_TIMELINE_SEGMENT_SECONDS);
-
-            timeline.push(TimelineSegment {
-                start: segment_start,
-                end: segment_end,
-                x: point.x,
-                y: point.y,
-                scale: 2.0,
-            });
-            previous_segment_start = segment_start;
-        }
-    }
-
-    timeline
-}
-
-fn normalized_drag_points(mut points: Vec<DragPoint>) -> Vec<DragPoint> {
-    points.retain(|point| point.timestamp.is_finite() && point.timestamp >= 0.0);
-    points.sort_by(|left, right| {
-        left.timestamp
-            .partial_cmp(&right.timestamp)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    points.dedup_by(|right, left| {
-        right.timestamp <= left.timestamp + f64::EPSILON && right.x == left.x && right.y == left.y
-    });
-
-    points
 }
 
 fn clicks_output_path(output_path: &Path) -> RecorderResult<PathBuf> {
@@ -3378,6 +3084,43 @@ pub fn get_capture_capabilities() -> CaptureCapabilities {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    #[test]
+    fn timeline_wrapper_preserves_literal_legacy_targets() {
+        let timeline = build_timeline_segments(
+            vec![ClickEvent {
+                timestamp: 1.0,
+                x: 10,
+                y: 20,
+                button: ClickButton::Left,
+            }],
+            vec![],
+        );
+        assert_eq!(
+            serde_json::to_value(timeline).unwrap(),
+            serde_json::json!([{"start": 0.7, "end": 2.0, "x": 10, "y": 20, "scale": 2.0}])
+        );
+        let timeline = build_timeline_segments(
+            vec![],
+            vec![DragInteraction {
+                start: 1.0,
+                end: 1.2,
+                button: ClickButton::Right,
+                points: vec![
+                    DragPoint {
+                        timestamp: 1.0,
+                        x: 10,
+                        y: 20,
+                    },
+                    DragPoint {
+                        timestamp: 1.2,
+                        x: 30,
+                        y: 20,
+                    },
+                ],
+            }],
+        );
+        assert!(timeline.is_empty());
+    }
     #[test]
     fn shutdown_waits_for_startup_cleanup_and_rejects_late_starts() {
         use std::{future::Future, task::{Context, Poll, Waker}};

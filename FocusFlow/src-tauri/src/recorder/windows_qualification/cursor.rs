@@ -1,5 +1,6 @@
 //! Private, generated-native observation. No capture authority, public cursor stream or user input lane.
 use super::*;
+use crate::recorder::windows_capture::cursor::image_native::{Icon,Bitmaps,Raster,decode_with};
 use ::windows::{core::BOOL,Win32::{Foundation::POINT,Graphics::Dwm::{DwmGetWindowAttribute,DWMWA_EXTENDED_FRAME_BOUNDS},System::Threading::{GetCurrentProcess,GetGuiResources,GR_GDIOBJECTS,GR_USEROBJECTS}}};
 use crate::recorder::windows_capture::qualification::{cursor_math as math,proof::Proof};
 
@@ -10,14 +11,14 @@ pub(in crate::recorder) fn require_disposable()->Result<(),String>{
  if get("FOCUSFLOW_CURSOR_REVIEWED_REPOSITORY")?!=get("GITHUB_REPOSITORY")?||get("FOCUSFLOW_CURSOR_REVIEWED_REF")?!=get("GITHUB_REF")?{return Err("Private cursor repository/ref handshake rejected".into());}
  let id=get("GITHUB_RUN_ID")?;let attempt=get("GITHUB_RUN_ATTEMPT")?;if id.is_empty()||attempt.is_empty()||!id.bytes().all(|b|b.is_ascii_digit())||!attempt.bytes().all(|b|b.is_ascii_digit())||get("FOCUSFLOW_CURSOR_REVIEWED_RUN")?!=format!("{id}:{attempt}"){return Err("Private cursor run handshake rejected".into());}Ok(())
 }
-struct DpiScope{previous:DPI_AWARENESS_CONTEXT,restored:bool}
+pub(super) struct DpiScope{previous:DPI_AWARENESS_CONTEXT,restored:bool}
 impl DpiScope{
- fn enter()->TestResult<Self>{require_disposable()?;Self::enter_checked()}
+ pub(super) fn enter()->TestResult<Self>{require_disposable()?;Self::enter_checked()}
  fn enter_checked()->TestResult<Self>{
   // Only this observer thread changes context; the previous opaque value is restored on every exit.
   unsafe{let previous=SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);if previous.0.is_null(){return Err("PMv2 context switch failed".into());}let scope=Self{previous,restored:false};if !AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(),DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2).as_bool(){return Err("Observer is not PMv2".into());}Ok(scope)}
  }
- fn restore(&mut self)->TestResult<()>{unsafe{if SetThreadDpiAwarenessContext(self.previous).0.is_null()||!AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(),self.previous).as_bool(){return Err("DPI context restoration failed".into());}}self.restored=true;Ok(())}
+ pub(super) fn restore(&mut self)->TestResult<()>{unsafe{if SetThreadDpiAwarenessContext(self.previous).0.is_null()||!AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(),self.previous).as_bool(){return Err("DPI context restoration failed".into());}}self.restored=true;Ok(())}
 }
 impl Drop for DpiScope{fn drop(&mut self){if !self.restored{unsafe{SetThreadDpiAwarenessContext(self.previous);}}}}
 struct Position{original:POINT,restored:bool}
@@ -38,20 +39,7 @@ fn geometry(hwnd:HWND)->TestResult<Geometry>{
   if !ClientToScreen(hwnd,&mut p).as_bool(){return Err("Physical client origin query failed".into());}let thread=GetWindowThreadProcessId(hwnd,Some(&mut pid));if pid==0||thread==0{return Err("Source identity unavailable".into());}
   let dpi=GetDpiForWindow(hwnd);if dpi==0{return Err("Source DPI unavailable".into());}Ok(Geometry{client_origin:[p.x,p.y],client_size:[c.right-c.left,c.bottom-c.top],window:rect(w),dwm:rect(d),dpi,awareness:GetAwarenessFromDpiAwarenessContext(GetWindowDpiAwarenessContext(hwnd)).0,pid,thread})}
 }
-struct Icon(HICON);impl Drop for Icon{fn drop(&mut self){unsafe{let _=DestroyIcon(self.0);}}}
-struct Bitmaps(ICONINFO);impl Drop for Bitmaps{fn drop(&mut self){unsafe{if !self.0.hbmColor.is_invalid(){let _=DeleteObject(self.0.hbmColor.into());}if !self.0.hbmMask.is_invalid(){let _=DeleteObject(self.0.hbmMask.into());}}}}
-struct ScreenDc(HDC);impl Drop for ScreenDc{fn drop(&mut self){unsafe{ReleaseDC(None,self.0);}}}
-fn bitmap(bitmap:HBITMAP)->TestResult<(u32,u32,Vec<u8>)>{
- let mut object=BITMAP::default();
- // GetIconInfo bitmaps are owned, unselected, and remain alive throughout GetObject/GetDIBits.
- unsafe{if GetObjectW(bitmap.into(),std::mem::size_of::<BITMAP>() as i32,Some(&mut object as *mut _ as _))!=std::mem::size_of::<BITMAP>() as i32{return Err("GetObject bitmap read incomplete".into());}}
- let(w,h)=(u32::try_from(object.bmWidth)?,u32::try_from(object.bmHeight)?);if w==0||h==0||w>512||h>1024{return Err("Cursor bitmap outside allocation cap".into());}
- let mut info=BITMAPINFO{bmiHeader:BITMAPINFOHEADER{biSize:std::mem::size_of::<BITMAPINFOHEADER>() as u32,biWidth:w as i32,biHeight:-(h as i32),biPlanes:1,biBitCount:32,biCompression:BI_RGB.0,..Default::default()},..Default::default()};
- let dc=ScreenDc(unsafe{GetDC(None)});if dc.0.is_invalid(){return Err("GetDC failed".into());}let mut pixels=vec![0;w as usize*h as usize*4];
- // Top-down 32bpp rows have width*4 stride; a partial scan count is a failure, never a usable image.
- let lines=unsafe{GetDIBits(dc.0,bitmap,0,h,Some(pixels.as_mut_ptr().cast()),&mut info,DIB_RGB_COLORS)};if lines!=h as i32{return Err("GetDIBits scan count incomplete".into());}Ok((w,h,pixels))
-}
-fn copied_shape(cursor:HCURSOR,dir:&Path,index:usize,fail_stage:u8)->TestResult<math::Shape>{
+pub(super) fn copied_shape(cursor:HCURSOR,dir:&Path,index:usize,fail_stage:u8)->TestResult<math::Shape>{
  if index>=12{return Err("Cursor diagnostic index cap".into());}
  // CURSORINFO supplies a borrowed cursor. CopyIcon owns a separate reference; only that copy is destroyed.
  let icon=Icon(unsafe{CopyIcon(HICON(cursor.0))?});if fail_stage==1{return Err("Injected failure after owned copy".into());}
@@ -59,20 +47,11 @@ fn copied_shape(cursor:HCURSOR,dir:&Path,index:usize,fail_stage:u8)->TestResult<
 }
 fn owned_shape(icon:&Icon,original:HCURSOR,dir:&Path,index:usize,fail_stage:u8)->TestResult<math::Shape>{
  if index>=12{return Err("Cursor diagnostic index cap".into());}
- let mut info=Bitmaps(ICONINFO::default());let result=unsafe{GetIconInfo(icon.0,&mut info.0)};result?;if fail_stage==2{return Err("Injected failure after owned GetIconInfo bitmaps".into());}
- if info.0.fIcon.as_bool()||info.0.hbmMask.is_invalid(){return Err("Not a cursor or missing mask".into());}let hotspot=[info.0.xHotspot,info.0.yHotspot];let(mw,mh,mask)=bitmap(info.0.hbmMask)?;if fail_stage==3{return Err("Injected failure after complete mask DIB read".into());}
- let shape=if info.0.hbmColor.is_invalid(){if mh%2!=0{return Err("Odd monochrome mask height".into());}let half=mh as usize/2*mw as usize;let bits:Vec<bool>=mask.chunks_exact(4).map(|p|p[0]!=0||p[1]!=0||p[2]!=0).collect();math::monochrome(mw,mh/2,hotspot,&bits[..half],&bits[half..])?}else{
-  let(w,h,bgra)=bitmap(info.0.hbmColor)?;if(w,h)!=(mw,mh){return Err("Mask/color dimensions disagree".into());}
-  if !bgra.chunks_exact(4).any(|p|p[3]!=0){return Err("Missing or ambiguous raw alpha; legacy color/mask cursor unsupported".into());}
-  let raster=Raster::new(w,h)?;if fail_stage==4{return Err("Injected failure after color raster allocation".into());}
-  // Draw the owned copy into zeroed owned DIB storage; raw GetDIBits has no proven premultiplication contract.
-  unsafe{std::slice::from_raw_parts_mut(raster.bits,raster.len)}.fill(0);
-  unsafe{DrawIconEx(raster.dc,0,0,icon.0,w as i32,h as i32,0,None,DI_NORMAL)?;GdiFlush().ok()?;}
-  let pixels=unsafe{std::slice::from_raw_parts(raster.bits,raster.len)};
-  let native:Vec<u8>=pixels.chunks_exact(4).flat_map(|p|[p[2],p[1],p[0],p[3]]).collect();
-  pam(&dir.join(format!("native-color-{index}.pam")),w,h,&native)?;
-  if fail_stage==5{return Err("Injected failure after color draw/flush".into());}math::color(w,h,hotspot,pixels)?
- };
+ let decoded=decode_with(icon,|stage,raw| {
+  if let Some((w,h,pixels))=raw {pam(&dir.join(format!("native-color-{index}.pam")),w,h,pixels)?;}
+  if fail_stage==stage {return Err(format!("Injected failure after resource stage {stage}").into());}Ok(())
+ })?;
+ let shape=math::Shape{width:decoded.width,height:decoded.height,hotspot:decoded.hotspot,rgba:decoded.rgba};
  // Keep failed candidates for diagnosis; only the successful caller publishes shape metadata.
  pam(&dir.join(format!("cursor-{index}.pam")),shape.width,shape.height,&shape.rgba)?;
  native_raster(HICON(original.0),&shape,dir,index)?;Ok(shape)
@@ -150,16 +129,6 @@ impl FixtureCursor {pub(super) fn new()->TestResult<Self>{require_disposable()?;
 }}
 impl Drop for FixtureCursor{fn drop(&mut self){unsafe{if self.1{let _=DestroyIcon(HICON(self.0.0));}else{let _=DestroyCursor(self.0);}}}}
 
-struct Raster{dc:HDC,bitmap:HBITMAP,previous:HGDIOBJ,bits:*mut u8,len:usize}
-impl Drop for Raster{fn drop(&mut self){unsafe{SelectObject(self.dc,self.previous);let _=DeleteObject(self.bitmap.into());let _=DeleteDC(self.dc);}}}
-impl Raster{
- fn new(w:u32,h:u32)->TestResult<Self>{
-  if w==0||h==0||w>512||h>512{return Err("Raster allocation cap".into());}
-  // DC and DIB are owned; each failure releases every successfully acquired predecessor.
-  unsafe{let dc=CreateCompatibleDC(None);if dc.is_invalid(){return Err("Raster DC failed".into());}let info=BITMAPINFO{bmiHeader:BITMAPINFOHEADER{biSize:std::mem::size_of::<BITMAPINFOHEADER>() as u32,biWidth:w as i32,biHeight:-(h as i32),biPlanes:1,biBitCount:32,biCompression:BI_RGB.0,..Default::default()},..Default::default()};let mut bits=std::ptr::null_mut();let bitmap=match CreateDIBSection(Some(dc),&info,DIB_RGB_COLORS,&mut bits,None,0){Ok(b)=>b,Err(e)=>{let _=DeleteDC(dc);return Err(e.into());}};
-   let previous=SelectObject(dc,bitmap.into());if previous.is_invalid()||bits.is_null(){let _=DeleteObject(bitmap.into());let _=DeleteDC(dc);return Err("Raster selection failed".into());}Ok(Self{dc,bitmap,previous,bits:bits.cast(),len:w as usize*h as usize*4})}
- }
-}
 fn native_raster(original:HICON,shape:&math::Shape,dir:&Path,index:usize)->TestResult<()> {
  // original is borrowed synchronously; the source/fixture retains its lifetime and ownership.
  let raster=Raster::new(shape.width,shape.height)?;let mut first_mismatch=None;
@@ -223,3 +192,269 @@ impl FixtureCursor {fn xor()->TestResult<Self>{require_disposable()?;let and=[25
  // A single destination-inversion pixel is intentional; the reader must reject its whole native image.
  unsafe{Ok(Self(CreateCursor(None,3,5,16,16,and.as_ptr().cast(),xor.as_ptr().cast())?,false))}
 }}
+
+
+fn static_snapshot(
+    hwnd: u64,
+    pid: u32,
+    size: [u32; 2],
+    require_pointer: bool,
+) -> TestResult<serde_json::Value> {
+    use ::windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+    require_disposable()?;
+    let inventory = topology()?;
+    let monitors = inventory["actualMonitors"]
+        .as_array()
+        .ok_or("Static monitor inventory missing")?;
+    if monitors.len() != 1
+        || monitors[0]["bounds"][0] != 0
+        || monitors[0]["bounds"][1] != 0
+        || monitors[0]["dpi"] != serde_json::json!([96, 96])
+    {
+        return Err("Static placement requires one origin-zero 96DPI monitor".into());
+    }
+    let target = HWND(hwnd as usize as *mut _);
+    let g = geometry(target)?;
+    // All handles are borrowed from the exact generated source; calls only query its current state.
+    unsafe {
+        if hwnd == 0
+            || pid == 0
+            || pid == std::process::id()
+            || g.pid != pid
+            || g.thread == 0
+            || g.client_size != size.map(|v| v as i32)
+            || g.dpi != 96
+            || !IsWindow(Some(target)).as_bool()
+            || !IsWindowVisible(target).as_bool()
+            || IsIconic(target).as_bool()
+            || GetAncestor(target, GA_ROOT) != target
+            || !AreDpiAwarenessContextsEqual(
+                GetWindowDpiAwarenessContext(target),
+                DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            )
+            .as_bool()
+        {
+            return Err("Static source identity/geometry/visibility rejected".into());
+        }
+        let point = static_policy::center(
+            g.client_origin,
+            size,
+            GetAsyncKeyState(i32::from(VK_LBUTTON.0)) < 0,
+            GetAsyncKeyState(i32::from(VK_RBUTTON.0)) < 0,
+        )?;
+        let hit = WindowFromPhysicalPoint(POINT {
+            x: point[0],
+            y: point[1],
+        });
+        let mut hit_pid = 0;
+        let tid = GetWindowThreadProcessId(hit, Some(&mut hit_pid));
+        if GetAncestor(hit, GA_ROOT) != target || hit_pid != pid || tid != g.thread {
+            return Err("Static neutral point is not owned by source".into());
+        }
+        let mut actual = POINT::default();
+        GetPhysicalCursorPos(&mut actual)?;
+        let mut info = CURSORINFO {
+            cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+            ..Default::default()
+        };
+        GetCursorInfo(&mut info)?;
+        if require_pointer
+            && ([actual.x, actual.y] != point
+                || [info.ptScreenPos.x, info.ptScreenPos.y] != point
+                || info.flags != CURSOR_SHOWING
+                || info.hCursor.0.is_null())
+        {
+            return Err("Static pointer is not visible at owned center".into());
+        }
+        Ok(
+            serde_json::json!({"hwnd":hwnd,"sourcePid":pid,"clientSize":size,"geometry":g,"monitors":monitors,"position":point,"cursorHandle":info.hCursor.0 as usize as u64,"cursorFlags":info.flags.0,"buttonsUp":true,"footprint":[point[0]-3,point[1]-5,16,16],"margin":2}),
+        )
+    }
+}
+
+pub(super) fn place_owned_static(
+    hwnd: u64,
+    pid: u32,
+    client_size: [u32; 2],
+) -> TestResult<serde_json::Value> {
+    use ::windows::Win32::UI::Input::KeyboardAndMouse::*;
+    require_disposable()?;
+    let mut dpi = DpiScope::enter()?;
+    let before = static_snapshot(hwnd, pid, client_size, false)?;
+    let p = before["position"]
+        .as_array()
+        .ok_or("Static point missing")?;
+    let point = [
+        i32::try_from(p[0].as_i64().ok_or("Static X missing")?)?,
+        i32::try_from(p[1].as_i64().ok_or("Static Y missing")?)?,
+    ];
+    let mut operations = Vec::with_capacity(4);
+    let q0 = observation_qpc().ok_or("Static placement QPC unavailable")?;
+    // Only the validated generated neutral canvas is touched; no unrelated pointer restoration.
+    unsafe {
+        SetPhysicalCursorPos(point[0], point[1])?;
+    }
+    operations.push(serde_json::json!({"operation":"place-center","q0":q0,"q1":observation_qpc().ok_or("Static placement QPC unavailable")?}));
+    for dx in [1, -1] {
+        let check = static_snapshot(hwnd, pid, client_size, false)?;
+        if check["geometry"] != before["geometry"] || check["monitors"] != before["monitors"] {
+            return Err("Static geometry changed before wake".into());
+        }
+        let mut actual = POINT::default();
+        unsafe {
+            GetPhysicalCursorPos(&mut actual)?;
+        }
+        let hit = unsafe { WindowFromPhysicalPoint(actual) };
+        let mut hit_pid = 0;
+        let tid = unsafe { GetWindowThreadProcessId(hit, Some(&mut hit_pid)) };
+        if actual.y != point[1]
+            || ![point[0], point[0] + 1].contains(&actual.x)
+            || unsafe { GetAncestor(hit, GA_ROOT) } != HWND(hwnd as usize as *mut _)
+            || hit_pid != pid
+            || u64::from(tid)
+                != before["geometry"]["thread"]
+                    .as_u64()
+                    .ok_or("Static thread missing")?
+        {
+            return Err("Pointer left owned wake footprint".into());
+        }
+        let q0 = observation_qpc().ok_or("Static wake QPC unavailable")?;
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx,
+                    dy: 0,
+                    dwFlags: MOUSEEVENTF_MOVE,
+                    ..Default::default()
+                },
+            },
+        };
+        // Fixed relative wake only; each call is preceded by the current owned point/buttons guard.
+        if unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) } != 1 {
+            return Err("Static hosted wake input rejected".into());
+        }
+        operations.push(serde_json::json!({"operation":"wake-horizontal","dx":dx,"q0":q0,"q1":observation_qpc().ok_or("Static wake QPC unavailable")?}));
+    }
+    thread::sleep(Duration::from_millis(100));
+    let check = static_snapshot(hwnd, pid, client_size, false)?;
+    if check["geometry"] != before["geometry"] || check["monitors"] != before["monitors"] {
+        return Err("Static geometry changed before settle".into());
+    }
+    let q0 = observation_qpc().ok_or("Static settle QPC unavailable")?;
+    unsafe {
+        SetPhysicalCursorPos(point[0], point[1])?;
+    }
+    thread::sleep(Duration::from_millis(150));
+    let mut receipt = static_snapshot(hwnd, pid, client_size, true)?;
+    if receipt["geometry"] != before["geometry"] || receipt["monitors"] != before["monitors"] {
+        return Err("Static source moved during placement".into());
+    }
+    operations.push(serde_json::json!({"operation":"settle-center","q0":q0,"q1":observation_qpc().ok_or("Static settle QPC unavailable")?}));
+    receipt["operations"] = serde_json::json!(operations);
+    receipt["wakeMs"] = 100.into();
+    receipt["settleMs"] = 150.into();
+    if serde_json::to_vec(&receipt)?.len() > 4096 {
+        return Err("Static placement receipt exceeds cap".into());
+    }
+    dpi.restore()?;
+    Ok(receipt)
+}
+
+pub(super) fn verify_owned_static(
+    hwnd: u64,
+    pid: u32,
+    size: [u32; 2],
+    placement: &serde_json::Value,
+) -> TestResult<()> {
+    let current = static_snapshot(hwnd, pid, size, true)?;
+    for key in [
+        "hwnd",
+        "sourcePid",
+        "clientSize",
+        "geometry",
+        "monitors",
+        "position",
+        "cursorHandle",
+        "cursorFlags",
+        "buttonsUp",
+        "footprint",
+        "margin",
+    ] {
+        if current[key] != placement[key] {
+            return Err(format!("Static source/pointer changed: {key}").into());
+        }
+    }
+    Ok(())
+}
+
+mod static_policy {
+    pub(super) fn center(
+        origin: [i32; 2],
+        size: [u32; 2],
+        left: bool,
+        right: bool,
+    ) -> Result<[i32; 2], String> {
+        if left || right || size[0] == 0 || size[1] == 0 || size[0] > 1920 || size[1] > 1080 {
+            return Err("Static placement needs buttons up and bounded client".into());
+        }
+        let [w, h] = size.map(i64::from);
+        let [x, y] = [w / 2, h / 2];
+        // Cursor hotspot [3,5], 16x16 footprint, plus two pixels on every side.
+        let area = [x - 5, y - 7, x + 15, y + 13];
+        let reserved = [
+            [0, 0, 16, 16],
+            [w - 16, 0, w, 16],
+            [0, h - 16, 16, h],
+            [w - 16, h - 16, w, h],
+            [16, 40, 144, 96],
+        ];
+        if area[0] < 0
+            || area[1] < 0
+            || area[2] > w
+            || area[3] > h
+            || reserved
+                .iter()
+                .any(|r| area[0] < r[2] && r[0] < area[2] && area[1] < r[3] && r[1] < area[3])
+        {
+            return Err("Static center footprint is outside neutral canvas".into());
+        }
+        if i64::from(origin[0]) + area[0] < i64::from(i32::MIN)
+            || i64::from(origin[1]) + area[1] < i64::from(i32::MIN)
+            || i64::from(origin[0]) + area[2] > i64::from(i32::MAX)
+            || i64::from(origin[1]) + area[3] > i64::from(i32::MAX)
+        {
+            return Err("Static footprint physical overflow".into());
+        }
+        Ok([
+            i32::try_from(i64::from(origin[0]) + x).map_err(|_| "Static center overflow")?,
+            i32::try_from(i64::from(origin[1]) + y).map_err(|_| "Static center overflow")?,
+        ])
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn center_uses_physical_client_origin_and_neutral_footprint() {
+            assert_eq!(
+                center([100, 100], [320, 240], false, false).unwrap(),
+                [260, 220]
+            );
+            assert_eq!(
+                center([108, 131], [641, 359], false, false).unwrap(),
+                [428, 310]
+            );
+            assert!(center([0, 0], [160, 120], false, false).is_err());
+            assert!(center([i32::MAX, 0], [320, 240], false, false).is_err());
+            assert!(center([i32::MAX - 160, 0], [320, 240], false, false).is_err());
+            assert!(center([0, 0], [0, 240], false, false).is_err());
+        }
+        #[test]
+        fn placement_rejects_either_down_button() {
+            for (left, right) in [(true, false), (false, true), (true, true)] {
+                assert!(center([100, 100], [320, 240], left, right).is_err());
+            }
+        }
+    }
+}

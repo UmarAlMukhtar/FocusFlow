@@ -113,3 +113,254 @@ class Gates(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+
+
+class ProductionStatic(unittest.TestCase):
+    def fixture(self, tmp):
+        root=Path(tmp)/'production-popup-even-r0';root.mkdir()
+        source=root/'source';source.mkdir();session=root/'session-0';session.mkdir()
+        run.fixture_write(source/'source-request.json',dict(width=320,height=240,nonce=700,animated=False,privateProfile='borderless'))
+        run.fixture_write(source/'source-ready.json',dict(pid=22,hwnd=123))
+        run.fixture_write(source/'source-observed.json',dict(pid=22,hwnd=123))
+        run.fixture_write(source/'source-selection.json',dict(driverPid=11,sourcePid=22,hwnd=123))
+        run.fixture_write(root/'production-source-ready.json',dict(hwnd=123,sourcePid=22))
+        proc=SimpleNamespace(pid=22,poll=lambda:None)
+        sources=SimpleNamespace(children={source:dict(proc=proc,observed=True,readyAt=10.)})
+        return root,sources,{},{}
+
+    def poll(self, root, sources, opened, state, now=10.):
+        with patch('run.time.monotonic',return_value=now),patch('run.window_pid',return_value=22):
+            run.poll_production_static(root,11,sources,opened,state)
+
+    def arm(self,root,opened):
+        owner=dict(parent=11,worker=33,encoder=44,qpc=3)
+        run.fixture_write(root/'session-0/owned.json',owner)
+        opened[root/'session-0/owned.json']=(owner,[SimpleNamespace(signaled=lambda:False),SimpleNamespace(signaled=lambda:False)])
+        run.fixture_write(root/'production-armed.json',dict(hwnd=123,sourcePid=22,profile='pmv2_96_single_monitor_popup',candidateOnly=True))
+
+    def raw(self,path,complete=True):
+        path.write_bytes(b'P7\nWIDTH 320\nHEIGHT 240\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n'+b'\x60'*(320*240*4 if complete else 12))
+
+    def test_hold_requires_two_full_raws_and_500ms(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root,sources,opened,state=self.fixture(tmp);self.poll(root,sources,opened,state)
+            self.assertEqual(json.loads((root/'production-start-authorized.json').read_text()),dict(action='static-owned-canvas-v1',hwnd=123,sourcePid=22))
+            self.arm(root,opened);self.poll(root,sources,opened,state,10.1)
+            self.raw(root/'session-0/raw-0.pam');self.raw(root/'session-0/raw-1.pam',False)
+            self.poll(root,sources,opened,state,10.7)
+            self.assertFalse((root/'production-actions-complete.json').exists())
+            self.raw(root/'session-0/raw-1.pam');self.poll(root,sources,opened,state,10.59)
+            self.assertFalse((root/'production-actions-complete.json').exists())
+            self.poll(root,sources,opened,state,10.7)
+            self.assertEqual(json.loads((root/'production-actions-complete.json').read_text()),dict(action='static-hold-complete-v1',hwnd=123,sourcePid=22))
+
+    def test_hold_timeout_and_armed_requires_observed_owner(self):
+        for failure in ['timeout','unobserved-owner']:
+            with self.subTest(failure=failure),tempfile.TemporaryDirectory() as tmp:
+                root,sources,opened,state=self.fixture(tmp);self.poll(root,sources,opened,state);self.arm(root,opened)
+                if failure=='unobserved-owner':opened.clear()
+                else:self.poll(root,sources,opened,state,10.1)
+                with self.assertRaises(AssertionError):self.poll(root,sources,opened,state,13.2 if failure=='timeout' else 10.1)
+                self.assertFalse((root/'production-actions-complete.json').exists())
+
+    def test_wrong_identity_profile_tuple_and_replaced_controls_refuse(self):
+        for failure in ['pid','hwnd','profile','tuple','driver','extra','stale','replaced','symlink']:
+            with self.subTest(failure=failure),tempfile.TemporaryDirectory() as tmp:
+                root,sources,opened,state=self.fixture(tmp);p=root/'production-source-ready.json'
+                if failure=='pid':run.write(p,dict(hwnd=123,sourcePid=99))
+                if failure=='hwnd':run.write(p,dict(hwnd=999,sourcePid=22))
+                if failure in ['profile','tuple']:
+                    data=json.loads((root/'source/source-request.json').read_text());data['privateProfile' if failure=='profile' else 'nonce']='decorated' if failure=='profile' else 704
+                    run.write(root/'source/source-request.json',data)
+                if failure=='driver':run.write(root/'source/source-selection.json',dict(driverPid=99,sourcePid=22,hwnd=123))
+                if failure=='extra':run.write(p,dict(hwnd=123,sourcePid=22,extra=True))
+                if failure=='stale':run.write(root/'production-start-authorized.json',dict(action='static-owned-canvas-v1',hwnd=123,sourcePid=22))
+                if failure=='replaced':
+                    self.poll(root,sources,opened,state);run.write(root/'source/source-observed.json',dict(pid=22,hwnd=999))
+                if failure=='symlink':
+                    p.rename(root/'foreign.json');p.symlink_to(root/'foreign.json')
+                with self.assertRaises(AssertionError):self.poll(root,sources,opened,state)
+
+    def test_source_death_and_capture_deadline_fail_closed(self):
+        for failure in ['death','deadline','premature-close']:
+            with self.subTest(failure=failure),tempfile.TemporaryDirectory() as tmp:
+                root,sources,opened,state=self.fixture(tmp);self.poll(root,sources,opened,state)
+                if failure=='death':sources.children[root/'source']['proc'].poll=lambda:0
+                if failure=='premature-close':run.fixture_write(root/'source/source-command-1.json',dict(sequence=1,action='close'))
+                with self.assertRaises(AssertionError):self.poll(root,sources,opened,state,48.1 if failure=='deadline' else 10.1)
+
+    def test_postcapture_requires_exact_join_and_normal_source_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root,sources,opened,state=self.fixture(tmp);self.poll(root,sources,opened,state);self.arm(root,opened);self.poll(root,sources,opened,state,10.1)
+            for i in [0,1]:self.raw(root/f'session-0/raw-{i}.pam')
+            self.poll(root,sources,opened,state,10.7)
+            run.fixture_write(root/'production-phase.json',dict(phase='postcapture',hwnd=123,sourcePid=22,workerEncoderJoined=True,sourceClosed=True,qpc=123))
+            run.fixture_write(root/'source/source-command-1.json',dict(sequence=1,action='close'))
+            sources.children[root/'source']['proc'].poll=lambda:0
+            run.fixture_write(root/'source/source-exit.json',dict(pid=22,exitCode=0))
+            with self.assertRaises(AssertionError):self.poll(root,sources,opened,state,11.)
+            for handle in opened[root/'session-0/owned.json'][1]:handle.signaled=lambda:True
+            self.poll(root,sources,opened,state,11.)
+            self.assertEqual(state['phase'],'postcapture')
+
+
+class ProductionRouting(unittest.TestCase):
+    def test_static_scope_runs_only_eight_actual_cases_and_aborts_unknown_cleanup(self):
+        repo=Path(__file__).resolve().parents[2];metadata={'packages':[{'name':'windows-capture','source':None,'manifest_path':str(repo/'FocusFlow/vendor/windows-capture/Cargo.toml')}]}
+        for failure in [False,True]:
+            with self.subTest(failure=failure),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);args=SimpleNamespace(evidence=root/'e',ffmpeg=root/'f',ffprobe=root/'p',scope='cursor-production-static');calls=[]
+                def execute(argv,evidence,name,*rest,**kw):
+                    calls.append((name,list(argv),rest,kw));self.assertEqual(argv[2],'cursor-production');self.assertEqual(kw.get('production_static'),True)
+                    case=evidence/name;case.mkdir();log=evidence/(name+'.log');log.touch()
+                    if failure:raise RuntimeError('unknown child cleanup')
+                    return log
+                import production_cursor_check
+                with patch('run.sys.platform','win32'),patch.dict(run.os.environ,{'GITHUB_REF':'refs/heads/codex-windows-cursor-qualification'}),patch('run.require_cursor_disposable_context',return_value={'sha':'a'*40}),patch('run.os.chdir'),patch('run.source_manifest',return_value={}),patch('run.sha',side_effect=lambda p:run.FFMPEG_SHA if p==args.ffmpeg else run.FFPROBE_SHA if p==args.ffprobe else 'fixture'),patch('run.subprocess.check_output',side_effect=lambda argv,**kw:json.dumps(metadata) if argv[0]=='cargo' else 'a'*40),patch('run.execute',side_effect=execute),patch('run.build_exe',return_value=root/'harness'),patch('run.require_production_cleanup'),patch.object(production_cursor_check,'check',return_value=dict(productionStaticCasesPassed=True,productionCursorQualified=False)):
+                    if failure:
+                        with self.assertRaises(RuntimeError):run.run(args)
+                    else:run.run(args)
+                self.assertEqual(len(calls),1 if failure else 8)
+                self.assertEqual([row[0] for row in calls],['production-popup-even-r0'] if failure else ['production-popup-even-r0','production-decorated-even-r0','production-popup-odd-r0','production-decorated-odd-r0','production-popup-even-r1','production-decorated-even-r1','production-popup-odd-r1','production-decorated-odd-r1'])
+                result=json.loads((args.evidence/'result.json').read_text());self.assertFalse(result['passed']);self.assertFalse(result['productionCursorQualified']);self.assertEqual(result['productionStaticCasesPassed'],not failure)
+
+    def test_live_caps_and_only_named_production_pending_may_disappear(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);source=root/'production-popup-even-r0/source';source.mkdir(parents=True)
+            control=source.parent/'production-placement.json';control.write_bytes(b' '*4097)
+            with self.assertRaises(AssertionError):run.bound(root)
+            control.unlink();pending=source/'source-observed.pending';pending.touch();original=Path.stat
+            def stat(path,*a,**kw):
+                if path==pending:raise FileNotFoundError(path)
+                return original(path,*a,**kw)
+            with patch.object(Path,'stat',stat):run.bound(root)
+            pending.rename(source/'foreign.pending');pending=source/'foreign.pending'
+            with patch.object(Path,'stat',stat),self.assertRaises(FileNotFoundError):run.bound(root)
+
+
+class ProductionIntegrity(unittest.TestCase):
+    fixture=ProductionStatic.fixture
+    poll=ProductionStatic.poll
+    arm=ProductionStatic.arm
+    def test_same_bytes_replaced_control_and_malformed_authorization_refuse(self):
+        for failure in ['replace-same-bytes','float-pid','duplicate-key','extra-key']:
+            with self.subTest(failure=failure),tempfile.TemporaryDirectory() as tmp:
+                root,sources,opened,state=self.fixture(tmp);self.poll(root,sources,opened,state)
+                p=root/'production-start-authorized.json'
+                if failure=='replace-same-bytes':
+                    fresh=p.with_name('replacement');fresh.write_bytes(p.read_bytes());fresh.replace(p)
+                elif failure=='float-pid':p.write_text('{"action":"static-owned-canvas-v1","hwnd":123,"sourcePid":22.0}')
+                elif failure=='duplicate-key':p.write_text('{"action":"static-owned-canvas-v1","hwnd":123,"hwnd":123,"sourcePid":22}')
+                else:p.write_text('{"action":"static-owned-canvas-v1","hwnd":123,"sourcePid":22,"extra":true}')
+                with self.assertRaises(AssertionError):self.poll(root,sources,opened,state)
+
+    def test_cleanup_requires_normal_exact_owners_and_rejects_unknown(self):
+        import copy
+        with tempfile.TemporaryDirectory() as tmp:
+            root,sources,opened,state=self.fixture(tmp);self.arm(root,opened)
+            owner=dict(parent=11,worker=33,encoder=44,qpc=3);source=dict(pid=22,observed=True,signaled=True,exitCode=0)
+            saved=dict(**source,fallback=False,error=None);run.fixture_write(root/'source/source-cleanup.json',saved)
+            receipt=root.parent/'command.json';data=dict(error=None,exitCode=0,cleanupUnknown=False,cleanup=dict(parent=dict(pid=11,signaled=True,exitCode=0),owned=[dict(**owner,path='session-0/owned.json',signaled=[True,True])],sources=[source]),ownership=[dict(**owner,signaled=[True,True],fallback=False)],productionStaticPhase=dict(phase='postcapture'))
+            run.write(receipt,data);run.require_production_cleanup(root,receipt,complete=True)
+            for failure in ['unknown','fallback','source-exit','unobserved','pair-missing','wrong-parent']:
+                bad=copy.deepcopy(data)
+                if failure=='unknown':bad['cleanupUnknown']=True
+                if failure=='fallback':bad['ownership'][0]['fallback']=True
+                if failure=='source-exit':bad['cleanup']['sources'][0]['exitCode']=7
+                if failure=='unobserved':bad['cleanup']['sources'][0]['observed']=False
+                if failure=='pair-missing':bad['cleanup']['owned']=[]
+                if failure=='wrong-parent':bad['cleanup']['owned'][0]['parent']=999
+                run.write(receipt,bad)
+                with self.subTest(failure=failure),self.assertRaises(AssertionError):run.require_production_cleanup(root,receipt,complete=True)
+
+
+class ProductionSnapshotFix(unittest.TestCase):
+    fixture=ProductionStatic.fixture
+    poll=ProductionStatic.poll
+    def test_replacement_between_validation_and_remember_never_authorizes(self):
+        for same_bytes in [False,True]:
+            with self.subTest(same_bytes=same_bytes),tempfile.TemporaryDirectory() as tmp:
+                root,sources,opened,state=self.fixture(tmp);marker=root/'production-source-ready.json';read=run.production_read;replaced=[]
+                def replace_after_validated(path,*args,**kwargs):
+                    result=read(path,*args,**kwargs)
+                    if path==marker and not replaced:
+                        fresh=marker.with_name('replacement');fresh.write_bytes(marker.read_bytes() if same_bytes else b'{"hwnd":999,"sourcePid":22}');fresh.replace(marker);replaced.append(True)
+                    return result
+                with patch('run.production_read',side_effect=replace_after_validated):
+                    with self.assertRaises(AssertionError):self.poll(root,sources,opened,state)
+                self.assertTrue(replaced);self.assertFalse((root/'production-start-authorized.json').exists())
+
+    def test_owned_retry_only_accepts_incomplete_json_prefixes(self):
+        for text,incomplete in [('',True),('  ',True),('{"encoder":',True),('{"enc',True),('{"encoder":33,',True),('{"encoder":33,}',False),('{"encoder":33}trailing',False),('not-json',False)]:
+            with self.subTest(text=text):
+                try:json.loads(text)
+                except json.JSONDecodeError as error:self.assertEqual(run.incomplete_owned_json(error),incomplete)
+                else:self.fail('fixture must be invalid JSON')
+
+
+    def test_incomplete_owned_identity_and_two_second_deadline_stay_strict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);path=root/'owned.json';path.write_bytes(b'{"encoder":');state=dict(initialOwnedAt=10.)
+            with patch('run.time.monotonic',return_value=10.):
+                try:run.production_read(path,root)
+                except json.JSONDecodeError as error:run.initial_owned_snapshot(state,error.production_snapshot)
+            fresh=root/'replacement';fresh.write_bytes(path.read_bytes());fresh.replace(path)
+            with patch('run.time.monotonic',return_value=10.1):
+                try:run.production_read(path,root)
+                except json.JSONDecodeError as error:
+                    with self.assertRaises(AssertionError):run.initial_owned_snapshot(state,error.production_snapshot)
+            state=dict(initialOwnedAt=10.)
+            with patch('run.time.monotonic',return_value=12.):
+                try:run.production_read(path,root)
+                except json.JSONDecodeError as error:
+                    with self.assertRaisesRegex(AssertionError,'publication deadline'):run.initial_owned_snapshot(state,error.production_snapshot)
+
+    def test_replacement_inside_validation_never_adopts_new_file_snapshot(self):
+        for same_bytes in [False,True]:
+            with self.subTest(same_bytes=same_bytes),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);path=root/'control.json';path.write_text('{"hwnd":123,"sourcePid":22}');loads=run.json.loads;replaced=[]
+                def validating(*args,**kwargs):
+                    value=loads(*args,**kwargs);fresh=root/'replacement';fresh.write_bytes(path.read_bytes() if same_bytes else b'{"hwnd":999,"sourcePid":22}');fresh.replace(path);replaced.append(True);return value
+                with patch('run.json.loads',side_effect=validating):
+                    with self.assertRaises(AssertionError):run.production_control(path,root,{})
+                self.assertTrue(replaced)
+
+
+    def test_nonregular_and_oversized_controls_are_rejected_before_open(self):
+        for kind in ['directory','oversized']:
+            with self.subTest(kind=kind),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);path=root/'control.json'
+                if kind=='directory':path.mkdir()
+                else:path.write_bytes(b' '*4097)
+                with patch.object(Path,'open',side_effect=AssertionError('invalid control must not be opened')) as opened:
+                    with self.assertRaises(AssertionError):run.production_read(path,root)
+                    opened.assert_not_called()
+
+class ProductionFinalRouting(unittest.TestCase):
+    def test_existing_workflow_selects_only_static_cursor_branch_and_uploads_bound_assets(self):
+        import fnmatch,re
+        workflow=(Path(__file__).resolve().parents[2]/'.github/workflows/windows-owned-product-qualification.yml').read_text()
+        expression=re.search(r'FOCUSFLOW_QUAL_SCOPE: \$\{\{ (.*?) \}\}',workflow)[1]
+        routes=re.findall(r"github.ref == '([^']+)' && '([^']+)'",expression)
+        for branch,expected in [('codex-windows-cursor-qualification','cursor-production-static'),('codex-windows-startup-metadata','startup-metadata'),('codex-windows-owned-close-diagnostic','close-diagnostic'),('codex-windows-owned-product-qualification','full')]:
+            selected=next((scope for ref,scope in routes if ref=='refs/heads/'+branch),'full');self.assertEqual(selected,expected)
+        patterns=[line.strip() for line in workflow.splitlines() if line.strip().startswith('qualification-upload/')]
+        for name in ['session-0/capture.windows-v3','session-0/cursor/observations.ndjson','session-0/cursor/input-observations.ndjson','session-0/cursor/shapes/shape-0.pam']:
+            self.assertTrue(any(fnmatch.fnmatchcase('qualification-upload/cases/production-popup-even-r0/'+name,p) for p in patterns),name)
+
+    def test_only_owned_atomic_temps_live_and_final_evidence_forbids_leftovers(self):
+        import package_evidence
+        for name in ['clicks.json.tmp','drags.json.tmp','timeline.json.tmp','.capture.json-11-0.tmp','.project.json-11-18446744073709551615.tmp','.capture.json-99-0.tmp','.capture.json-11-00.tmp','.capture.json-11-18446744073709551616.tmp','other.json.tmp']:
+            with self.subTest(name=name),tempfile.TemporaryDirectory() as d:
+                root=Path(d);case=root/'production-popup-even-r0';session=case/'session-0';session.mkdir(parents=True);path=session/name;path.write_bytes(b'{}')
+                accepted=name in {'clicks.json.tmp','drags.json.tmp','timeline.json.tmp','.capture.json-11-0.tmp','.project.json-11-18446744073709551615.tmp'}
+                if accepted:
+                    run.bound(root,production_parent=(case.name,11))
+                    with self.assertRaises(AssertionError):run.bound(root)
+                    original=Path.stat
+                    def disappearing(p,*args,**kwargs):
+                        if p==path:raise FileNotFoundError(p)
+                        return original(p,*args,**kwargs)
+                    with patch.object(Path,'stat',disappearing):run.bound(root,production_parent=(case.name,11))
+                else:
+                    with self.assertRaises(AssertionError):run.bound(root,production_parent=(case.name,11))

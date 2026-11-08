@@ -13,7 +13,7 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 45
     env:
-      FOCUSFLOW_QUAL_SCOPE: ${{ github.ref == 'refs/heads/codex-windows-startup-metadata' && 'startup-metadata' || github.ref == 'refs/heads/codex-windows-cursor-qualification' && 'cursor-private' || github.ref == 'refs/heads/codex-windows-owned-close-diagnostic' && 'close-diagnostic' || 'full' }}
+      FOCUSFLOW_QUAL_SCOPE: ${{ github.ref == 'refs/heads/codex-windows-startup-metadata' && 'startup-metadata' || github.ref == 'refs/heads/codex-windows-cursor-qualification' && 'cursor-production-static' || github.ref == 'refs/heads/codex-windows-owned-close-diagnostic' && 'close-diagnostic' || 'full' }}
       # Positive hosted-run binding is checked by Python, source, observer and proof worker before mutation.
       FOCUSFLOW_CURSOR_REVIEWED_SHA: ${{ github.sha }}
       FOCUSFLOW_CURSOR_REVIEWED_REPOSITORY: UmarAlMukhtar/FocusFlow
@@ -104,12 +104,20 @@ jobs:
         run: |
           python -m unittest discover -s tools/windows-owned-product-qualification -p test_diagnostic.py -v 2>&1 | Tee-Object qualification-setup/analyzer.log
           if ($LASTEXITCODE -ne 0) { throw 'Diagnostic controls failed' }
-      - name: Private cursor routing, arithmetic and evidence controls
+      - name: Static production and retained private portable controls
         if: github.ref == 'refs/heads/codex-windows-cursor-qualification'
         shell: pwsh
         run: |
           python -m unittest discover -s tools/windows-owned-product-qualification -p test_cursor_qualification.py -v 2>&1 | Tee-Object qualification-setup/analyzer.log
           if ($LASTEXITCODE -ne 0) { throw 'Private cursor controls failed' }
+          python -m unittest discover -s tools/windows-owned-product-qualification -p test_production_cursor_check.py -v 2>&1 | Tee-Object -Append qualification-setup/analyzer.log
+          if ($LASTEXITCODE -ne 0) { throw 'Static production test_production_cursor_check.py controls failed' }
+          python -m unittest discover -s tools/windows-owned-product-qualification -p test_run.py -v 2>&1 | Tee-Object -Append qualification-setup/analyzer.log
+          if ($LASTEXITCODE -ne 0) { throw 'Static production test_run.py controls failed' }
+          python -m unittest discover -s tools/windows-owned-product-qualification -p test_package.py -v 2>&1 | Tee-Object -Append qualification-setup/analyzer.log
+          if ($LASTEXITCODE -ne 0) { throw 'Static production test_package.py controls failed' }
+          python -m unittest discover -s tools/windows-owned-product-qualification -p test_sources.py -v 2>&1 | Tee-Object -Append qualification-setup/analyzer.log
+          if ($LASTEXITCODE -ne 0) { throw 'Static production test_sources.py controls failed' }
       - name: Private startup metadata routing and evidence controls
         if: github.ref == 'refs/heads/codex-windows-startup-metadata'
         shell: pwsh
@@ -138,6 +146,10 @@ jobs:
             qualification-upload/*.log
             qualification-upload/cases/**/*.json
             qualification-upload/cases/**/capture.windows-v2
+            qualification-upload/cases/production-*/session-0/capture.windows-v3
+            qualification-upload/cases/production-*/session-0/cursor/observations.ndjson
+            qualification-upload/cases/production-*/session-0/cursor/input-observations.ndjson
+            qualification-upload/cases/production-*/session-0/cursor/shapes/shape-*.pam
             qualification-upload/cases/**/screen.mp4
             qualification-upload/cases/**/source.log
             qualification-upload/cases/**/proof-with-cursor.mp4

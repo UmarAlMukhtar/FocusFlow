@@ -30,6 +30,7 @@ const NO_SHAPE:u16=u16::MAX;
 pub struct PreparedShape { pub width:u32,pub height:u32,pub hotspot_x:u32,pub hotspot_y:u32,pub pixels:Arc<Vec<u8>> }
 #[derive(Debug,Clone)]
 pub struct PreparedCursor {
+    observations:Option<Arc<crate::cursor_observation::PreparedObservations>>,
     samples:Arc<Vec<Sample>>,endpoints:Arc<Vec<[f64;2]>>,visible_indices:Arc<Vec<u32>>,duration_us:u64,tau_us:u64,
     pub shapes:Arc<Vec<PreparedShape>>,pub scale:f64,pub style:CursorStyle,
     /// One aggregate warning; individual frames do not repeat it.
@@ -41,7 +42,7 @@ pub struct EvaluatedCursor {pub x:f64,pub y:f64,pub shape_index:usize}
 pub enum CursorAssetReport {
     Unchecked,
     Unavailable(CoreError),
-    Available {usable_positions:bool,native_available:bool,native_unavailable_reason:Option<String>},
+    Available {usable_positions:bool,native_available:bool,native_unavailable_reason:Option<String>,quality:Option<crate::cursor_observation::CursorObservationQuality>},
 }
 
 pub fn capabilities(doc:&ProjectDocument,report:&CursorAssetReport)->ProjectCapabilities {
@@ -52,7 +53,8 @@ pub fn capabilities(doc:&ProjectDocument,report:&CursorAssetReport)->ProjectCapa
         CursorMode::Separate=>match report {
             CursorAssetReport::Unchecked=>"Open the project to validate cursor assets".into(),
             CursorAssetReport::Unavailable(error)=>format!("Cursor assets unavailable: {}",error.message),
-            CursorAssetReport::Available {usable_positions,native_available,native_unavailable_reason}=>{
+            CursorAssetReport::Available {usable_positions,native_available,native_unavailable_reason,quality}=>{
+                result.cursor_observation_quality=quality.clone();
                 result.cursor_follow=*usable_positions;
                 result.cursor_replacement=true;result.cursor_smoothing=true;result.cursor_native_style=*native_available;
                 native_unavailable_reason.clone().unwrap_or_default()
@@ -68,11 +70,56 @@ pub fn inspect_cursor(root:&Path,doc:&ProjectDocument)->CursorAssetReport {
 pub(crate) fn inspect_capture_cursor(root:&Path,doc:&ProjectDocument)->CursorAssetReport {
     inspect(root,doc,true)
 }
-fn inspect(root:&Path,doc:&ProjectDocument,all_declared_images:bool)->CursorAssetReport {
-    if doc.video.cursor!=CursorMode::Separate {return CursorAssetReport::Unchecked;}
-    match load(root,doc,&||Ok(false),true,all_declared_images) {
-        Ok((prepared,reason))=>CursorAssetReport::Available {usable_positions:!prepared.visible_indices.is_empty(),native_available:reason.is_none(),native_unavailable_reason:reason},
-        Err(error)=>CursorAssetReport::Unavailable(error),
+fn inspect(root: &Path, doc: &ProjectDocument, all_declared_images: bool) -> CursorAssetReport {
+    if doc.video.cursor != CursorMode::Separate {
+        return CursorAssetReport::Unchecked;
+    }
+    let version = (|| {
+        let reference = doc
+            .cursor
+            .as_ref()
+            .ok_or_else(|| invalid("cursor", "Missing cursor index"))?;
+        let path = resolve(root, &reference.index_path)?
+            .ok_or_else(|| invalid("cursor.index", "Missing index"))?;
+        read_stable(&path, MAX_INDEX_BYTES, |file| {
+            let mut bytes = Vec::new();
+            file.take(MAX_INDEX_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(io_error)?;
+            let crate::capture::UniqueJson(v) = serde_json::from_slice(&bytes)
+                .map_err(|e| invalid("cursor.index", e.to_string()))?;
+            Ok(v.get("schemaVersion").and_then(serde_json::Value::as_u64))
+        })
+    })();
+    match version {
+        Ok(Some(2)) => {
+            return match crate::capture::windows_observations::inspect_checked(root, doc) {
+                Ok((usable_positions, native_available, truncated)) => {
+                    CursorAssetReport::Available {
+                        usable_positions,
+                        native_available,
+                        native_unavailable_reason: (!native_available).then(|| {
+                            "Native resource snapshots unavailable; choose Arrow explicitly".into()
+                        }),
+                        quality: Some(
+                            crate::cursor_observation::CursorObservationQuality::sampled(truncated),
+                        ),
+                    }
+                }
+                Err(e) => CursorAssetReport::Unavailable(e),
+            }
+        }
+        Err(e) => return CursorAssetReport::Unavailable(e),
+        _ => {}
+    }
+    match load(root, doc, &|| Ok(false), true, all_declared_images) {
+        Ok((prepared, reason)) => CursorAssetReport::Available {
+            usable_positions: !prepared.visible_indices.is_empty(),
+            native_available: reason.is_none(),
+            native_unavailable_reason: reason,
+            quality: None,
+        },
+        Err(error) => CursorAssetReport::Unavailable(error),
     }
 }
 /// Call after job reservation. Preparation owns immutable bytes; evaluation never reopens paths.
@@ -94,12 +141,19 @@ pub fn prepare_cursor_with_cancel(root:&Path,doc:&ProjectDocument,cancel:&impl F
 impl PreparedCursor {
     /// Exact rational source presentation time. Invalid rates safely produce no cursor.
     pub fn sample_at(&self,source_numerator:u128,rate:u32)->Option<EvaluatedCursor> {
+        if let Some(observations)=&self.observations {
+            let ([x,y],shape)=observations.sample_at(source_numerator,rate)?;
+            let shape_index=if self.style==CursorStyle::Arrow {0} else {shape as usize};
+            self.shapes.get(shape_index).filter(|s|!s.pixels.is_empty())?;
+            return Some(EvaluatedCursor{x,y,shape_index});
+        }
         let (i,[x,y])=self.fresh_position(source_numerator,rate)?;
         let shape_index=if self.style==CursorStyle::Arrow {0} else {self.samples[i].shape as usize};
         self.shapes.get(shape_index).filter(|s|!s.pixels.is_empty())?;
         Some(EvaluatedCursor{x,y,shape_index})
     }
     pub fn position_at(&self,source_numerator:u128,rate:u32)->Option<[f64;2]> {
+        if let Some(observations)=&self.observations {return observations.position_at(source_numerator,rate);}
         self.fresh_position(source_numerator,rate).map(|(_,p)|p)
     }
     fn fresh_position(&self,source_numerator:u128,rate:u32)->Option<(usize,[f64;2])> {
@@ -112,6 +166,7 @@ impl PreparedCursor {
     }
     /// Hold the eligible visible run's analytic left limit, never a hidden sentinel.
     pub fn follow_focus_at(&self,source_numerator:u128,rate:u32,entry_us:u64,fallback:[f64;2])->[f64;2] {
+        if let Some(observations)=&self.observations {return observations.follow_focus_at(source_numerator,rate,entry_us,fallback);}
         let clamp=|p:[f64;2]|[p[0].clamp(0.0,1.0),p[1].clamp(0.0,1.0)];
         if let Some(p)=self.position_at(source_numerator,rate) {return clamp(p);}
         if rate==0 {return fallback;}
@@ -126,9 +181,14 @@ impl PreparedCursor {
         }
         fallback
     }
-    pub fn sample_count(&self)->usize {self.samples.len()}
+    pub fn sample_count(&self)->usize {self.observations.as_ref().map_or(self.samples.len(),|o|o.sample_count())}
     pub fn buffer_bytes(&self)->usize {
-        self.samples.capacity()*std::mem::size_of::<Sample>()+self.endpoints.capacity()*16+self.visible_indices.capacity()*4+self.shapes.iter().map(|s|s.pixels.capacity()).sum::<usize>()
+        let buffers=self.samples.capacity()*std::mem::size_of::<Sample>()+self.endpoints.capacity()*16+self.visible_indices.capacity()*4+self.shapes.iter().map(|s|s.pixels.capacity()).sum::<usize>();
+        let Some(observations)=&self.observations else {return buffers;};
+        // Include containers and Arc allocations as well as the actual retained buffer capacities.
+        buffers+observations.buffer_bytes()+std::mem::size_of::<Self>()+self.shapes.capacity()*std::mem::size_of::<PreparedShape>()
+            +12*std::mem::size_of::<usize>()+4*std::mem::size_of::<Vec<()>>()
+            +self.shapes.len()*(2*std::mem::size_of::<usize>()+std::mem::size_of::<Vec<u8>>())
     }
 }
 /// Global output frame index on the cumulative clip grid, never window-local time.
@@ -149,8 +209,11 @@ fn load(root:&Path,doc:&ProjectDocument,cancel:&impl Fn()->CoreResult<bool>,insp
     let index=read_stable(&index_path,MAX_INDEX_BYTES,|file| {
         let mut bytes=Vec::new();file.take(MAX_INDEX_BYTES+1).read_to_end(&mut bytes).map_err(io_error)?;
         require(bytes.len() as u64<=MAX_INDEX_BYTES,"cursor.index","Cursor index exceeds 64 KiB")?;
-        serde_json::from_slice::<CursorIndex>(&bytes).map_err(|_|invalid("cursor.index","Malformed cursor index: required fields, types or unknown fields"))
+        Ok(bytes)
     })?;
+    let crate::capture::UniqueJson(value)=serde_json::from_slice(&index).map_err(|_|invalid("cursor.index","Malformed cursor index"))?;
+    if value.get("schemaVersion").and_then(serde_json::Value::as_u64)==Some(2) { return load_observations(root,doc,cancel); }
+    let index:CursorIndex=serde_json::from_slice(&index).map_err(|_|invalid("cursor.index","Malformed cursor index: required fields, types or unknown fields"))?;
     require(index.schema_version==1,"cursor.index.schemaVersion","Only cursor index schema 1 is supported")?;
     require((index.width,index.height,index.duration_us)==(doc.video.width,doc.video.height,doc.video.duration_us),"cursor.index","Cursor geometry and duration must equal the video")?;
     require(index.shapes.len()<=MAX_SHAPES,"cursor.shapes","At most 256 cursor shapes are supported")?;
@@ -215,9 +278,9 @@ fn load(root:&Path,doc:&ProjectDocument,cancel:&impl Fn()->CoreResult<bool>,insp
     for (i,s) in samples.iter().enumerate() {if s.visible {visible_indices.push(i as u32);}}
     require(visible_indices.capacity()*std::mem::size_of::<u32>()<=4*1024*1024,"cursor.samples","Visible index exceeds 4 MiB")?;
     let gaps=samples[0].at_us>0||samples.iter().any(|s|!s.visible)||samples.windows(2).any(|s|s[1].at_us-s[0].at_us>STALE_US)||samples.last().unwrap().at_us+STALE_US<index.duration_us;
-    Ok((PreparedCursor{samples:Arc::new(samples),endpoints:Arc::new(endpoints),visible_indices:Arc::new(visible_indices),duration_us:index.duration_us,tau_us:doc.cursor_settings.smoothing_us,shapes:Arc::new(shapes),scale:doc.cursor_settings.scale,style:doc.cursor_settings.style,has_hidden_or_stale_gaps:gaps},reason))
+    Ok((PreparedCursor{observations:None,samples:Arc::new(samples),endpoints:Arc::new(endpoints),visible_indices:Arc::new(visible_indices),duration_us:index.duration_us,tau_us:doc.cursor_settings.smoothing_us,shapes:Arc::new(shapes),scale:doc.cursor_settings.scale,style:doc.cursor_settings.style,has_hidden_or_stale_gaps:gaps},reason))
 }
-fn read_pam(file:&mut File,shape:&CursorShape)->CoreResult<Vec<u8>> {
+pub(crate) fn read_pam(file:&mut File,shape:&CursorShape)->CoreResult<Vec<u8>> {
     let mut reader=BufReader::new(file);let mut header=Vec::new();let mut keys=HashMap::new();
     loop {
         let mut line=Vec::new();let remaining=MAX_HEADER_BYTES+1-header.len();
@@ -237,7 +300,7 @@ fn read_pam(file:&mut File,shape:&CursorShape)->CoreResult<Vec<u8>> {
     let mut pixels=vec![0;shape.width as usize*shape.height as usize*4];reader.read_exact(&mut pixels).map_err(|_|invalid("cursor.image","Truncated PAM payload"))?;
     let mut extra=[0];require(reader.read(&mut extra).map_err(io_error)?==0,"cursor.image","PAM has trailing bytes")?;Ok(pixels)
 }
-fn resolve(root:&Path,relative:&str)->CoreResult<Option<PathBuf>> {
+pub(crate) fn resolve(root:&Path,relative:&str)->CoreResult<Option<PathBuf>> {
     if relative.len()>512 || !project::valid_asset_name(relative) {return Err(CoreError{code:ErrorCode::InvalidPath,message:"Cursor paths must be safe relative asset paths of at most 512 UTF-8 bytes".into(),field:Some("cursor.path".into())});}
     match crate::paths::asset_path(root,relative) {
         Ok(path)=>Ok(Some(path)),
@@ -250,7 +313,7 @@ fn same_metadata(a:&Metadata,b:&Metadata)->bool {
     #[cfg(unix)] {use std::os::unix::fs::MetadataExt;same&&a.dev()==b.dev()&&a.ino()==b.ino()}
     #[cfg(not(unix))] {same}
 }
-fn read_stable<T>(path:&Path,max:u64,read:impl FnOnce(&mut File)->CoreResult<T>)->CoreResult<T> {
+pub(crate) fn read_stable<T>(path:&Path,max:u64,read:impl FnOnce(&mut File)->CoreResult<T>)->CoreResult<T> {
     let mut file=File::open(path).map_err(io_error)?;let before=file.metadata().map_err(io_error)?;
     require(before.len()<=max,"cursor","Cursor asset exceeds its byte limit")?;
     let result=read(&mut file)?;
@@ -277,4 +340,123 @@ fn arrow()->PreparedShape {
 pub fn scaled_shape(shape:&PreparedShape,scale:f64)->CoreResult<(u32,u32,u32,u32)> {
     require(scale.is_finite()&&(0.5..=4.0).contains(&scale),"cursorSettings.scale","Cursor scale must be between 0.5 and 4")?;
     Ok(((shape.width as f64*scale).round() as u32,(shape.height as f64*scale).round() as u32,(shape.hotspot_x as f64*scale).round() as u32,(shape.hotspot_y as f64*scale).round() as u32))
+}
+
+
+fn load_observations(
+    root: &Path,
+    doc: &ProjectDocument,
+    cancel: &impl Fn() -> CoreResult<bool>,
+) -> CoreResult<(PreparedCursor, Option<String>)> {
+    use crate::{
+        capture::{self, windows_observations::checked_interactions, CaptureAuthority},
+        cursor_observation::{self, PreparedObservations},
+    };
+    let Some(CaptureAuthority::WindowsV3(manifest)) =
+        capture::read_authority(root, &doc.project_id)?
+    else {
+        return Err(invalid(
+            "cursor",
+            "Observation index requires Windows V3 authority",
+        ));
+    };
+    let initial = manifest.finalized_project()?;
+    require(
+        doc.video == initial.video && doc.cursor == initial.cursor,
+        "cursor",
+        "Edited project cannot replace immutable V3 source",
+    )?;
+    cancelled(cancel)?;
+    let data = cursor_observation::read_observations(root)?;
+    // Source/raw-grid/clock/HWND and the canonical snapshot must join before any projection.
+    checked_interactions(&manifest, &data)?;
+    cancelled(cancel)?;
+    let observations =
+        PreparedObservations::prepare(&data, doc.cursor_settings.smoothing_us, cancel)?;
+    let mut reason = (!observations.native_complete())
+        .then(|| "Native resource snapshots unavailable; choose Arrow explicitly".to_owned());
+    let mut shapes = Vec::new();
+    let shape_paths = data
+        .index
+        .shapes
+        .iter()
+        .map(|s| resolve(root, &s.path))
+        .collect::<CoreResult<Vec<_>>>()?;
+    if doc.cursor_settings.enabled && doc.cursor_settings.style == CursorStyle::Native {
+        for (i, (shape, path)) in data.index.shapes.iter().zip(shape_paths).enumerate() {
+            cancelled(cancel)?;
+            let pixels = match path {
+                Some(path) => read_stable(
+                    &path,
+                    MAX_HEADER_BYTES as u64 + shape.width as u64 * shape.height as u64 * 4,
+                    |file| read_pam(file, shape),
+                ),
+                None => Err(invalid(
+                    "cursor.shapes",
+                    "Native resource snapshot is missing",
+                )),
+            };
+            let pixels = match pixels {
+                Ok(p) => p,
+                Err(e) => {
+                    if observations.uses_shape(i) {
+                        reason.get_or_insert_with(|| {
+                            bounded(
+                                format!(
+                                    "Native cursor unavailable: {}; choose Arrow explicitly",
+                                    e.message
+                                ),
+                                1024,
+                            )
+                        });
+                    }
+                    Vec::new()
+                }
+            };
+            shapes.push(PreparedShape {
+                width: shape.width,
+                height: shape.height,
+                hotspot_x: shape.hotspot_x,
+                hotspot_y: shape.hotspot_y,
+                pixels: Arc::new(pixels),
+            });
+        }
+    } else if doc.cursor_settings.enabled && doc.cursor_settings.style == CursorStyle::Arrow {
+        shapes.push(arrow());
+    }
+    let gaps = observations.has_gaps();
+    let prepared = PreparedCursor {
+        observations: Some(Arc::new(observations)),
+        samples: Arc::new(Vec::new()),
+        endpoints: Arc::new(Vec::new()),
+        visible_indices: Arc::new(Vec::new()),
+        duration_us: data.index.duration_us,
+        tau_us: doc.cursor_settings.smoothing_us,
+        shapes: Arc::new(shapes),
+        scale: doc.cursor_settings.scale,
+        style: doc.cursor_settings.style,
+        has_hidden_or_stale_gaps: gaps,
+    };
+    require(
+        prepared.buffer_bytes()
+            - prepared
+                .shapes
+                .iter()
+                .map(|s| s.pixels.capacity())
+                .sum::<usize>()
+            <= cursor_observation::MAX_RETAINED_BYTES,
+        "cursor.observations",
+        "Prepared cursor exceeds retained-memory limit",
+    )?;
+    require(
+        prepared
+            .shapes
+            .iter()
+            .map(|s| s.pixels.capacity())
+            .sum::<usize>()
+            <= MAX_NATIVE_BYTES,
+        "cursor.shapes",
+        "Prepared native pixels exceed 32 MiB",
+    )?;
+    Ok((prepared, reason))
 }

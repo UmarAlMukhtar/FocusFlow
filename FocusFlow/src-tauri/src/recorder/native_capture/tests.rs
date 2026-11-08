@@ -30,7 +30,7 @@ fn active_without_sampler(dir:&Path, nonzero:bool)->ActiveRecording {
     let encoder_pid=child.id();
     ActiveRecording {native_capture:Some(without_sampler(dir)),notice:None,capture:ActiveCapture::Ffmpeg{child,encoder_pid},
         video_clock:video_clock::Clock::start(video_clock::Capability::probe(Path::new("/usr/bin/false")),Instant::now()),audio_recorder:None,mic_device_name:None,
-        click_tracker:empty_tracker(),output_path:dir.join("screen.mp4"),started_at:Instant::now(),monitor:MonitorInfo{name:None,x:0,y:0,width:320,height:240,scale_factor:1.0},
+        click_tracker:Some(empty_tracker()),output_path:dir.join("screen.mp4"),started_at:Instant::now(),monitor:MonitorInfo{name:None,x:0,y:0,width:320,height:240,scale_factor:1.0},
         capture_bounds:source().bounds,source:RecordingSource::Screen,ffmpeg_path:ffmpeg(),log:Arc::new(Mutex::new(ProcessLog::default()))}
 }
 #[test]
@@ -170,7 +170,7 @@ fn native_start_stop_lifecycle_fixture() {
         assert!(StartReservation::acquire(&state).is_err());
         // Controlled delivery-time input exercises the production normalization/rebase/snapshot path.
         {let runtime=state.lock_runtime().unwrap();let active=runtime.active.as_ref().unwrap();
-            active.click_tracker.clicks.lock().unwrap().push(ClickEvent{timestamp:0.8,x:if kind==2 {80}else{180},y:if kind==2 {80}else{180},button:ClickButton::Left});}
+            active.click_tracker.as_ref().unwrap().clicks.lock().unwrap().push(ClickEvent{timestamp:0.8,x:if kind==2 {80}else{180},y:if kind==2 {80}else{180},button:ClickButton::Left});}
         thread::sleep(Duration::from_millis(if fault=="cap" {2700}else{1700}));
         if fault=="cap" {
             let mut runtime=state.lock_runtime().unwrap();let ActiveCapture::Ffmpeg{child,..}=&mut runtime.active.as_mut().unwrap().capture;
@@ -204,7 +204,7 @@ fn shutdown_during_start_returns_ownership_to_startup_cleanup() {
     let dir=Directory::new("shutdown-start-transfer");let state=RecorderState::new();let reservation=StartReservation::acquire(&state).unwrap();
     let active=active_without_sampler(&dir.0,false);state.request_shutdown().unwrap();
     let (error,active)=transfer_active(&state,active).err().expect("Shutdown must reject publication");assert_eq!(error.code,"recorder_shutting_down");assert!(state.cleanup_runtime().active.is_none());
-    active.click_tracker.request_stop();match active.capture{ActiveCapture::Ffmpeg{child,..}=>crate::capture_guard::close_and_reap(child)};active.click_tracker.finish().unwrap();drop(active.native_capture);drop(reservation);
+    active.click_tracker.as_ref().unwrap().request_stop();match active.capture{ActiveCapture::Ffmpeg{child,..}=>crate::capture_guard::close_and_reap(child)};active.click_tracker.unwrap().finish().unwrap();drop(active.native_capture);drop(reservation);
     tauri::async_runtime::block_on(shutdown(&state));assert!(!state.cleanup_runtime().starting);
 }
 

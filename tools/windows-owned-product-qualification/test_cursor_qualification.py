@@ -106,7 +106,10 @@ class PrivateChecks(unittest.TestCase):
         self.assertNotIn('publish_windows_incomplete(',proof);self.assertNotIn('Completion::',proof);self.assertNotIn('Session::prepare(',proof);self.assertNotIn('StartReservation',proof)
         self.assertIn('manifest:None',proof);self.assertIn('proof-without-cursor.mp4',proof)
         production=(repo/'FocusFlow/src-tauri/src/recorder/windows_capture/process.rs').read_text()
-        self.assertIn('#[cfg(not(test))] let cursor=CursorCaptureSettings::WithCursor;',production)
+        self.assertIn('let cursor=if cursor_admission.separate(){CursorCaptureSettings::WithoutCursor}else{CursorCaptureSettings::WithCursor};',production)
+        self.assertIn('#[cfg(not(test))] let allowed=cursor::release_qualified(profile);',production)
+        self.assertIn('cursor_admission:cursor::Admission::embedded()',proof)
+        self.assertNotIn('prepare_fixture',proof)
 
 class PrivateRouting(unittest.TestCase):
     def test_private_scope_builds_one_harness_and_stops_on_unknown_cleanup(self):

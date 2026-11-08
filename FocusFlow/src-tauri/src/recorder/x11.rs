@@ -288,7 +288,7 @@ mod native_tests {
         state.lock_runtime().unwrap().active = Some(ActiveRecording {
             native_capture:None,notice:None,
             capture, video_clock: video_clock::Clock::start(video_clock::Capability::probe(&ffmpeg), Instant::now()), audio_recorder: None, mic_device_name: None,
-            click_tracker: ClickTracker::start(Instant::now(), ClickFilter::All),
+            click_tracker: Some(ClickTracker::start(Instant::now(), ClickFilter::All)),
             output_path: recovery.clone(), started_at: Instant::now(),
             monitor: MonitorInfo { name:Some("Generated X11 fixture".into()),x:0,y:0,width:root_bounds.width,height:root_bounds.height,scale_factor:1.0 },
             capture_bounds: root_bounds, source: RecordingSource::Screen,

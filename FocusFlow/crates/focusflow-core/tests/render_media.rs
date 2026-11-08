@@ -560,3 +560,295 @@ fn precise_91_frame_import_retains_tail_click_and_exports_91_182_frames() {
 fn precise_92_frame_import_exports_92_184_frames() {
     precise_endpoint_import_render(92, 3_066_666, [92, 184]);
 }
+
+#[path = "support/observations.rs"]
+mod observations;
+fn observation_encoder() -> PathBuf {
+    std::env::var_os("FOCUSFLOW_TASK2_FFMPEG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("ffmpeg"))
+}
+fn observation_media_fixture(follow: bool) -> (Fixture, PathBuf, ProjectDocument) {
+    use focusflow_core::{cursor::CursorShape, cursor_observation::WindowsCursorRowV2};
+    let t = Fixture(std::env::temp_dir().join(format!(
+        "focusflow-observations-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )));
+    fs::create_dir(&t.0).unwrap();
+    let dir = t.0.join("fixture");
+    fs::create_dir(&dir).unwrap();
+    let mut i = observations::index();
+    i.clock.qpc_frequency = "3000000".into();
+    i.clock.epoch_100ns = "10000000".into();
+    i.clock.admission_qpc = "2999000".into();
+    i.clock.cutoff_qpc = "6000000".into();
+    i.terminal.source_cutoff_qpc = 6000000;
+    i.shapes = vec![CursorShape {
+        id: "red".into(),
+        path: "cursor/shapes/red.pam".into(),
+        width: 4,
+        height: 4,
+        hotspot_x: 2,
+        hotspot_y: 2,
+    }];
+    let mut poses = Vec::new();
+    for (us, x, y) in [
+        (0, 9, 39),
+        (45000, 109, 39),
+        (200000, 0, 0),
+        (300000, 109, 39),
+        (400000, 109, 39),
+        (500000, 109, 39),
+        (600000, 109, 39),
+        (700000, 109, 39),
+        (800000, 109, 39),
+        (900000, 109, 39),
+    ] {
+        if us == 200000 {
+            poses.push(WindowsCursorRowV2::Barrier {
+                q0: "3300000".into(),
+                q1: "3300030".into(),
+                reason: "hidden".into(),
+            });
+        }
+        let q = 3000000 + us * 3;
+        let mut p = observations::pose(q);
+        if let WindowsCursorRowV2::Observed {
+            q1,
+            pointer_before,
+            pointer_after,
+            shape_id,
+            ..
+        } = &mut p
+        {
+            *q1 = (q + if us == 0 { 6 } else { 0 }).to_string();
+            pointer_before.physical_position =
+                [47 + x, 40 + if follow && y == 39 { 136 } else { y }];
+            pointer_before.cursor_position = pointer_before.physical_position;
+            *pointer_after = pointer_before.clone();
+            *shape_id = Some("red".into());
+        }
+        poses.push(p);
+    }
+    let mut doc = observations::write_project(&dir, i, poses);
+    doc.cursor_settings.enabled = !follow;
+    doc.cursor_settings.style = CursorStyle::Native;
+    doc.cursor_settings.scale = 2.0;
+    doc.cursor_settings.smoothing_us = 0;
+    let mut pam =
+        b"P7\nWIDTH 4\nHEIGHT 4\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n".to_vec();
+    for _ in 0..16 {
+        pam.extend([255, 0, 0, 255]);
+    }
+    fs::write(dir.join("cursor/shapes/red.pam"), pam).unwrap();
+    // Fixed 30Hz video deliberately predates the fresh pointer at the 60Hz 50ms instant.
+    let filter = if follow {
+        "color=black:s=322x272:r=30:d=1,drawbox=x=104:y=131:w=11:h=11:c=blue:t=fill"
+    } else {
+        "color=black:s=322x272:r=30:d=1"
+    };
+    run(
+        "/usr/bin/ffmpeg",
+        &[
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            filter,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-qp",
+            "0",
+            dir.join("screen.mp4").to_str().unwrap(),
+        ],
+    );
+    if follow {
+        doc.schema_version = 4;
+        doc.zooms = vec![ZoomElement {
+            id: "follow".into(),
+            clip_id: "clip-0".into(),
+            mode: ZoomMode::Follow,
+            start_us: 0,
+            end_us: 1_000_000,
+            x: 0.5,
+            y: 0.5,
+            scale: 2.0,
+            intro_us: 0,
+            hold_us: 0,
+            outro_us: 0,
+        }];
+    }
+    fs::write(dir.join("project.json"), serde_json::to_vec(&doc).unwrap()).unwrap();
+    (t, dir, doc)
+}
+fn observation_decoded(path: &Path) -> Vec<u8> {
+    run(
+        "/usr/bin/ffmpeg",
+        &[
+            "-v",
+            "error",
+            "-i",
+            path.to_str().unwrap(),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-",
+        ],
+    )
+}
+fn observation_pixel(raw: &[u8], frame: usize, x: usize, y: usize) -> [u8; 3] {
+    let start = (frame * 322 * 272 + y * 322 + x) * 3;
+    raw[start..start + 3].try_into().unwrap()
+}
+#[test]
+fn observation_native_jobs_have_literal_pixels_gaps_hotspot_clipping_and_current_reconstruction() {
+    use focusflow_core::{
+        jobs::{JobManager, JobState},
+        preview::PreviewRequest,
+    };
+    let (t, dir, _) = observation_media_fixture(false);
+    let paths = [
+        "screen.mp4",
+        "capture.json",
+        "capture.windows-v3",
+        "cursor/index.json",
+        "cursor/observations.ndjson",
+        "cursor/input-observations.ndjson",
+        "cursor/shapes/red.pam",
+        "project.json",
+    ];
+    let before = paths.map(|p| (p, fs::read(dir.join(p)).unwrap()));
+    let manager = JobManager::new(&t.0, &observation_encoder()).unwrap();
+    for preset in [ExportPreset::Balanced, ExportPreset::HighQuality] {
+        let job = manager.start_export("fixture", 0, preset).unwrap();
+        let job = manager.wait("fixture", &job.job_id).unwrap();
+        assert_eq!(job.state, JobState::Completed, "{:?}", job.error);
+        let raw = observation_decoded(&dir.join(job.output_relative_path.unwrap()));
+        let fps = preset.fps() as usize;
+        assert_eq!(raw.len(), fps * 322 * 272 * 3);
+        assert!(
+            observation_pixel(&raw, 0, 9, 39)[0] < 20,
+            "q1=2us must not draw at0"
+        );
+        assert!(
+            observation_pixel(&raw, 1, 9, 39)[0] > 180,
+            "first eligible pointer"
+        );
+        if fps == 60 {
+            assert!(
+                observation_pixel(&raw, 3, 109, 39)[0] > 180,
+                "50ms pointer must ignore stale 33ms video selection"
+            );
+            assert!(observation_pixel(&raw, 3, 9, 39)[0] < 20);
+        }
+        assert!(
+            observation_pixel(&raw, fps / 10, 109, 39)[0] < 20,
+            "lower endpoint barrier at100ms"
+        );
+        assert!(observation_pixel(&raw, fps / 5, 0, 0)[0] > 180);
+        assert!(observation_pixel(&raw, fps / 5, 2, 2)[0] > 180);
+        assert!(
+            observation_pixel(&raw, fps / 5, 7, 7)[0] < 20,
+            "scaled hotspot clip ends before7,7"
+        );
+    }
+    let j = manager
+        .start_preview("fixture", 0, PreviewRequest::Still { at_us: 50_000 })
+        .unwrap();
+    let j = manager.wait("fixture", &j.job_id).unwrap();
+    assert_eq!(j.state, JobState::Completed, "{:?}", j.error);
+    let raw = observation_decoded(&dir.join(j.output_relative_path.unwrap()));
+    assert!(
+        observation_pixel(&raw, 0, 9, 39)[0] > 180,
+        "still50ms uses global30Hz predecessor33ms"
+    );
+    assert!(observation_pixel(&raw, 0, 109, 39)[0] < 20);
+    let j = manager
+        .start_preview("fixture", 0, PreviewRequest::Still { at_us: 66_667 })
+        .unwrap();
+    let j = manager.wait("fixture", &j.job_id).unwrap();
+    assert_eq!(j.state, JobState::Completed, "{:?}", j.error);
+    let raw = observation_decoded(&dir.join(j.output_relative_path.unwrap()));
+    assert!(observation_pixel(&raw, 0, 109, 39)[0] > 180);
+    for (p, b) in before {
+        assert_eq!(fs::read(dir.join(p)).unwrap(), b, "immutable source {p}");
+    }
+}
+#[test]
+fn observation_follow_jobs_overlay_off_center_literal_source_marker() {
+    use focusflow_core::{
+        jobs::{JobManager, JobState},
+        preview::PreviewRequest,
+    };
+    let (t, dir, _) = observation_media_fixture(true);
+    fs::remove_file(dir.join("cursor/shapes/red.pam")).unwrap();
+    let manager = JobManager::new(&t.0, &observation_encoder()).unwrap();
+    for preset in [ExportPreset::Balanced, ExportPreset::HighQuality] {
+        let j = manager.start_export("fixture", 0, preset).unwrap();
+        let j = manager.wait("fixture", &j.job_id).unwrap();
+        assert_eq!(j.state, JobState::Completed, "{:?}", j.error);
+        let raw = observation_decoded(&dir.join(j.output_relative_path.unwrap()));
+        let at = preset.fps() as usize / 2;
+        let p = observation_pixel(&raw, at, 161, 136);
+        assert!(p[2] > 180 && p[0] < 30, "follow marker center {p:?}");
+    }
+    let j = manager
+        .start_preview("fixture", 0, PreviewRequest::Still { at_us: 500000 })
+        .unwrap();
+    let j = manager.wait("fixture", &j.job_id).unwrap();
+    assert_eq!(j.state, JobState::Completed, "{:?}", j.error);
+    let p = observation_pixel(
+        &observation_decoded(&dir.join(j.output_relative_path.unwrap())),
+        0,
+        161,
+        136,
+    );
+    assert!(p[2] > 180 && p[0] < 30);
+}
+#[test]
+fn observation_jobs_repeat_fractional_trim_on_one_global_frame_grid() {
+    use focusflow_core::jobs::{JobManager, JobState};
+    let (t, dir, mut doc) = observation_media_fixture(false);
+    doc.clips = vec![
+        Clip {
+            id: "a".into(),
+            in_us: 12345,
+            out_us: 512345,
+        },
+        Clip {
+            id: "b".into(),
+            in_us: 12345,
+            out_us: 512345,
+        },
+    ];
+    fs::write(dir.join("project.json"), serde_json::to_vec(&doc).unwrap()).unwrap();
+    let manager = JobManager::new(&t.0, &observation_encoder()).unwrap();
+    for preset in [ExportPreset::Balanced, ExportPreset::HighQuality] {
+        let j = manager.start_export("fixture", 0, preset).unwrap();
+        let j = manager.wait("fixture", &j.job_id).unwrap();
+        assert_eq!(j.state, JobState::Completed, "{:?}", j.error);
+        let raw = observation_decoded(&dir.join(j.output_relative_path.unwrap()));
+        let fps = preset.fps() as usize;
+        assert_eq!(raw.len(), fps * 322 * 272 * 3);
+        for first in [0, fps / 2] {
+            assert!(
+                observation_pixel(&raw, first, 9, 39)[0] > 180,
+                "trim/repeat first pointer at{first}"
+            );
+            assert!(
+                observation_pixel(&raw, first + fps / 10, 109, 39)[0] < 20,
+                "barrier must survive repeat"
+            );
+            assert!(
+                observation_pixel(&raw, first + fps / 5, 0, 0)[0] > 180,
+                "new run must survive repeat"
+            );
+        }
+    }
+}

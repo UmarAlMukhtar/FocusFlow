@@ -93,3 +93,80 @@ fn unavailable_target_holds_while_intro_continues_and_entry_resets_hold() {
  let p=render::compile(&s.document,ExportPreset::Balanced).unwrap();prepare(&mut s,&p);
  close(pose(&s,750_000,1).x,0.35);
 }
+
+#[path = "support/observations.rs"]
+mod observations;
+#[test]
+fn observation_follow_overlay_off_uses_literal_trim_repeat_and_common_grid() {
+    let t = common::TestDir::new();
+    let mut poses = Vec::new();
+    for at in (0..1_000_000).step_by(100000) {
+        let mut p = observations::pose(at);
+        if let focusflow_core::cursor_observation::WindowsCursorRowV2::Observed {
+            pointer_before,
+            pointer_after,
+            ..
+        } = &mut p
+        {
+            pointer_before.physical_position[0] = 47 + if at < 300000 { 9 } else { 109 };
+            pointer_before.cursor_position = pointer_before.physical_position;
+            *pointer_after = pointer_before.clone();
+        }
+        poses.push(p);
+    }
+    fs::write(t.path().join("screen.mp4"), b"test-owned media placeholder").unwrap();
+    let mut d = observations::write_project(t.path(), observations::index(), poses);
+    d.schema_version = 4;
+    d.cursor_settings.enabled = false;
+    d.cursor_settings.smoothing_us = 0;
+    d.clips = vec![
+        Clip {
+            id: "a".into(),
+            in_us: 12345,
+            out_us: 512345,
+        },
+        Clip {
+            id: "b".into(),
+            in_us: 12345,
+            out_us: 512345,
+        },
+    ];
+    d.zooms = d
+        .clips
+        .iter()
+        .map(|c| ZoomElement {
+            id: format!("z-{}", c.id),
+            clip_id: c.id.clone(),
+            mode: ZoomMode::Follow,
+            start_us: c.in_us,
+            end_us: c.out_us,
+            x: 0.4,
+            y: 0.5,
+            scale: 2.0,
+            intro_us: 0,
+            hold_us: 0,
+            outro_us: 0,
+        })
+        .collect();
+    let mut s = RenderSnapshot {
+        project_dir: t.path().into(),
+        document: d,
+        prepared_cursor: None,
+        prepared_focus: None,
+    };
+    for preset in [ExportPreset::Balanced, ExportPreset::HighQuality] {
+        let p = render::compile(&s.document, preset).unwrap();
+        prepare(&mut s, &p);
+        close(pose(&s, 0, 1).x, 9.0 / 322.0);
+        close(pose(&s, 300000, 1).x, 109.0 / 322.0);
+        close(pose(&s, 500000, 1).x, 9.0 / 322.0);
+        close(pose(&s, 800000, 1).x, 109.0 / 322.0);
+        for k in 0..30 {
+            assert_eq!(pose(&s, k * 1_000_000, 30), pose(&s, k * 2_000_000, 60));
+        }
+        let w = render::cursor_window::next(&s, &p, 0, 15, &AtomicBool::new(false)).unwrap();
+        assert!(w.atlas.is_none());
+        assert!(w.camera.is_some());
+        assert!(w.graph.is_empty());
+    }
+}

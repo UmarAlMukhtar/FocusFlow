@@ -1,6 +1,7 @@
 //! Owned generated HWND -> original Session -> original Completion -> public core import.
 use super::*;
 pub(in crate::recorder) mod cursor;
+pub(in crate::recorder) mod production_cursor;
 use std::{cell::RefCell, thread};
 use ::windows::{core::w, Win32::{Foundation::{COLORREF,LRESULT,WPARAM},Graphics::Gdi::*,System::LibraryLoader::GetModuleHandleW,UI::{HiDpi::*,WindowsAndMessaging::*}}};
 use focusflow_core::{capture::{decode_windows,windows::*},ffmpeg::probe_cfr_grid,store::ProjectStore};
@@ -288,7 +289,7 @@ fn case(root:&Path,id:&str,mode:&str,w:u32,h:u32,nonce:u16,ffmpeg:&Path,worker:&
  if ["transfer-shutdown","stop-shutdown","close-stop"].contains(&mode){
   let started_at=Instant::now();
   // No input thread: lifecycle fixture supplies empty, untrusted interaction buffers.
-  let active=ActiveRecording{notice:None,capture:ActiveCapture::WindowsCapture{capture:session},video_clock:video_clock::Clock::start(video_clock::Capability::probe(ffmpeg),started_at),audio_recorder:None,mic_device_name:None,click_tracker:ClickTracker{stop_requested:Arc::new(AtomicBool::new(false)),clicks:Arc::new(Mutex::new(vec![])),drags:Arc::new(Mutex::new(vec![])),join_handle:None},output_path:dir.join("screen.mp4"),started_at,monitor:plan.monitor.clone(),capture_bounds:plan.bounds,source:plan.source.clone(),ffmpeg_path:ffmpeg.to_owned(),log:Arc::new(Mutex::new(ProcessLog::default()))};
+  let active=ActiveRecording{notice:None,capture:ActiveCapture::WindowsCapture{capture:session},video_clock:video_clock::Clock::start(video_clock::Capability::probe(ffmpeg),started_at),audio_recorder:None,mic_device_name:None,click_tracker:Some(ClickTracker{stop_requested:Arc::new(AtomicBool::new(false)),clicks:Arc::new(Mutex::new(vec![])),drags:Arc::new(Mutex::new(vec![])),join_handle:None}),output_path:dir.join("screen.mp4"),started_at,monitor:plan.monitor.clone(),capture_bounds:plan.bounds,source:plan.source.clone(),ffmpeg_path:ffmpeg.to_owned(),log:Arc::new(Mutex::new(ProcessLog::default()))};
   if mode=="transfer-shutdown"{
    state.request_shutdown()?;let (error,active)=transfer_active(state,active).err().ok_or("late transfer accepted")?;assert_eq!(error.code,"recorder_shutting_down");drop(active);incomplete(&dir)?;owned.verify(&dir).map_err(|e|format!("transfer cleanup: {e}"))?;
    fs::write(dir.join("result.json"),b"{\"lateTransferRejected\":true,\"retainedIncomplete\":true}")?;return Ok(());
@@ -368,6 +369,7 @@ pub(crate) fn run()->TestResult<()>{
  let mode=args[1].to_str().ok_or("mode")?;let w=args[2].to_str().ok_or("width")?.parse()?;let h=args[3].to_str().ok_or("height")?.parse()?;let nonce:u16=args[4].to_str().ok_or("nonce")?.parse()?;
  if mode=="cursor-private"{cursor::require_disposable()?;}
  let root=PathBuf::from(&args[0]);fs::create_dir(&root)?;let root=root.canonicalize()?;
+ if mode=="cursor-production"{cursor::require_disposable()?;return production_cursor::case(&root,w,h,nonce,Path::new(&args[5]),Path::new(&args[6]));}
  if mode=="cursor-private"{return cursor::case(&root,w,h,nonce,Path::new(&args[5]),Path::new(&args[6]));}
  if !["normal","static","repeat","close","resize","admission-close","admission-resize","marker-failure","blocked","partial","exit7","lost-worker","parent-death","transfer-shutdown","stop-shutdown","close-stop"].contains(&mode){return Err("Unknown generated case".into());}
  unsafe{SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)?;}

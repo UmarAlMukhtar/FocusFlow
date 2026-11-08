@@ -654,7 +654,7 @@ mod tests {
             if diagnostic_failure {fs::create_dir(directory.join("video-clock.json")).unwrap();}
             let state=RecorderState::new();state.lock_runtime().unwrap().active=Some(ActiveRecording{
                 native_capture:None,notice:None,
-                capture:ActiveCapture::Ffmpeg{child:owner,encoder_pid:pid},video_clock:clock,audio_recorder:None,mic_device_name:None,click_tracker:tracker,output_path:video.clone(),started_at:epoch,
+                capture:ActiveCapture::Ffmpeg{child:owner,encoder_pid:pid},video_clock:clock,audio_recorder:None,mic_device_name:None,click_tracker:Some(tracker),output_path:video.clone(),started_at:epoch,
                 monitor:MonitorInfo{name:Some("Generated clock fixture".into()),x:0,y:0,width:320,height:240,scale_factor:1.0},capture_bounds:bounds,source:RecordingSource::Screen,ffmpeg_path:ffmpeg.clone(),log,
             });
             let completed=tauri::async_runtime::block_on(stop_active_recording(&state)).unwrap();

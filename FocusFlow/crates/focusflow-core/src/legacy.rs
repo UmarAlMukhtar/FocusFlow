@@ -87,7 +87,7 @@ pub fn validate_defaults(defaults: LegacyDefaults) -> CoreResult<()> {
     Ok(())
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct LegacyInteractions {
     pub zooms: Vec<ZoomElement>,
     pub clicks: Vec<Click>,
