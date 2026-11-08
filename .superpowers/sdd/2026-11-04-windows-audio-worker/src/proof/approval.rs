@@ -319,6 +319,12 @@ pub fn fetch_approval(
     let raw = helper::fetch(&permit, active)?;
     delivered(&raw, request, now()?)
 }
+/// Startup diagnostics reuse only the hosted transport binding; no remote authority is minted.
+#[cfg(windows)]
+pub(super) fn startup_permit(request: &ApprovalRequestV1) -> Result<TransportPermit> {
+    observe(request)?;
+    Ok(TransportPermit { request: request.clone() })
+}
 /// Actual measurements are recomputed; observed request fields never supply expected hashes.
 pub fn authorize_discovery(source_root: &Path, remote: RemoteApproval) -> Result<DiscoveryPermit> {
     observe(&remote.manifest.request)?;

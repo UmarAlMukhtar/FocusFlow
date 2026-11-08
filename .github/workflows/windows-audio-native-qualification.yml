@@ -1,4 +1,4 @@
-name: Private Windows audio discovery admission
+name: Private Windows audio startup diagnostic
 on:
   push:
     branches: [codex-audio-native-qualification]
@@ -64,24 +64,24 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
-      - name: Same job bounded remote approval wait and read-only render discovery
+      - name: Same job bounded no-network startup diagnostic
         if: steps.build.outcome == 'success' && steps.upload-build.outcome == 'success'
-        id: discovery
+        id: startup
         shell: pwsh
         run: |
-          python tools/audio-proof/stage.py discover
-          if ($LASTEXITCODE -ne 0) { throw 'Discovery denied, failed or incomplete; review exact receipts' }
-      - name: Prepare explicit discovery artifact allowlist
-        if: always() && steps.discovery.outcome != 'skipped' && steps.discovery.outcome != ''
+          python tools/audio-proof/stage.py startup
+          if ($LASTEXITCODE -ne 0) { throw 'Startup diagnostic incomplete; review exact projected receipts' }
+      - name: Prepare explicit startup diagnostic artifact allowlist
+        if: always() && steps.startup.outcome != 'skipped' && steps.startup.outcome != ''
         shell: pwsh
         run: |
-          python tools/audio-proof/stage.py package-discovery
-          if ($LASTEXITCODE -ne 0) { throw 'Discovery evidence packaging incomplete' }
+          python tools/audio-proof/stage.py package-startup
+          if ($LASTEXITCODE -ne 0) { throw 'Startup evidence packaging incomplete' }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always() && steps.discovery.outcome != 'skipped' && steps.discovery.outcome != ''
+        if: always() && steps.startup.outcome != 'skipped' && steps.startup.outcome != ''
         with:
-          name: private-audio-discovery-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .audio-native-stage/discovery-upload/
+          name: private-audio-startup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .audio-native-stage/startup-upload/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7

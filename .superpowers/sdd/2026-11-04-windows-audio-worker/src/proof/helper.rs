@@ -6,6 +6,9 @@ use crate::{
     Result,
 };
 use std::time::{Duration, Instant};
+#[cfg(any(windows, test))]
+#[path = "startup.rs"]
+pub(crate) mod startup;
 const SCRIPT: &[u8] = include_bytes!("../../../../../tools/audio-proof/fetch-approval.ps1");
 const OUTPUT_CAP: usize = 512 * 1024;
 #[derive(Debug)]
@@ -126,6 +129,7 @@ fn supervise(
         registry,
         deadline,
         Duration::ZERO,
+        OUTPUT_CAP,
         now,
         pause,
         active,
@@ -163,6 +167,7 @@ fn supervise_finite(
     registry: SharedRegistry,
     deadline: Instant,
     release: Duration,
+    output_cap: usize,
     mut now: impl FnMut() -> Instant,
     mut pause: impl FnMut(),
     active: &impl Fn() -> Result<()>,
@@ -200,7 +205,7 @@ fn supervise_finite(
             let mut chunk = [0; 4096];
             match owner.ops().read_stdout(&mut chunk) {
                 Ok(PipeRead::Data(n)) if n > 0 && n <= chunk.len() => {
-                    if result.raw_response.len() + n > OUTPUT_CAP {
+                    if result.raw_response.len() + n > output_cap {
                         result.reason = Some("Helper output cap exceeded".into());
                         break;
                     }
@@ -297,6 +302,7 @@ fn supervise_discovery(
         registry,
         deadline,
         Duration::from_secs(3),
+        OUTPUT_CAP,
         now,
         pause,
         active,
@@ -402,12 +408,13 @@ struct Script {
 }
 #[cfg(windows)]
 impl Script {
-    fn create() -> Result<Self> {
+    fn create() -> Result<Self> { Self::create_bytes(SCRIPT) }
+    fn create_bytes(bytes: &[u8]) -> Result<Self> {
         use std::{
             io::{Read, Write},
             os::windows::fs::OpenOptionsExt,
         };
-        if SCRIPT.is_empty() || SCRIPT.len() > 65536 {
+        if bytes.is_empty() || bytes.len() > 65536 {
             return Err("Embedded fetcher cap exceeded".into());
         }
         let root = std::env::temp_dir()
@@ -430,7 +437,7 @@ impl Script {
             file: Some(file),
         };
         let file = script.file.as_mut().ok_or("Missing owned script")?;
-        file.write_all(SCRIPT)
+        file.write_all(bytes)
             .and_then(|_| file.flush())
             .map_err(|e| e.to_string())?;
         // A read-only lease permits PowerShell's reader while denying write/delete sharing.
@@ -445,7 +452,7 @@ impl Script {
             .take(65537)
             .read_to_end(&mut actual)
             .map_err(|e| e.to_string())?;
-        if actual != SCRIPT {
+        if actual != bytes {
             return Err("Owned embedded fetcher changed before launch".into());
         }
         script.file = Some(lease);
@@ -566,6 +573,39 @@ mod tests {
             || {},
             &|| Ok(()),
         )
+    }
+    #[test]
+    fn startup_owner_caps_before_acceptance_and_retains_uncertain_exit() {
+        let start = Instant::now();
+        let mut time = start;
+        let f = facts(Some(0));
+        f.lock().unwrap().output = vec![b'x'; 1025];
+        let outcome = supervise_finite(Box::new(Fake(f.clone())), b"owned\n", SharedRegistry::new(), start + Duration::from_secs(28), Duration::ZERO, 1024,
+            || { let t = time; time += Duration::from_millis(10); t }, || {}, &|| Ok(()));
+        assert!(outcome.reason.is_some(), "oversized diagnostic was accepted");
+        assert!(outcome.raw_response.len() <= 1024);
+    }
+    #[test]
+    fn startup_owner_deadline_assignment_eof_and_retention_use_existing_owner() {
+        for fault in 0..5 {
+            let start = Instant::now();
+            let mut time = start;
+            let f = facts(if fault == 2 { Some(0) } else { None });
+            match fault { 0 => f.lock().unwrap().assign_failure = true, 1 => f.lock().unwrap().flood = true,
+                2 => f.lock().unwrap().no_eof = true, 3 => f.lock().unwrap().observe_failure = true, _ => () }
+            let registry = SharedRegistry::new();
+            let outcome = supervise_finite(Box::new(Fake(f.clone())), b"owned\n", registry.clone(), start + Duration::from_secs(28), Duration::ZERO, 1024,
+                || { let t = time; time += Duration::from_millis(10); t }, || {}, &|| Ok(()));
+            assert!(outcome.reason.is_some());
+            assert!(outcome.raw_response.len() <= 1024);
+            assert!(time.duration_since(start) <= Duration::from_millis(30100));
+            if fault == 0 { assert!(!f.lock().unwrap().calls.contains(&"init")); }
+            if fault != 2 {
+                assert!(outcome.cleanup_pending);
+                assert_eq!(registry.len(), 1);
+                assert_eq!(f.lock().unwrap().calls.iter().filter(|c| **c == "force").count(), 1);
+            }
+        }
     }
     #[test]
     fn controller_request_reads_only_one_bounded_frame() {
@@ -1474,17 +1514,26 @@ pub(crate) fn dispatch_controller() -> i32 {
 fn finish_controller(
     result: Result<DiscoveryObservation>,
     registry: &SharedRegistry,
-    mut publish: impl FnMut(serde_json::Value) -> Result<()>,
-    mut pause: impl FnMut(),
+    publish: impl FnMut(serde_json::Value) -> Result<()>,
+    pause: impl FnMut(),
 ) -> i32 {
-    let mut code = match &result {
+    let code = match &result {
         Ok(o) if o.status != DiscoveryStatus::Failed => 0,
         Ok(_) => 71,
         Err(_) => 77,
     };
+    finish_retained_controller(code, result.err(), registry, publish, pause)
+}
+fn finish_retained_controller(
+    mut code: i32,
+    reason: Option<String>,
+    registry: &SharedRegistry,
+    mut publish: impl FnMut(serde_json::Value) -> Result<()>,
+    mut pause: impl FnMut(),
+) -> i32 {
     let pending = registry.len();
     if pending == 0 {
-        if let Err(reason) = result {
+        if let Some(reason) = reason {
             let _ = publish(serde_json::json!({"schema_version":1,"status":"Failed",
                 "cleanup_pending":false,"reason":reason,"collection":"Disabled","qualification":"Unqualified"}));
         }
@@ -1494,7 +1543,7 @@ fn finish_controller(
         code = 71;
     }
     let receipt = serde_json::json!({"schema_version":1,"status":"Failed","cleanup_pending":true,
-        "pending_owners":pending,"reason":result.err(),"collection":"Disabled","qualification":"Unqualified"});
+        "pending_owners":pending,"reason":reason,"collection":"Disabled","qualification":"Unqualified"});
     if publish(receipt).is_err() {
         code = 77;
     }

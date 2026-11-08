@@ -540,7 +540,7 @@ def controller_workspace(path):
     return '\\\\?\\' + path
 
 
-def discover(root, observed):
+def controller_inputs(root, observed):
     directory = root / STAGE
     request_raw = read_bounded(directory/'approval-request.json',4096)
     if len(request_raw)>4096:
@@ -566,6 +566,11 @@ def discover(root, observed):
         env[name]=os.environ[name]
     env.update(GITHUB_WORKSPACE=controller_workspace(root),FOCUSFLOW_AUDIO_JOB_ID=str(request['job_id']))
     exe=safe_path(root,build_request['executable']['path'])
+    return directory, exe, env, request_raw
+
+
+def discover(root, observed):
+    directory, exe, env, request_raw = controller_inputs(root, observed)
     receipt=run_controller(directory,[str(exe),'--private-audio-controller'],env,request_raw)
     write_new(directory/'discovery-status.json',encoded({'schema_version':1,'controller':receipt,
         'qualification':'Unqualified','collection':'Disabled','route_ownership':'Root review required'}))
@@ -574,10 +579,21 @@ def discover(root, observed):
         raise ValueError('Native discovery unavailable or failed; inspect exact controller receipt')
 
 
+def startup(root, observed):
+    directory, exe, env, request_raw = controller_inputs(root, observed)
+    receipt = run_logged(directory, 'startup-controller', [str(exe), '--private-audio-startup-probe'],
+                         env, 90, 16384, request_raw, retain_owner=True)
+    write_new(directory/'startup-status.json', encoded({'schema_version':1, 'controller':receipt,
+        'diagnostic':'StartupOnly', 'qualification':'Unqualified', 'collection':'Disabled'}))
+    if receipt['failure'] or receipt['exit_code'] != 0 or not receipt['exact_exit']:
+        raise ValueError('Startup diagnostic incomplete; inspect exact projected controller receipt')
+
+
 def package(root, phase):
     directory=root/STAGE
     names=(BUILD_FILES+[name+suffix for name in COMMANDS for suffix in ['.log','.json']]
-           if phase=='build' else ['discovery-controller.log','discovery-controller.json','discovery-controller-failure.json','discovery-status.json'])
+           if phase=='build' else ['startup-controller.log','startup-controller.json','startup-controller-failure.json','startup-status.json']
+           if phase=='startup' else ['discovery-controller.log','discovery-controller.json','discovery-controller-failure.json','discovery-status.json'])
     if phase == 'build' and not (directory / 'build-artifacts.json').exists():
         names += VS_FAILURE_FILES
     available=[name for name in names if (directory/name).exists()]
@@ -588,7 +604,7 @@ def package(root, phase):
 
 def arguments(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('phase',choices=['build','discover','package-build','package-discovery'])
+    parser.add_argument('phase',choices=['build','discover','startup','package-build','package-discovery','package-startup'])
     return parser.parse_args(argv)
 
 
@@ -603,7 +619,7 @@ def main():
     if args.phase.startswith('package-'):
         package(root,args.phase.removeprefix('package-'))
     else:
-        (build if args.phase=='build' else discover)(root,observed)
+        {'build':build, 'discover':discover, 'startup':startup}[args.phase](root,observed)
 
 
 if __name__=='__main__':

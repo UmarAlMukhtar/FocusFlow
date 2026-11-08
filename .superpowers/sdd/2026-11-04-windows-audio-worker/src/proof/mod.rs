@@ -87,6 +87,11 @@ impl FixtureOps for PlatformFixture {
 /// Both private parent and renderer verify approval before any native resource gate.
 pub fn dispatch(mut args:impl Iterator<Item=std::ffi::OsString>)->i32 {
  args.next();let mode=args.next();
+ if mode.as_deref().and_then(|s|s.to_str())==Some("--private-audio-startup-probe") {
+  if args.next().is_some(){return 64;}
+  #[cfg(windows)] {return guard::helper::startup::dispatch();}
+  #[cfg(not(windows))] {return 69;}
+ }
  if mode.as_deref().and_then(|s|s.to_str())==Some("--private-audio-controller") {
   if args.next().is_some(){return 64;}return guard::helper::dispatch_controller();
  }

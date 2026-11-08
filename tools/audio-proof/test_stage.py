@@ -670,4 +670,55 @@ class StageTests(unittest.TestCase):
         with self.assertRaises(SystemExit):stage.arguments(['discover','--manifest','local.json'])
         with self.assertRaises(SystemExit):stage.arguments(['build','--repository','other'])
 
+class StartupRouteTests(unittest.TestCase):
+    def test_fixed_startup_phase_and_explicit_package_names(self):
+        self.assertEqual(stage.arguments(['startup']).phase, 'startup')
+        self.assertEqual(stage.arguments(['package-startup']).phase, 'package-startup')
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            directory = root / stage.STAGE
+            directory.mkdir()
+            for name in ['startup-controller.log', 'startup-controller.json', 'startup-status.json', 'private-body.txt', 'discovery-controller.log']:
+                (directory/name).write_bytes(b'fixed projected fixture')
+            stage.package(root, 'startup')
+            self.assertEqual(sorted(p.name for p in (directory/'startup-upload').iterdir()),
+                             ['startup-controller.json', 'startup-controller.log', 'startup-status.json'])
+
+    def test_startup_uses_only_fixed_projecting_controller_with_finite_budget(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            directory = root / stage.STAGE
+            directory.mkdir()
+            exe = root / 'private_audio_proof.exe'
+            env = {'SystemRoot': r'C:\Windows'}
+            calls = []
+            def logged(*args, **kwargs):
+                calls.append((args, kwargs))
+                return {'failure': None, 'exit_code': 0, 'exact_exit': True}
+            with patch.object(stage, 'controller_inputs', return_value=(directory, exe, env, b'{}\n')), \
+                 patch.object(stage, 'run_logged', logged), \
+                 patch.object(stage, 'discover', side_effect=AssertionError('discovery reached')):
+                stage.startup(root, {})
+            args, kwargs = calls[0]
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(args, (directory, 'startup-controller', [str(exe), '--private-audio-startup-probe'], env, 90, 16384, b'{}\n'))
+            self.assertEqual(kwargs, {'retain_owner': True})
+            status = json.loads((directory/'startup-status.json').read_text())
+            self.assertEqual(status['diagnostic'], 'StartupOnly')
+            self.assertEqual(status['collection'], 'Disabled')
+            self.assertEqual(status['qualification'], 'Unqualified')
+
+    def test_startup_denies_controller_failure_and_missing_exact_exit(self):
+        for receipt in [{'failure':'deadline','exit_code':0,'exact_exit':True},
+                        {'failure':None,'exit_code':71,'exact_exit':True},
+                        {'failure':None,'exit_code':0,'exact_exit':False}]:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                directory = root / stage.STAGE
+                directory.mkdir()
+                with patch.object(stage, 'controller_inputs', return_value=(directory, root/'private.exe', {}, b'{}\n')), \
+                     patch.object(stage, 'run_logged', return_value=receipt):
+                    with self.assertRaisesRegex(ValueError, 'Startup diagnostic incomplete'):
+                        stage.startup(root, {})
+
 if __name__=='__main__':unittest.main()

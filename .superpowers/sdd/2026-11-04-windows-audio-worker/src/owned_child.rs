@@ -337,6 +337,24 @@ pub(crate) mod windows_child {
                 command
             })
         }
+        pub(crate) fn spawn_startup(
+            _permit: &crate::proof::guard::approval::TransportPermit,
+            launch: crate::proof::guard::helper::startup::StartupLaunch,
+        ) -> Result<Box<dyn ChildOps + Send>> {
+            let (script, lifetime) = launch.into_parts();
+            // SAFETY: fresh Job namespace only; no apartment or audio operation.
+            let nonce = format!("{:?}", unsafe { windows::Win32::System::Com::CoCreateGuid().map_err(err)? });
+            Self::spawn_with(&nonce, true, Some(lifetime), |_, _| {
+                let mut command = Command::new(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe");
+                command.env_clear().env("SystemRoot", r"C:\Windows").env("WINDIR", r"C:\Windows")
+                    .arg("-NoProfile").arg("-NonInteractive");
+                match script.as_deref() {
+                    Some(path) => { command.arg("-File").arg(path); }
+                    None => { command.arg("-Command").arg(crate::proof::guard::helper::startup::COMMAND); }
+                }
+                command
+            })
+        }
         pub(crate) fn spawn_discovery(
             record: crate::proof::guard::helper::AdmissionRecord,
             nonce: &str,
