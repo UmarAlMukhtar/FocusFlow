@@ -38,6 +38,47 @@ fn pending(raw: &[u8]) -> Result<Option<String>> {
         Some(p.pending_commit)
     })
 }
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum FailurePhase {
+    Init,
+    Gate,
+    Ref,
+    Manifest,
+    Request,
+    Reply,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum FailureKind {
+    Initialization,
+    Input,
+    Transport,
+    Response,
+    Shape,
+    Output,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FailureDiagnostic {
+    schema_version: u32,
+    phase: FailurePhase,
+    failure: FailureKind,
+    http_status: serde_json::Value,
+}
+fn failure_diagnostic(raw: &[u8]) -> Option<FailureDiagnostic> {
+    if raw.len() > 1024 {
+        return None;
+    }
+    let diagnostic: FailureDiagnostic = serde_json::from_slice(raw).ok()?;
+    if diagnostic.schema_version != 1
+        || !(diagnostic.http_status.is_null()
+            || diagnostic.http_status.as_u64().is_some_and(|s| (100..=599).contains(&s)))
+    {
+        return None;
+    }
+    Some(diagnostic)
+}
 struct TransportOwner {
     child: RetainedChild<Bundle>,
     registry: SharedRegistry,
@@ -95,7 +136,25 @@ fn supervise(
     match outcome.exit_code {
         Some(0) if !outcome.raw_response.is_empty() => Ok(Reply::Complete(outcome.raw_response)),
         Some(75) => pending(&outcome.raw_response).map(Reply::Pending),
-        _ => Err("Transport TLS/fetch/shape/exit failure".into()),
+        _ => {
+            let diagnostic = if outcome.exit_code == Some(71) {
+                failure_diagnostic(&outcome.raw_response)
+            } else {
+                None
+            };
+            Err(format!(
+                "Transport TLS/fetch/shape/exit failure; outcome={}",
+                serde_json::json!({
+                    "helperExit": outcome.exit_code,
+                    "stdoutBytes": outcome.raw_response.len(),
+                    "eof": outcome.eof,
+                    "exactExit": outcome.exact_exit,
+                    // The owner's flag records an attempted force, not its success.
+                    "forceAttempted": outcome.forced,
+                    "diagnostic": diagnostic,
+                })
+            ))
+        }
     }
 }
 fn supervise_finite(
@@ -413,6 +472,7 @@ mod tests {
         assign_failure: bool,
         no_eof: bool,
         observe_failure: bool,
+        unknown_exit: bool,
     }
     struct Fake(Arc<Mutex<Facts>>);
     impl ChildOps for Fake {
@@ -453,6 +513,9 @@ mod tests {
             unreachable!()
         }
         fn observe_exit(&mut self) -> Result<Option<ObservedExit>> {
+            if self.0.lock().unwrap().unknown_exit {
+                return Ok(Some(ObservedExit { code: None }));
+            }
             if self.0.lock().unwrap().observe_failure {
                 return Err("exact handle observation error".into());
             }
@@ -484,6 +547,7 @@ mod tests {
             assign_failure: false,
             no_eof: false,
             observe_failure: false,
+            unknown_exit: false,
         }))
     }
     fn run(f: Arc<Mutex<Facts>>, r: SharedRegistry) -> Result<Reply> {
@@ -717,6 +781,116 @@ mod tests {
         let f = facts(Some(0));
         f.lock().unwrap().flood = true;
         assert!(run(f, SharedRegistry::new()).is_err());
+    }
+    // Rejecting these receipts must not grant or poll, and must never echo their bytes.
+    fn failure_facts(code: i32, raw: &[u8]) -> serde_json::Value {
+        let f = facts(Some(code));
+        f.lock().unwrap().output = raw.to_vec();
+        let error = run(f, SharedRegistry::new()).unwrap_err();
+        assert!(error.starts_with("Transport TLS/fetch/shape/exit failure; outcome="), "{error}");
+        serde_json::from_str(error.split_once("; outcome=").unwrap().1).unwrap()
+    }
+    #[test]
+    fn transport_failure_retains_actual_exit_and_output_facts_without_raw_bytes() {
+        for (code, raw) in [(1, b"private body".as_slice()), (71, b""), (0, b"")] {
+            let observed = failure_facts(code, raw);
+            assert_eq!(observed["helperExit"], code);
+            assert_eq!(observed["stdoutBytes"], raw.len());
+            assert_eq!(observed["eof"], true);
+            assert_eq!(observed["exactExit"], true);
+            assert_eq!(observed["forceAttempted"], false);
+            assert!(observed["diagnostic"].is_null());
+            assert!(!observed.to_string().contains("private body"));
+        }
+    }
+    #[test]
+    fn transport_failure_keeps_unknown_exit_null_and_cannot_bypass_eof() {
+        let f = facts(None);
+        f.lock().unwrap().unknown_exit = true;
+        let error = run(f, SharedRegistry::new()).unwrap_err();
+        let observed: serde_json::Value = serde_json::from_str(error.split_once("; outcome=").unwrap().1).unwrap();
+        assert!(observed["helperExit"].is_null());
+        assert_eq!(observed["exactExit"], true);
+        let f = facts(Some(71));
+        {
+            let mut f = f.lock().unwrap();
+            f.output = br#"{"schemaVersion":1,"phase":"ref","failure":"transport","httpStatus":404}"#.to_vec();
+            f.no_eof = true;
+        }
+        let error = run(f, SharedRegistry::new()).unwrap_err();
+        assert!(error.contains("deadline"));
+        assert!(!error.contains("outcome="));
+    }
+    #[test]
+    fn transport_failure_diagnostic_only_accepts_bounded_strict_failure71_receipt() {
+        let valid = br#"{"schemaVersion":1,"phase":"ref","failure":"transport","httpStatus":404}"#;
+        let observed = failure_facts(71, valid);
+        assert_eq!(observed["diagnostic"], serde_json::json!({"schemaVersion":1,"phase":"ref","failure":"transport","httpStatus":404}));
+        assert!(failure_facts(1, valid)["diagnostic"].is_null());
+        for phase in ["init", "gate", "ref", "manifest", "request", "reply"] {
+            for failure in ["initialization", "input", "transport", "response", "shape", "output"] {
+                for status in ["null", "100", "599"] {
+                    let raw = format!(r#"{{"schemaVersion":1,"phase":"{phase}","failure":"{failure}","httpStatus":{status}}}"#);
+                    assert_eq!(failure_facts(71, raw.as_bytes())["diagnostic"]["phase"], phase);
+                }
+            }
+        }
+        for raw in [
+            b"".to_vec(), b"not JSON".to_vec(), vec![b' '; 1025],
+            br#"{"schemaVersion":1,"phase":"ref","failure":"transport","httpStatus":null,"errorMessage":"private body"}"#.to_vec(),
+            br#"{"schemaVersion":1,"phase":"ref","phase":"gate","failure":"transport","httpStatus":null}"#.to_vec(),
+            br#"{"schemaVersion":1,"phase":"other","failure":"transport","httpStatus":null}"#.to_vec(),
+            br#"{"schemaVersion":1,"phase":"ref","failure":"other","httpStatus":null}"#.to_vec(),
+            br#"{"schemaVersion":2,"phase":"ref","failure":"transport","httpStatus":null}"#.to_vec(),
+            br#"{"schemaVersion":1,"phase":"ref","failure":"transport"}"#.to_vec(),
+            br#"{"schemaVersion":1,"phase":"ref","failure":"transport","httpStatus":99}"#.to_vec(),
+            br#"{"schemaVersion":1,"phase":"ref","failure":"transport","httpStatus":600}"#.to_vec(),
+            br#"{"schemaVersion":1,"phase":"ref","failure":"transport","httpStatus":"404"}"#.to_vec(),
+            br#"{"schemaVersion":1,"phase":"ref","failure":"transport","httpStatus":404.0}"#.to_vec(),
+            br#"{"schemaVersion":1,"phase":"ref","failure":"transport","httpStatus":true}"#.to_vec(),
+            br#"{"schemaVersion":1,"phase":"ref","failure":"transport","httpStatus":null}{}"#.to_vec(),
+        ] {
+            let observed = failure_facts(71, &raw);
+            assert!(observed["diagnostic"].is_null(), "{observed}");
+            assert!(!observed.to_string().contains("private body"));
+        }
+        let mut exact_cap = valid.to_vec();
+        exact_cap.resize(1024, b' ');
+        assert_eq!(failure_facts(71, &exact_cap)["diagnostic"]["httpStatus"], 404);
+        exact_cap.push(b' ');
+        assert!(failure_facts(71, &exact_cap)["diagnostic"].is_null());
+    }
+    #[test]
+    fn transport_failure_script_source_fixture_covers_init_and_fixed_diagnostic_only() {
+        // Static fixture evidence only; this does not execute or parse PowerShell.
+        let script = std::str::from_utf8(SCRIPT).unwrap();
+        assert!(script.find("try {").unwrap() < script.find("[Console]::InputEncoding").unwrap());
+        for phase in ["init", "gate", "ref", "manifest", "request", "reply"] {
+            assert!(script.contains(&format!("$script:phase = '{phase}'")));
+        }
+        assert!(script.contains("$depth -lt 8"));
+        assert!(script.contains("schemaVersion=1; phase=$script:phase; failure=$script:failure; httpStatus=$script:httpStatus"));
+        assert!(script.contains("GetByteCount($json) -le 1024"));
+        assert!(script.contains("if ($pending -and $_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) { Pending }"));
+    }
+    #[test]
+    fn transport_failure_diagnostic_does_not_change_pending_protocol() {
+        for raw in [
+            br#"{"schema_version":1,"pending_commit":""}"#.as_slice(),
+            br#"{"schema_version":1,"pending_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+        ] {
+            let f = facts(Some(75)); f.lock().unwrap().output = raw.to_vec();
+            assert!(matches!(run(f, SharedRegistry::new()).unwrap(), Reply::Pending(_)));
+            assert!(failure_facts(71, raw)["diagnostic"].is_null());
+        }
+        for raw in [
+            br#"{"schemaVersion":1,"phase":"ref","failure":"transport","httpStatus":404}"#.as_slice(),
+            br#"{"schema_version":1,"pending_commit":"","extra":1}"#,
+            br#"{"schema_version":1,"pending_commit":"","pending_commit":""}"#,
+        ] {
+            let f = facts(Some(75)); f.lock().unwrap().output = raw.to_vec();
+            assert!(run(f, SharedRegistry::new()).is_err());
+        }
     }
     #[test]
     fn transport_timeout_retains_exact_owner() {
