@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "nativeGo": false,
+  "authorization": null,
+  "approvalDelivery": "Compiled APPROVED is None. No JSON/CLI/environment input can construct ApprovedProof. Task 6 must design and independently review an immutable trust root and actual approval delivery after hashing the built executable; embedding its own expected hash in itself is circular.",
+  "exactHostedTuple": {
+    "GITHUB_REPOSITORY": null,
+    "GITHUB_REF": null,
+    "GITHUB_WORKFLOW_REF": null,
+    "GITHUB_WORKFLOW_SHA": null,
+    "GITHUB_SHA": null,
+    "GITHUB_RUN_ID": null,
+    "GITHUB_RUN_ATTEMPT": null
+  },
+  "sourceAndExecutablePins": null,
+  "ownedRenderEndpointId": null,
+  "ownedRouteExclusivityEvidence": null,
+  "microphone": "Unqualified; no generated capture endpoint approved",
+  "fixture": {
+    "path": "FIXTURE-SOURCE-MAP.json",
+    "sha256": "2dd318266c7d3cb9d50128a24259446adbceef8a547a4b374fcb21c0ea0fc453",
+    "bytes": 1559
+  },
+  "currentScope": "Source implementation, portable injected guard/generator/owned operations tests, Windows all-target metadata only. No Windows binary/CNG/COM/Job/endpoint/audio executed.",
+  "guardOrder": [
+    "Positive immutable hosted tuple (pure)",
+    "Read-only actual current_exe/source/fixture file fingerprints; bounded 64 KiB streaming BCrypt SHA-256, final permit only after identity matches",
+    "Exact independently owned stereo render route probe, no default/enumeration/provisioning",
+    "Real AudioSession capture worker then separately Job-owned controlled renderer on identical ID"
+  ],
+  "collectionResult": {
+    "clean": "Collected",
+    "qualificationPending": true,
+    "Passed": "Unreachable until full asset validation and independent signal analysis are implemented and reviewed",
+    "Unavailable": "No suitable explicitly approved owned exact route",
+    "Failed": "Actual gate/protocol/native/cleanup failure"
+  },
+  "candidatePrivateFaultSeams": [
+    {
+      "fault": "Start hang/failure",
+      "actualOperation": "proof/render.rs NativeOps::start -> Client::start -> IAudioClient::Start; capture native.rs NativeOps::start -> Producer::start",
+      "constraint": "Future private-only wrapper after ProofPermit; normal user dispatch unchanged; real owned child must be contained and exact exit observed."
+    },
+    {
+      "fault": "Stop/COM Release hang",
+      "actualOperation": "RenderOps::stop_and_drop takes Client, calls Stop once, drops render service/client/device/enumerator/apartment; accepted capture NativeOps::stop_and_drop",
+      "constraint": "Block the actual operation before return, never fake CaptureReleased. Existing Owner 3s/2s force policy remains."
+    },
+    {
+      "fault": "Buffer Release hang/failure",
+      "actualOperation": "proof/render.rs Client::next IAudioRenderClient::ReleaseBuffer; native.rs Producer::packet IAudioCaptureClient::ReleaseBuffer",
+      "constraint": "Wrap actual held buffer release in private owned child; no return/ack while uncertain native ownership remains."
+    },
+    {
+      "fault": "Writer write/finalize failure/hang",
+      "actualOperation": "Accepted run_worker -> actual writer/PartialWav and WorkerOps::finalize_ops/FinalizeOps",
+      "constraint": "Use existing actual writer seam, not alternate writer; capture release must precede 120s storage policy. Future private build wrapper only."
+    },
+    {
+      "fault": "Parent EOF/control closure",
+      "actualOperation": "Accepted WindowsChild::close_control drops original child.stdin; WorkerPermit::control peeks exact duplicate pipe",
+      "constraint": "Close actual owned pipe, no synthetic successful-exit substitution; observe exact owned process or retained pending."
+    }
+  ],
+  "faultAuthorization": "No native fault hooks are enabled. Portable RenderOps/ChildOps injections exercise shared real sequence. Installing native private wrappers and exact pinned case selection is later Task 6 source/review work, never an environment override.",
+  "remainingNativeGates": [
+    "Fresh SPEC/QUALITY and FFI review",
+    "Independent immutable approval delivery and exact actual executable/source/fixture pins",
+    "Already-owned isolated route evidence",
+    "Full fixed-path WAV/evidence validation and independent deterministic signal analysis",
+    "Exact clean native process/Job/COM exits, real fault containment and uncertainty evidence",
+    "Independent microphone generated-route approval or retain Unqualified"
+  ]
+}

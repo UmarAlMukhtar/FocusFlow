@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "authorizing": false,
+  "fixtureId": "owned-stereo-xorshift-bursts-v1",
+  "durationSeconds": 12,
+  "seed": 1,
+  "channels": 2,
+  "blockFramesMax": 1024,
+  "blocksPerNativeTurnMax": 8,
+  "burstMilliseconds": [
+    [
+      300,
+      757
+    ],
+    [
+      1100,
+      1831
+    ],
+    [
+      2345,
+      3602
+    ],
+    [
+      4371,
+      5124
+    ],
+    [
+      6237,
+      8116
+    ],
+    [
+      9031,
+      10893
+    ]
+  ],
+  "integerMath": "x = seed XOR frame.wrapping_mul(0x9e3779b9) XOR channel.wrapping_mul(0x85ebca6b); xorshift32 (13,17,5); sample = trunc(((x >> 16) - 32768)/4). Outside bursts sample is exactly zero.",
+  "encoding": "Scale signed 16-bit-domain integer into supported mix PCM16/24/32 or Float32; no channel/rate conversion.",
+  "literalReference": {
+    "rate": 8000,
+    "frames": [
+      2400,
+      2401,
+      2402
+    ],
+    "interleavedSamples": [
+      -514,
+      -6173,
+      -4369,
+      -2832,
+      7196,
+      1539
+    ],
+    "activeBurstFrames": [
+      3656,
+      5848,
+      10056,
+      6024,
+      15032,
+      14896
+    ]
+  },
+  "inputs": [
+    {
+      "path": "src/proof/render.rs",
+      "sha256": "e2d42692e174b35cba8e8a2bcda057128a1f18d771d21a6e16058e07100f15c7",
+      "bytes": 15861
+    },
+    {
+      "path": "tests/proof_generator.rs",
+      "sha256": "f6c4dc1a48e46544a84a59125a4605c248dd19fa83591ba0899aedb8f21efe86",
+      "bytes": 2507
+    }
+  ],
+  "claims": "Generator math only. Not native playback/capture, sample fidelity, channel order or physical/A-V timing proof."
+}
