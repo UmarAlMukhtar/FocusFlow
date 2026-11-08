@@ -3,7 +3,7 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import shutil
 import subprocess
@@ -29,6 +29,12 @@ BUILD_FILES = ['build-request.json', 'approval-request.json', 'source-input-map.
                'private_audio_proof.exe', 'build-artifacts.json']
 COMMANDS = ['rustup-install', 'rustc-version', 'cargo-version', 'sysroot', 'vswhere',
             'cargo-build', 'git-head']
+VS_COMPARISONS = [('vswhere-programdata', ('ProgramData',)),
+                  ('vswhere-allusersprofile', ('ALLUSERSPROFILE',)),
+                  ('vswhere-commondata', ('ProgramData', 'ALLUSERSPROFILE')),
+                  ('vswhere-recheck', ())]
+VS_FAILURE_FILES = [label + suffix for label, _ in VS_COMPARISONS
+                    for suffix in ['.log', '.json']] + ['vswhere-summary.json']
 
 
 def encoded(value):
@@ -360,6 +366,80 @@ def safe_environment():
     return {name: os.environ[name] for name in names if name in os.environ}
 
 
+def windows_directory_status(text):
+    if not text or not text.strip():
+        return 'empty'
+    lines = text.splitlines()
+    if len(lines) != 1:
+        return 'multiple-lines'
+    value = lines[0].strip()
+    if (len(value) > 32767 or not re.match(r'^[A-Za-z]:[\\/]', value)
+            or re.search(r'[\x00-\x1f<>:"|?*]', value[2:])
+            or any(part in ('.', '..') for part in re.split(r'[\\/]', value[3:]))
+            or not PureWindowsPath(value).is_absolute()):
+        return 'not-local-absolute'
+    path = Path(value)
+    try:
+        if any(p.is_symlink() or (hasattr(p, 'is_junction') and p.is_junction())
+               for p in [path, *path.parents]):
+            return 'linked-directory'
+        return 'valid' if path.is_dir() else 'missing-directory'
+    except (OSError, ValueError):
+        return 'unavailable-directory'
+
+
+def select_visual_studio(directory, vswhere, env):
+    argv = [str(vswhere), '-latest', '-products', '*', '-requires',
+            'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-property', 'installationPath']
+    tool = identity(vswhere)
+
+    def query(label, additions):
+        if identity(vswhere) != tool:
+            raise ValueError('Visual Studio discovery tool identity changed')
+        receipt = run_logged(directory, label, argv[:], dict(env, **additions), 30, 65536)
+        if identity(vswhere) != tool or receipt['tool'] != tool or receipt['argv'] != argv:
+            raise ValueError('Visual Studio discovery tool identity or argv changed')
+        if receipt['failure'] or receipt['exit_code'] != 0 or not receipt['exact_exit']:
+            raise ValueError('Command incomplete: ' + label)
+        raw = read_bounded(directory / (label + '.log'), 65536)
+        try:
+            text = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            return '', 'invalid-encoding'
+        return text, windows_directory_status(text)
+
+    selected, status = query('vswhere', {})
+    if status == 'valid':
+        return Path(selected.strip())
+    summary = {'schema_version': 1, 'status': 'aborted', 'candidates': {},
+               'runs': {'vswhere': {'selection': status}}}
+    candidates = {}
+    try:
+        for name in ['ProgramData', 'ALLUSERSPROFILE']:
+            value = os.environ.get(name)
+            validation = windows_directory_status(value) if value is not None else 'missing'
+            if validation == 'valid' and value != value.strip():
+                validation = 'nonliteral-directory'
+            summary['candidates'][name] = {'present': value is not None, 'validation': validation}
+            if validation == 'valid':
+                candidates[name] = value
+        for label, names in VS_COMPARISONS:
+            if any(name not in candidates for name in names):
+                summary['runs'][label] = {'selection': 'skipped'}
+                continue
+            summary['runs'][label] = {'selection': 'not-completed'}
+            _, status = query(label, {name: candidates[name] for name in names})
+            summary['runs'][label] = {'selection': status}
+        summary['status'] = 'diagnostic-only'
+    finally:
+        raw = encoded(summary)
+        if len(raw) > 8192:
+            raise ValueError('Visual Studio selection diagnostic summary exceeds cap')
+        write_new(directory / 'vswhere-summary.json', raw)
+    raise ValueError('Visual Studio selection diagnostic: no usable baseline installation; '
+                     'inspect vswhere.log, vswhere.json and vswhere-summary.json; build stopped')
+
+
 def build(root, observed):
     directory = root / STAGE
     directory.mkdir()
@@ -378,8 +458,7 @@ def build(root, observed):
     checked(directory, 'rustc-version', [str(rustc), '-vV'], env, 30)
     checked(directory, 'cargo-version', [str(cargo), '--version'], env, 30)
     vswhere = Path('C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe')
-    vs = Path(checked(directory, 'vswhere', [str(vswhere), '-latest', '-products', '*', '-requires',
-                     'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-property', 'installationPath'], env, 30))
+    vs = select_visual_studio(directory, vswhere, env)
     versions = sorted((vs / 'VC/Tools/MSVC').iterdir(), key=lambda p: tuple(map(int,p.name.split('.'))))
     msvc = versions[-1]
     linker = msvc / 'bin/Hostx64/x64/link.exe'
@@ -486,6 +565,8 @@ def package(root, phase):
     directory=root/STAGE
     names=(BUILD_FILES+[name+suffix for name in COMMANDS for suffix in ['.log','.json']]
            if phase=='build' else ['discovery-controller.log','discovery-controller.json','discovery-controller-failure.json','discovery-status.json'])
+    if phase == 'build' and not (directory / 'build-artifacts.json').exists():
+        names += VS_FAILURE_FILES
     available=[name for name in names if (directory/name).exists()]
     if not available:
         raise ValueError('No bounded stage receipts available')

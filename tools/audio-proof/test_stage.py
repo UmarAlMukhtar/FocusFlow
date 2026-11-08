@@ -45,6 +45,204 @@ class MemoryHTTPSocket:
         self.timeouts.append(seconds)
 
 
+class VisualStudioTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.directory = self.root / stage.STAGE
+        self.directory.mkdir()
+        self.tool = self.root / 'vswhere.exe'
+        self.tool.write_bytes(b'fixture tool, never executed')
+        self.calls = []
+        self.outputs = {}
+        self.bad_receipt = {}
+        self.change_tool = None
+        self.ambient = {'PATH': 'safe-path', 'ProgramData': 'C:/ProgramData',
+                        'ALLUSERSPROFILE': 'C:/ProgramData', 'GH_TOKEN': 'do-not-forward'}
+        self.env = {'PATH': 'safe-path', 'CARGO_BUILD_JOBS': '2'}
+        for patcher in [patch.object(stage.os, 'environ', self.ambient),
+                        patch.object(stage, 'run_logged', self.fake_query),
+                        patch.object(Path, 'is_dir', lambda p: 'missing' not in str(p)),
+                        patch.object(Path, 'is_symlink', lambda p: p.name == 'linked')]:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def fake_query(self, directory, label, argv, env, seconds, cap=8*1024*1024, stdin=None):
+        self.calls.append((label, argv[:], env, seconds, cap, stdin, directory))
+        stage.write_new(directory / (label + '.log'), self.outputs.get(label, b''))
+        if label == self.change_tool:
+            self.tool.write_bytes(b'changed tool')
+        receipt = {'argv': argv[:], 'tool': stage.identity(Path(argv[0])),
+                   'configuration': {}, 'exit_code': 0, 'exact_exit': True,
+                   'failure': None, 'elapsed_seconds': 0.01,
+                   'output': stage.identity(directory / (label + '.log'), directory)}
+        receipt.update(self.bad_receipt.get(label, {}))
+        stage.write_new(directory / (label + '.json'), stage.encoded(receipt))
+        return receipt
+
+    def select(self):
+        return stage.select_visual_studio(self.directory, self.tool, self.env)
+
+    def summary(self):
+        return json.loads((self.directory / 'vswhere-summary.json').read_text())
+
+    def test_build_rejects_empty_selection_before_msvc_cargo_or_admission(self):
+        self.outputs['vswhere-programdata'] = b'C:/VariantVS\n'
+        self.directory.rmdir()  # build owns creation
+        commands = []
+        real_identity = stage.identity
+        def identity(path, root=None):
+            if path.name == 'vswhere.exe':
+                return dict(real_identity(self.tool), path=str(path))
+            return real_identity(path, root)
+        def checked(directory, label, argv, env, seconds=600):
+            commands.append(label)
+            if label == 'git-head': return 'source-sha'
+            if label == 'sysroot': return 'C:/rust'
+            return ''
+        with patch.object(stage, 'active_job', return_value=1), \
+             patch.object(stage, 'source_inputs', return_value=[]), \
+             patch.object(stage, 'checked', checked), \
+             patch.object(stage, 'identity', identity):
+            with self.assertRaises(Exception) as raised:
+                stage.build(self.root, {'source_sha': 'source-sha'})
+            self.assertIsInstance(raised.exception, ValueError)
+            self.assertRegex(str(raised.exception), 'Visual Studio selection diagnostic')
+        self.assertNotIn('cargo-build', commands)
+        self.assertEqual(len(self.calls), 5)
+        for name in ['build-request.json', 'approval-request.json', 'private_audio_proof.exe']:
+            self.assertFalse((self.directory / name).exists())
+
+    def test_selection_rejects_invalid_paths_before_msvc_use(self):
+        invalid = ['', '\r\n', 'C:/VS\nC:/Other', 'C:/VS\n\n', 'relative/VS',
+                   'C:VS', '/VS', r'\\server\VS', r'\\?\C:\VS',
+                   'C:/missing', 'C:/linked/VS', 'C:/VS/../Other', 'C:/VS\x00']
+        for value in invalid:
+            with self.subTest(value=value):
+                self.assertNotEqual(stage.windows_directory_status(value), 'valid')
+        self.assertEqual(stage.windows_directory_status('C:/VS\r\n'), 'valid')
+        self.assertEqual(stage.windows_directory_status(r'C:\Program Files\VS'), 'valid')
+
+    def test_valid_baseline_returns_original_selection_without_comparisons(self):
+        self.outputs['vswhere'] = b'C:/VS\r\n'
+        self.assertEqual(self.select(), Path('C:/VS'))
+        self.assertEqual([c[0] for c in self.calls], ['vswhere'])
+        self.assertFalse((self.directory / 'vswhere-summary.json').exists())
+        self.assertEqual(self.env, {'PATH': 'safe-path', 'CARGO_BUILD_JOBS': '2'})
+
+    def test_invalid_baseline_runs_only_fixed_isolated_bounded_comparisons(self):
+        self.outputs['vswhere-programdata'] = b'C:/VariantVS\n'
+        self.outputs['vswhere-recheck'] = b'C:/VS\n'
+        with self.assertRaisesRegex(ValueError, 'Visual Studio selection diagnostic'):
+            self.select()
+        labels = ['vswhere', 'vswhere-programdata', 'vswhere-allusersprofile',
+                  'vswhere-commondata', 'vswhere-recheck']
+        additions = [{}, {'ProgramData': 'C:/ProgramData'},
+                     {'ALLUSERSPROFILE': 'C:/ProgramData'},
+                     {'ProgramData': 'C:/ProgramData', 'ALLUSERSPROFILE': 'C:/ProgramData'}, {}]
+        self.assertEqual([c[0] for c in self.calls], labels)
+        self.assertEqual(len({id(c[2]) for c in self.calls}), 5)
+        for call, extra in zip(self.calls, additions):
+            label, argv, env, seconds, cap, stdin, directory = call
+            self.assertEqual(argv, [str(self.tool), '-latest', '-products', '*', '-requires',
+                                   'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
+                                   '-property', 'installationPath'])
+            self.assertEqual(env, dict(self.env, **extra))
+            self.assertIsNot(env, self.env)
+            self.assertEqual((seconds, cap, stdin, directory), (30, 65536, None, self.directory))
+            receipt = json.loads((directory / (label + '.json')).read_text())
+            self.assertEqual(receipt['tool'], stage.identity(self.tool))
+            self.assertTrue(receipt['exact_exit'])
+        summary = self.summary()
+        self.assertEqual(summary['runs']['vswhere']['selection'], 'empty')
+        self.assertEqual(summary['runs']['vswhere-programdata']['selection'], 'valid')
+        self.assertEqual(summary['runs']['vswhere-recheck']['selection'], 'valid')
+        self.assertNotIn('do-not-forward', json.dumps(summary))
+        self.assertLess((self.directory / 'vswhere-summary.json').stat().st_size, 8192)
+        self.assertEqual(self.env, {'PATH': 'safe-path', 'CARGO_BUILD_JOBS': '2'})
+
+    def test_unavailable_candidates_skip_only_dependent_comparisons(self):
+        for bad in [None, '', 'relative', r'\\server\share', 'C:/missing', 'C:/linked',
+                    ' C:/ProgramData', 'C:/ProgramData\n']:
+            with self.subTest(candidate=bad):
+                # Each attempt gets its own create-once output directory.
+                self.directory = self.root / ('case-' + str(len(list(self.root.iterdir()))))
+                self.directory.mkdir()
+                self.calls.clear()
+                if bad is None: self.ambient.pop('ProgramData', None)
+                else: self.ambient['ProgramData'] = bad
+                with self.assertRaisesRegex(ValueError, 'Visual Studio selection diagnostic'):
+                    self.select()
+                self.assertEqual([c[0] for c in self.calls],
+                                 ['vswhere', 'vswhere-allusersprofile', 'vswhere-recheck'])
+                summary = self.summary()
+                self.assertEqual(summary['candidates']['ProgramData']['present'], bad is not None)
+                self.assertNotEqual(summary['candidates']['ProgramData']['validation'], 'valid')
+                self.assertEqual(summary['runs']['vswhere-commondata']['selection'], 'skipped')
+
+    def test_incomplete_commands_abort_and_preserve_partial_receipts(self):
+        for bad in [{'failure': 'deadline'}, {'failure': 'output-cap'},
+                    {'failure': 'pipe-eof-pending'}, {'exact_exit': False}, {'exit_code': 7}]:
+            for label in ['vswhere', 'vswhere-allusersprofile']:
+                with self.subTest(receipt=bad, label=label):
+                    self.directory = self.root / ('case-' + str(len(list(self.root.iterdir()))))
+                    self.directory.mkdir(); self.calls.clear()
+                    self.bad_receipt = {label: bad}
+                    with self.assertRaisesRegex(ValueError, 'Command incomplete'):
+                        self.select()
+                    self.assertEqual(self.calls[-1][0], label)
+                    self.assertEqual(len(self.calls), 1 if label == 'vswhere' else 3)
+                    self.assertEqual(json.loads((self.directory / (label + '.json')).read_text())[next(iter(bad))], next(iter(bad.values())))
+                    if label != 'vswhere':
+                        self.assertEqual(self.summary()['status'], 'aborted')
+
+    def test_tool_changes_abort_comparisons_without_selecting_output(self):
+        for label in ['vswhere', 'vswhere-programdata']:
+            with self.subTest(label=label):
+                self.directory = self.root / ('case-' + str(len(list(self.root.iterdir()))))
+                self.directory.mkdir(); self.calls.clear()
+                self.tool.write_bytes(b'fixture tool, never executed')
+                self.change_tool = label
+                with self.assertRaisesRegex(ValueError, 'tool identity'):
+                    self.select()
+                self.assertEqual(self.calls[-1][0], label)
+                if label != 'vswhere':
+                    self.assertEqual(self.summary()['status'], 'aborted')
+
+    def test_mismatched_query_receipt_identity_and_argv_abort(self):
+        for bad in [{'tool': None}, {'argv': ['other-tool']}]:
+            with self.subTest(receipt=bad):
+                self.directory = self.root / ('case-' + str(len(list(self.root.iterdir()))))
+                self.directory.mkdir(); self.calls.clear()
+                self.bad_receipt = {'vswhere-programdata': bad}
+                with self.assertRaisesRegex(ValueError, 'tool identity or argv'):
+                    self.select()
+                self.assertEqual(len(self.calls), 2)
+                self.assertEqual(self.summary()['status'], 'aborted')
+
+    def test_failure_package_has_finite_optional_diagnostics_and_preserves_originals(self):
+        with self.assertRaises(ValueError): self.select()
+        originals = {p.name: p.read_bytes() for p in self.directory.iterdir()}
+        (self.directory / 'vswhere-secret.log').write_text('not allowlisted')
+        (self.directory / 'secret.env').write_text('not allowlisted')
+        stage.package(self.root, 'build')
+        upload = self.directory / 'build-upload'
+        expected = {label + suffix for label in ['vswhere', 'vswhere-programdata',
+                    'vswhere-allusersprofile', 'vswhere-commondata', 'vswhere-recheck']
+                    for suffix in ['.log', '.json']} | {'vswhere-summary.json'}
+        self.assertEqual({p.name for p in upload.iterdir()}, expected)
+        for name, raw in originals.items():
+            self.assertEqual((upload / name).read_bytes(), raw)
+            self.assertEqual((self.directory / name).read_bytes(), raw)
+        (self.directory / 'build-artifacts.json').write_text('{}')
+        for p in upload.iterdir(): p.unlink()
+        upload.rmdir()
+        stage.package(self.root, 'build')
+        self.assertEqual({p.name for p in upload.iterdir()},
+                         {'vswhere.log', 'vswhere.json', 'build-artifacts.json'})
+
+
 class StageTests(unittest.TestCase):
     JOB_BODY = b'{"total_count":1,"jobs":[{"id":45,"name":"native-discovery","status":"in_progress","run_id":10,"run_attempt":1,"runner_name":"Hosted Agent"}]}'
 
