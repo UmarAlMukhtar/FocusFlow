@@ -1,38 +1,8 @@
 //! Fixed no-network startup diagnostic; never an approval or discovery route.
 use super::*;
-use serde::{Deserialize, Serialize};
-pub(crate) const COMMAND: &str = include_str!("../../../../../tools/audio-proof/startup-probe.ps1");
+use serde::Serialize;
 const SENTINEL: &[u8] = include_bytes!("../../../../../tools/audio-proof/startup-sentinel.ps1");
 const MARKER: &[u8] = br#"{"schemaVersion":1,"sentinel":true}"#;
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-enum Policy { Restricted, AllSigned, RemoteSigned, Unrestricted, Bypass, Undefined,
-    #[serde(rename = "other")] Other, #[serde(rename = "unavailable")] Unavailable }
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-enum Phase { Encoding, Gate, Version, Read, Parser, Policy, Fromjson, Tojson, Complete }
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Probe {
-    schema_version: u8, entered: bool, ps_major: u8, ps_minor: u8, policy: Policy,
-    data_read: bool, parser_complete: bool, parse_errors: u8, initialization: bool, phase: Phase,
-}
-fn parse(raw: &[u8]) -> Option<Probe> {
-    if raw.len() > 1024 { return None; }
-    let p: Probe = serde_json::from_slice(raw).ok()?;
-    if p.schema_version != 1 || !p.entered || p.ps_major > 16 || p.ps_minor > 16 || p.parse_errors > 64
-        || (p.parser_complete && !p.data_read) || (!p.parser_complete && p.parse_errors != 0)
-        || (p.initialization != (p.phase == Phase::Complete))
-        || (p.initialization && (!p.data_read || !p.parser_complete)) {
-        return None;
-    }
-    Some(p)
-}
-impl Probe {
-    fn clean(&self) -> bool {
-        self.phase == Phase::Complete && self.ps_major == 5 && self.ps_minor == 1
-            && self.parse_errors == 0 && matches!(self.policy, Policy::RemoteSigned | Policy::Unrestricted | Policy::Bypass)
-    }
-}
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 enum PathForm { Drive, DeviceDrive, DeviceUnc, Other }
@@ -63,66 +33,93 @@ struct ChildFacts { helper_exit: Option<i32>, stdout_bytes: usize, eof: bool, ex
 impl From<&DiscoveryObservation> for ChildFacts {
     fn from(o: &DiscoveryObservation) -> Self { Self { helper_exit: o.exit_code, stdout_bytes: o.raw_response.len(), eof: o.eof, exact_exit: o.exact_exit, force_attempted: o.forced, cleanup_pending: o.cleanup_pending } }
 }
-fn finished(o: &DiscoveryObservation) -> bool { o.exit_code.is_some() && o.reason.is_none() && o.eof && o.exact_exit && !o.forced && !o.cleanup_pending }
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum ProbeStatus { Observed, OwnerFailure, InvalidReceipt }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CommandObservation { status: ProbeStatus, facts: ChildFacts, receipt: Option<Probe> }
-fn project(o: DiscoveryObservation) -> CommandObservation {
-    let facts = ChildFacts::from(&o);
-    let receipt = if finished(&o) && o.exit_code == Some(0) { parse(&o.raw_response) } else { None };
-    let status = if !finished(&o) { ProbeStatus::OwnerFailure } else if receipt.is_none() { ProbeStatus::InvalidReceipt } else { ProbeStatus::Observed };
-    CommandObservation { status, facts, receipt }
+struct SentinelObservation {
+    facts: ChildFacts,
+    marker: bool,
 }
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SentinelObservation { facts: ChildFacts, marker: bool }
 impl SentinelObservation {
-    fn new(o: &DiscoveryObservation) -> Self { Self { facts: ChildFacts::from(o), marker: finished(o) && o.exit_code == Some(0) && o.raw_response == MARKER } }
+    fn project(o: DiscoveryObservation) -> (Self, bool) {
+        let finished = o.exit_code.is_some()
+            && o.reason.is_none()
+            && o.eof
+            && o.exact_exit
+            && !o.forced
+            && !o.cleanup_pending;
+        let marker = finished && o.exit_code == Some(0) && o.raw_response == MARKER;
+        // A normal nonzero exit with empty stdout is useful even if PowerShell rejected -File.
+        let observed = marker || (finished && o.exit_code != Some(0) && o.raw_response.is_empty());
+        (Self { facts: ChildFacts::from(&o), marker }, observed)
+    }
 }
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-enum AbStatus { NotEligible, Unsupported, Incomplete, Observed }
+enum AbStatus { Unsupported, Incomplete, Observed }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Report { schema_version: u8, diagnostic: &'static str, path_form: PathForm, command: CommandObservation, ab_status: AbStatus, canonical: Option<SentinelObservation>, dos: Option<SentinelObservation>, collection: &'static str, qualification: &'static str }
+struct Report {
+    schema_version: u8,
+    diagnostic: &'static str,
+    path_form: PathForm,
+    ab_status: AbStatus,
+    canonical: Option<SentinelObservation>,
+    dos: Option<SentinelObservation>,
+    collection: &'static str,
+    qualification: &'static str,
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Mode { Command, Canonical, Dos }
-fn sequence(form: PathForm, mut run: impl FnMut(Mode) -> Option<DiscoveryObservation>) -> Result<Report> {
-    let command = project(run(Mode::Command).ok_or("Startup preparation unavailable")?);
-    let eligible = command.receipt.as_ref().is_some_and(Probe::clean) && form == PathForm::DeviceDrive;
-    let mut report = Report { schema_version: 1, diagnostic: "StartupOnly", path_form: form, command, ab_status: AbStatus::NotEligible, canonical: None, dos: None, collection: "Disabled", qualification: "Unqualified" };
-    if eligible {
-        let Some(canonical) = run(Mode::Canonical) else { report.ab_status = AbStatus::Unsupported; return Ok(report); };
-        report.canonical = Some(SentinelObservation::new(&canonical));
-        report.ab_status = AbStatus::Incomplete;
-        // A normal exact nonzero -File exit is an observation; timeout/ownership/output violations stop the invocation.
-        if !finished(&canonical) || (canonical.exit_code == Some(0) && canonical.raw_response != MARKER)
-            || (canonical.exit_code != Some(0) && !canonical.raw_response.is_empty()) { return Ok(report); }
-        if let Some(dos) = run(Mode::Dos) {
-            report.dos = Some(SentinelObservation::new(&dos));
-            if finished(&dos) && ((dos.exit_code == Some(0) && dos.raw_response == MARKER) || (dos.exit_code != Some(0) && dos.raw_response.is_empty())) { report.ab_status = AbStatus::Observed; }
+enum Mode { Canonical, Dos }
+fn sequence(form: PathForm, mut run: impl FnMut(Mode) -> Option<DiscoveryObservation>) -> Report {
+    let mut report = Report {
+        schema_version: 2,
+        diagnostic: "StartupOnly",
+        path_form: form,
+        ab_status: AbStatus::Unsupported,
+        canonical: None,
+        dos: None,
+        collection: "Disabled",
+        qualification: "Unqualified",
+    };
+    if form != PathForm::DeviceDrive {
+        return report;
+    }
+    let Some(canonical) = run(Mode::Canonical) else { return report };
+    let (canonical, observed) = SentinelObservation::project(canonical);
+    report.canonical = Some(canonical);
+    report.ab_status = AbStatus::Incomplete;
+    if !observed {
+        return report;
+    }
+    if let Some(dos) = run(Mode::Dos) {
+        let (dos, observed) = SentinelObservation::project(dos);
+        report.dos = Some(dos);
+        if observed {
+            report.ab_status = AbStatus::Observed;
         }
     }
-    Ok(report)
+    report
 }
 #[cfg(windows)]
-pub(crate) struct StartupLaunch { path: Option<std::path::PathBuf>, lifetime: Box<dyn Send> }
+pub(crate) struct StartupLaunch {
+    path: std::path::PathBuf,
+    lifetime: Box<dyn Send>,
+}
 #[cfg(windows)]
 impl StartupLaunch {
-    pub(crate) fn into_parts(self) -> (Option<std::path::PathBuf>, Box<dyn Send>) { (self.path, self.lifetime) }
+    pub(crate) fn into_parts(self) -> (std::path::PathBuf, Box<dyn Send>) {
+        (self.path, self.lifetime)
+    }
 }
 #[cfg(windows)]
 // Close the extra read lease before Script removes the sentinel file.
 struct Sentinel { _dos_lease: std::fs::File, script: std::sync::Arc<Script>, dos: std::path::PathBuf }
 #[cfg(windows)]
 impl Sentinel {
-    fn create() -> Result<Self> {
+    fn create(script: Script) -> Result<Self> {
         use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
         use windows::Win32::{Foundation::HANDLE, Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION}};
-        let script = std::sync::Arc::new(Script::create_bytes(SENTINEL)?);
+        let script = std::sync::Arc::new(script);
         let dos = std::path::PathBuf::from(dos_candidate(script.path.to_str().ok_or("Unsupported sentinel path")?).ok_or("Unsupported sentinel path")?);
         crate::wav::reject_links(&dos)?;
         if dos.canonicalize().map_err(|_| "Sentinel roundtrip failed")? != script.path { return Err("Sentinel roundtrip mismatch".into()); }
@@ -142,33 +139,42 @@ impl Sentinel {
 fn run(permit: &TransportPermit, active: &impl Fn() -> Result<()>) -> Result<Report> {
     use std::sync::Arc;
     active()?;
-    let deadline = Instant::now() + Duration::from_secs(90);
+    let deadline = Instant::now() + Duration::from_secs(60);
     let registry = crate::owned_child::native_registry();
-    if !registry.replacement_allowed() { return Err("Previous exact owner remains pending".into()); }
-    let fetch = Arc::new(Script::create().map_err(|_| "Startup fetch lease unavailable")?);
-    let form = path_form(fetch.path.to_str().ok_or("Unsupported fetch path")?);
-    let mut gate = fetch.path.to_str().ok_or("Unsupported fetch path")?.as_bytes().to_vec();
-    gate.push(b'\n');
-    if gate.len() > 4096 || gate[..gate.len()-1].iter().any(|b| matches!(b, 0 | 10 | 13)) { return Err("Unsupported startup gate".into()); }
-    let mut sentinel: Option<Arc<Sentinel>> = None;
-    sequence(form, |mode| {
-        if Instant::now() >= deadline - Duration::from_secs(2) || !registry.replacement_allowed() || active().is_err() { return Some(DiscoveryObservation::failed("Startup deadline/control/owner".into())); }
-        let launch = match mode {
-            Mode::Command => StartupLaunch { path: None, lifetime: Box::new(fetch.clone()) },
-            Mode::Canonical | Mode::Dos => {
-                if sentinel.is_none() { sentinel = Some(Arc::new(Sentinel::create().ok()?)); }
-                let owned = sentinel.as_ref()?;
-                StartupLaunch { path: Some(if mode == Mode::Canonical { owned.script.path.clone() } else { owned.dos.clone() }), lifetime: Box::new(owned.clone()) }
-            }
+    if !registry.replacement_allowed() {
+        return Err("Previous exact owner remains pending".into());
+    }
+    let script = Script::create_bytes(SENTINEL).map_err(|_| "Startup sentinel lease unavailable")?;
+    let form = script.path.to_str().map_or(PathForm::Other, path_form);
+    let sentinel = Sentinel::create(script).ok().map(Arc::new);
+    Ok(sequence(form, |mode| {
+        let owned = sentinel.as_ref()?;
+        let started = Instant::now();
+        let child_deadline = (started + Duration::from_secs(28)).min(deadline - Duration::from_secs(2));
+        if started >= child_deadline || !registry.replacement_allowed() || active().is_err() {
+            return Some(DiscoveryObservation::failed("Startup deadline/control/owner".into()));
+        }
+        let path = match mode {
+            Mode::Canonical => &owned.script.path,
+            Mode::Dos => &owned.dos,
         };
-        if Instant::now() >= deadline - Duration::from_secs(2) || active().is_err() { return Some(DiscoveryObservation::failed("Startup deadline/control".into())); }
+        let launch = StartupLaunch { path: path.clone(), lifetime: Box::new(owned.clone()) };
         let child = match crate::owned_child::windows_child::WindowsChild::spawn_startup(permit, launch) {
-            Ok(child) => child, Err(_) => return Some(DiscoveryObservation::failed("Startup spawn failed".into())),
+            Ok(child) => child,
+            Err(_) => return Some(DiscoveryObservation::failed("Startup spawn failed".into())),
         };
-        Some(supervise_finite(child, if mode == Mode::Command { &gate } else { b"focusflow-startup-sentinel-v1\n" }, registry.clone(),
-            (Instant::now() + Duration::from_secs(28)).min(deadline - Duration::from_secs(2)), Duration::ZERO, 1024,
-            Instant::now, || std::thread::sleep(Duration::from_millis(10)), active))
-    })
+        Some(supervise_finite(
+            child,
+            b"focusflow-startup-sentinel-v1\n",
+            registry.clone(),
+            child_deadline,
+            Duration::ZERO,
+            1024,
+            Instant::now,
+            || std::thread::sleep(Duration::from_millis(10)),
+            active,
+        ))
+    }))
 }
 #[cfg(windows)]
 pub(crate) fn dispatch() -> i32 {
@@ -188,7 +194,7 @@ pub(crate) fn dispatch() -> i32 {
             out.write_all(b"\n").and_then(|_| out.flush()).map_err(|_| "Startup receipt write failed".into())
         };
         let (code, reason) = match result {
-            Ok(report) => { let ok = report.command.receipt.is_some() && report.ab_status != AbStatus::Incomplete;
+            Ok(report) => { let ok = report.ab_status == AbStatus::Observed;
                 match serde_json::to_value(report).ok().and_then(|r| publish(r).ok()) { Some(()) => (if ok { 0 } else { 71 }, None), None => (77, Some("Startup receipt write failed".into())) }
             },
             Err(_) => (77, Some("Startup preparation/context failed".into())),
@@ -198,7 +204,6 @@ pub(crate) fn dispatch() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    const VALID: &[u8] = br#"{"schemaVersion":1,"entered":true,"psMajor":5,"psMinor":1,"policy":"RemoteSigned","dataRead":true,"parserComplete":true,"parseErrors":0,"initialization":true,"phase":"complete"}"#;
     fn observation(raw: &[u8], exit: Option<i32>) -> DiscoveryObservation {
         let mut o = DiscoveryObservation::failed("fixture only".into());
         o.reason = None; o.eof = true; o.exact_exit = true; o.exit_code = exit; o.raw_response = raw.to_vec(); o
@@ -206,7 +211,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn startup_sentinel_closes_both_leases_at_final_shared_owner_release() {
-        let sentinel = std::sync::Arc::new(Sentinel::create().expect("actual owned sentinel"));
+        let script = Script::create_bytes(SENTINEL).expect("actual owned script");
+        let sentinel = std::sync::Arc::new(Sentinel::create(script).expect("actual owned sentinel"));
         let path = sentinel.script.path.clone();
         let dos = sentinel.dos.clone();
         let retained_owner = sentinel.clone();
@@ -218,88 +224,103 @@ mod tests {
         assert_eq!(std::fs::metadata(&dos).unwrap_err().kind(), std::io::ErrorKind::NotFound);
     }
     #[test]
-    fn startup_sequence_clean_runs_at_most_three_fixed_children() {
+    fn startup_path_pair_needs_only_two_sentinel_children() {
         let mut modes = Vec::new();
-        let report = sequence(PathForm::DeviceDrive, |mode| {
+        let _ = sequence(PathForm::DeviceDrive, |mode| {
             modes.push(mode);
-            Some(match mode { Mode::Command => observation(VALID, Some(0)), Mode::Canonical => observation(b"", Some(1)), Mode::Dos => observation(MARKER, Some(0)) })
-        }).unwrap();
-        assert!(modes == [Mode::Command, Mode::Canonical, Mode::Dos]);
-        assert_eq!(report.ab_status, AbStatus::Observed);
-        assert!(!report.canonical.unwrap().marker);
-        assert!(report.dos.unwrap().marker);
-        assert_eq!(report.collection, "Disabled");
-        assert_eq!(report.qualification, "Unqualified");
+            Some(if mode == Mode::Canonical {
+                observation(b"", Some(1))
+            } else {
+                observation(MARKER, Some(0))
+            })
+        });
+        assert!(modes == [Mode::Canonical, Mode::Dos]);
     }
     #[test]
-    fn startup_sequence_stops_after_unclean_probe_or_non_device_path() {
-        for raw in [
-            String::from_utf8(VALID.to_vec()).unwrap().replace("RemoteSigned", "Restricted"),
-            String::from_utf8(VALID.to_vec()).unwrap().replace("RemoteSigned", "AllSigned"),
-            String::from_utf8(VALID.to_vec()).unwrap().replace("RemoteSigned", "unavailable"),
-            String::from_utf8(VALID.to_vec()).unwrap().replace("\"parseErrors\":0", "\"parseErrors\":1"),
-            String::from_utf8(VALID.to_vec()).unwrap().replace("\"initialization\":true", "\"initialization\":false").replace("complete\"", "fromjson\""),
-            String::from_utf8(VALID.to_vec()).unwrap().replace("\"psMajor\":5", "\"psMajor\":7"),
-        ] {
-            let mut calls = 0;
-            let report = sequence(PathForm::DeviceDrive, |_| { calls += 1; Some(observation(raw.as_bytes(), Some(0))) }).unwrap();
-            assert_eq!(calls, 1); assert_eq!(report.ab_status, AbStatus::NotEligible);
-        }
-        for form in [PathForm::Drive, PathForm::DeviceUnc, PathForm::Other] {
-            let mut calls = 0;
-            let report = sequence(form, |_| { calls += 1; Some(observation(VALID, Some(0))) }).unwrap();
-            assert_eq!(calls, 1); assert_eq!(report.ab_status, AbStatus::NotEligible);
-        }
-        for fault in 0..7 {
-            let mut calls = 0;
-            let report = sequence(PathForm::DeviceDrive, |_| { calls += 1; let mut o = observation(VALID, Some(0));
-                match fault { 0 => o.eof = false, 1 => o.exact_exit = false, 2 => o.forced = true, 3 => o.cleanup_pending = true, 4 => o.reason = Some("deadline".into()), 5 => o.exit_code = None, _ => o.exit_code = Some(71) }; Some(o) }).unwrap();
-            assert_eq!(calls, 1); assert!(report.command.receipt.is_none());
-        }
-    }
-    #[test]
-    fn startup_sequence_unsupported_and_canonical_failures_do_not_retry() {
-        for fault in 0..10 {
-            let mut modes = Vec::new();
+    fn startup_completed_pair_reports_markers_and_no_authority() {
+        for (canonical_marker, dos_marker) in [(true, true), (false, true), (false, false)] {
             let report = sequence(PathForm::DeviceDrive, |mode| {
-                modes.push(mode);
-                if mode == Mode::Command { return Some(observation(VALID, Some(0))); }
-                assert!(mode == Mode::Canonical, "unexpected DOS launch after owner failure");
-                if fault == 0 { return None; }
-                let mut o = observation(b"", Some(1));
-                match fault { 1 => o.eof = false, 2 => o.exact_exit = false, 3 => o.forced = true, 4 => o.cleanup_pending = true,
-                    5 => o.reason = Some("cap or deadline".into()), 6 => o.exit_code = None, 7 => o.exit_code = Some(0),
-                    8 => o.raw_response = b"private invalid output".to_vec(), _ => { o.exit_code = Some(0); o.raw_response = vec![b'x'; 1025]; } }; Some(o)
-            }).unwrap();
-            assert_eq!(modes.len(), 2);
-            assert_eq!(report.ab_status, if fault == 0 { AbStatus::Unsupported } else { AbStatus::Incomplete });
+                let marked = if mode == Mode::Canonical { canonical_marker } else { dos_marker };
+                Some(if marked { observation(MARKER, Some(0)) } else { observation(b"", Some(1)) })
+            });
+            assert_eq!(report.ab_status, AbStatus::Observed);
+            assert_eq!(report.canonical.unwrap().marker, canonical_marker);
+            assert_eq!(report.dos.unwrap().marker, dos_marker);
+            assert_eq!(report.collection, "Disabled");
+            assert_eq!(report.qualification, "Unqualified");
         }
     }
     #[test]
-    fn startup_projection_drops_raw_output_and_denies_wrong_exit_size_and_status() {
-        for raw in [b"private body or exception".to_vec(), vec![b'x'; 1025], VALID.iter().copied().chain(b"{}".iter().copied()).collect()] {
-            let o = project(observation(&raw, Some(0)));
-            assert!(o.receipt.is_none());
-            let projected = serde_json::to_string(&o).unwrap();
-            assert!(!projected.contains("private body"));
-            assert!(!projected.contains("rawResponse"));
+    fn startup_unsupported_path_never_launches_a_child() {
+        for form in [PathForm::Drive, PathForm::DeviceUnc, PathForm::Other] {
+            let report = sequence(form, |_| panic!("unexpected child for unsupported path"));
+            assert_eq!(report.ab_status, AbStatus::Unsupported);
+            assert!(report.canonical.is_none() && report.dos.is_none());
         }
-        for code in [None, Some(71), Some(75), Some(1)] { assert!(project(observation(VALID, code)).receipt.is_none()); }
+        let report = sequence(PathForm::DeviceDrive, |mode| {
+            assert!(mode == Mode::Canonical);
+            None
+        });
+        assert_eq!(report.ab_status, AbStatus::Unsupported);
+        assert!(report.canonical.is_none() && report.dos.is_none());
     }
     #[test]
-    fn startup_fixed_script_source_fixtures_are_no_network_and_no_eval() {
-        assert!(COMMAND.is_ascii() && COMMAND.len() < 8192);
-        assert!(COMMAND.contains("::ParseInput($source, [ref]$tokens, [ref]$errors)"));
-        assert!(COMMAND.contains("[IO.File]::ReadAllBytes($path)"));
-        assert!(COMMAND.contains("Get-ExecutionPolicy"));
-        assert!(COMMAND.contains("for ($i = 0; $i -lt 4096; $i++)"));
-        assert!(COMMAND.contains("[Console]::Write('{\"schemaVersion\":1"));
-        for source in [COMMAND, std::str::from_utf8(SENTINEL).unwrap()] {
-            for forbidden in ["Invoke-Expression", "Invoke-WebRequest", "WebClient", "HttpWebRequest", "Set-ExecutionPolicy", "Start-Process", "-ComObject", "Write-Output", "Write-Error", "Out-String"] { assert!(!source.contains(forbidden)); }
+    fn startup_canonical_owner_and_protocol_failures_block_dos() {
+        for fault in 0..11 {
+            let report = sequence(PathForm::DeviceDrive, |mode| {
+                assert!(mode == Mode::Canonical, "unexpected DOS launch after fault {fault}");
+                let mut o = observation(MARKER, Some(0));
+                match fault {
+                    0 => o.eof = false,
+                    1 => o.exact_exit = false,
+                    2 => { o.forced = true; o.exit_code = Some(71); o.raw_response.clear(); }
+                    3 => o.cleanup_pending = true,
+                    4 => o.reason = Some("deadline".into()),
+                    5 => { o.exit_code = None; o.raw_response.clear(); }
+                    6 => o.reason = Some("control EOF".into()),
+                    7 => { o.raw_response.clear(); o.reason = Some("output cap".into()); }
+                    8 => o.raw_response.clear(),
+                    9 => o.exit_code = Some(1),
+                    _ => o.raw_response = vec![b'x'; 1025],
+                }
+                Some(o)
+            });
+            assert_eq!(report.ab_status, AbStatus::Incomplete);
+            assert!(!report.canonical.unwrap().marker);
+            assert!(report.dos.is_none());
         }
-        assert!(SENTINEL.len() < 1024);
-        assert!(std::str::from_utf8(SENTINEL).unwrap().contains("$i -lt 64"));
-        assert!(!std::str::from_utf8(SENTINEL).unwrap().contains("$path"));
+    }
+    #[test]
+    fn startup_requires_exact_marker_and_never_projects_raw_stdout() {
+        let invalid = [
+            b"private body or exception".to_vec(),
+            MARKER[..MARKER.len() - 1].to_vec(),
+            [MARKER, b"\n"].concat(),
+            [MARKER, MARKER].concat(),
+            br#"{"schemaVersion":1,"sentinel":true,"sentinel":true}"#.to_vec(),
+            br#"{"schemaVersion":1,"sentinel":"true"}"#.to_vec(),
+        ];
+        for raw in invalid {
+            let report = sequence(PathForm::DeviceDrive, |mode| {
+                Some(if mode == Mode::Canonical { observation(MARKER, Some(0)) } else { observation(&raw, Some(0)) })
+            });
+            assert_eq!(report.ab_status, AbStatus::Incomplete);
+            assert!(!report.dos.as_ref().unwrap().marker);
+            let projected = serde_json::to_string(&report).unwrap();
+            assert!(!projected.contains("private body") && !projected.contains("rawResponse"));
+        }
+    }
+    #[test]
+    fn startup_fixed_sentinel_source_fixture_reads_only_bounded_gate_and_marks() {
+        assert!(SENTINEL.is_ascii() && SENTINEL.len() < 1024);
+        let source = std::str::from_utf8(SENTINEL).unwrap();
+        assert!(source.contains("$i -lt 64") && source.contains("[Console]::Read()"));
+        assert!(source.contains("'focusflow-startup-sentinel-v1'"));
+        assert!(source.contains(&format!("[Console]::Write('{}')", std::str::from_utf8(MARKER).unwrap())));
+        assert!(source.ends_with("exit 0\n"));
+        for forbidden in ["Invoke-Expression", "Invoke-WebRequest", "WebClient", "HttpWebRequest", "Set-ExecutionPolicy", "Start-Process", "-ComObject", "Write-Output", "Write-Error", "[IO.", "$path"] {
+            assert!(!source.contains(forbidden));
+        }
     }
     #[cfg(not(windows))]
     #[test]
@@ -307,26 +328,6 @@ mod tests {
         let args = |values: &[&str]| values.iter().map(std::ffi::OsString::from).collect::<Vec<_>>().into_iter();
         assert_eq!(crate::proof::dispatch(args(&["proof", "--private-audio-startup-probe"])), 69);
         assert_eq!(crate::proof::dispatch(args(&["proof", "--private-audio-startup-probe", "override"])), 64);
-    }
-    #[test]
-    fn startup_strict_bounded_probe_projection() {
-        assert!(parse(VALID).is_some());
-        let value: serde_json::Value = serde_json::from_slice(VALID).unwrap();
-        for key in value.as_object().unwrap().keys() {
-            let mut missing = value.clone(); missing.as_object_mut().unwrap().remove(key);
-            assert!(parse(&serde_json::to_vec(&missing).unwrap()).is_none(), "missing field accepted: {key}");
-        }
-        for raw in [
-            VALID.iter().copied().chain(b"{}".iter().copied()).collect::<Vec<_>>(),
-            String::from_utf8(VALID.to_vec()).unwrap().replace("\"entered\":true", "\"entered\":true,\"entered\":true").into_bytes(),
-            String::from_utf8(VALID.to_vec()).unwrap().replace("\"entered\":true", "\"entered\":true,\"message\":\"private\"").into_bytes(),
-            String::from_utf8(VALID.to_vec()).unwrap().replace("RemoteSigned", "invalid").into_bytes(),
-            String::from_utf8(VALID.to_vec()).unwrap().replace("\"parseErrors\":0", "\"parseErrors\":65").into_bytes(),
-            String::from_utf8(VALID.to_vec()).unwrap().replace("\"parseErrors\":0", "\"parseErrors\":0.0").into_bytes(),
-            String::from_utf8(VALID.to_vec()).unwrap().replace("\"entered\":true", "\"entered\":1").into_bytes(),
-            String::from_utf8(VALID.to_vec()).unwrap().replace("\"schemaVersion\":1,", "").into_bytes(),
-            vec![b' '; 1025],
-        ] { assert!(parse(&raw).is_none(), "accepted malformed probe"); }
     }
     #[test]
     fn startup_dos_candidate_is_only_short_unambiguous_local_device_drive() {
