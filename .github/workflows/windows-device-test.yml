@@ -1,0 +1,43 @@
+name: Build Windows loopback tester
+on:
+  push:
+    branches: [codex-windows-device-test]
+permissions:
+  contents: read
+concurrency:
+  group: windows-device-test-build
+  cancel-in-progress: false
+jobs:
+  portable-zip:
+    if: github.repository == 'UmarAlMukhtar/FocusFlow' && github.ref == 'refs/heads/codex-windows-device-test'
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /tools/windows-device-test/
+            /FocusFlow/crates/focusflow-core/
+            /FocusFlow/crates/focusflow-windows-audio-worker/
+            /.github/workflows/windows-device-test.yml
+      - name: Build and verify portable package; no device execution
+        shell: pwsh
+        run: ./tools/windows-device-test/Package-CI.ps1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-loopback-tester-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            device-test-dist/FocusFlow-Windows-Loopback-Test.zip
+            device-test-dist/FocusFlow-Windows-Loopback-Test.zip.sha256

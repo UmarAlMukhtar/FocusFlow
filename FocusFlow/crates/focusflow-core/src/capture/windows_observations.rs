@@ -652,6 +652,7 @@ fn publish(
     let store = store::ProjectStore::new(parent)?;
     let _lock = store.lock(id, "document")?;
     let marker = read_marker(dir)?;
+    require(!super::audio::read_marker(dir)?, "capture.json", "Windows V3 publication cannot replace V4 audio intent; retain files for recovery")?;
     require(
         !windows::read_marker(dir)?,
         "capture.json",

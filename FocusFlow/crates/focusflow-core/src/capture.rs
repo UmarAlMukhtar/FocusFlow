@@ -15,6 +15,7 @@ macro_rules! literals {
         }
     };
 }
+pub mod audio;
 pub mod windows;
 pub mod windows_observations;
 pub use windows::{decode_windows, publish_windows_incomplete, validate_windows_finalized_assets, publish_windows_finalized_assets};
@@ -290,33 +291,39 @@ pub(crate) fn read(dir:&Path,id:&str)->CoreResult<Option<CaptureManifestV1>> {
     let mut bytes=Vec::new();fs::File::open(path).and_then(|f|f.take(MAX_JSON_BYTES+1).read_to_end(&mut bytes)).map_err(io_error)?;
     decode(&bytes,id).map(Some)
 }
-pub(crate) enum CaptureAuthority {LinuxV1(CaptureManifestV1),WindowsV2(windows::WindowsCaptureManifestV2),WindowsV3(windows_observations::WindowsCaptureManifestV3)}
+pub(crate) enum CaptureAuthority {LinuxV1(CaptureManifestV1),WindowsV2(windows::WindowsCaptureManifestV2),WindowsV3(windows_observations::WindowsCaptureManifestV3),LinuxAudioV4(audio::CaptureEnvelopeV4)}
 impl CaptureAuthority {
     pub(crate) fn finalized_project(&self)->CoreResult<&ProjectDocument> {
-        match self {Self::LinuxV1(m)=>m.finalized_project(),Self::WindowsV2(m)=>m.finalized_project(),Self::WindowsV3(m)=>m.finalized_project()}
+        match self {Self::LinuxV1(m)=>m.finalized_project(),Self::WindowsV2(m)=>m.finalized_project(),Self::WindowsV3(m)=>m.finalized_project(),Self::LinuxAudioV4(m)=>m.finalized_project()}
     }
 }
 pub(crate) fn read_authority(dir:&Path,id:&str)->CoreResult<Option<CaptureAuthority>> {
     let marker=windows::read_marker(dir)?;
     let observation_marker=windows_observations::read_marker(dir)?;
+    let audio_marker=audio::read_marker(dir)?;
+    require(!(audio_marker&&(marker||observation_marker)),"capture.json","V4 audio intent conflicts with another capture marker; retain files for recovery")?;
     require(!(marker&&observation_marker),"capture.json","Conflicting Windows intent markers; retain files for recovery")?;
     let Some(path)=asset(dir,"capture.json")? else {
+        require(!audio_marker,"capture.json","V4 capture.json is missing; retain files for recovery")?;
         require(!marker&&!observation_marker,"capture.json","Windows capture.json is missing; retain files for recovery")?;return Ok(None)
     };
     let mut bytes=Vec::new();fs::File::open(path).and_then(|f|f.take(MAX_JSON_BYTES+1).read_to_end(&mut bytes)).map_err(io_error)?;
     require(bytes.len() as u64<=MAX_JSON_BYTES,"capture.json","Native capture JSON exceeds 8 MiB")?;
     let UniqueJson(value)=serde_json::from_slice(&bytes).map_err(|error| {let mut message=format!("Invalid native capture manifest; retain its files and correct capture.json: {error}");store::truncate_text(&mut message,1024);invalid("capture.json",message)})?;
-    if value.get("schemaVersion").and_then(serde_json::Value::as_u64)!=Some(3) {named_object_shapes(&value,&mut Vec::new()).map_err(|e|invalid("capture.json",e))?;}
-    let authority=match value.get("schemaVersion").and_then(serde_json::Value::as_u64) {
+    let version=value.get("schemaVersion").and_then(serde_json::Value::as_u64);
+    require(!audio_marker||version==Some(4),"capture.json","V4 audio intent conflicts with capture.json; retain files for recovery")?;
+    if !matches!(version,Some(3|4)) {named_object_shapes(&value,&mut Vec::new()).map_err(|e|invalid("capture.json",e))?;}
+    let authority=match version {
         Some(1)=>{require(!marker&&!observation_marker,"capture.json","Windows intent marker conflicts with Linux authority; retain files for recovery")?;CaptureAuthority::LinuxV1(decode(&bytes,id)?)},
         Some(2)=>{require(marker&&!observation_marker,"capture.json","Windows capture intent marker is missing; retain files for recovery")?;CaptureAuthority::WindowsV2(decode_windows(&bytes,id)?)},
         Some(3)=>{require(observation_marker&&!marker,"capture.json","Windows V3 intent marker is missing")?;CaptureAuthority::WindowsV3(windows_observations::decode_windows_observations(&bytes,id)?)},
+        Some(4)=>{require(audio_marker,"capture.json","V4 audio intent marker is missing; retain files for recovery")?;CaptureAuthority::LinuxAudioV4(audio::decode_value(value,id)?)},
         _=>return Err(invalid("schemaVersion","Unsupported or missing capture schema; retain files for recovery")),
     };
     Ok(Some(authority))
 }
 pub(crate) fn import_authority(dir:&Path,authority:CaptureAuthority,ffmpeg:&Path)->CoreResult<ProjectDocument> {
-    match authority {CaptureAuthority::LinuxV1(m)=>import(dir,m,ffmpeg),CaptureAuthority::WindowsV2(m)=>windows::import_windows(dir,m,ffmpeg),CaptureAuthority::WindowsV3(m)=>windows_observations::import_windows_observations(dir,m,ffmpeg)}
+    match authority {CaptureAuthority::LinuxV1(m)=>import(dir,m,ffmpeg),CaptureAuthority::WindowsV2(m)=>windows::import_windows(dir,m,ffmpeg),CaptureAuthority::WindowsV3(m)=>windows_observations::import_windows_observations(dir,m,ffmpeg),CaptureAuthority::LinuxAudioV4(m)=>audio::import(dir,m,ffmpeg)}
 }
 
 pub(crate) fn import(dir:&Path,manifest:CaptureManifestV1,ffmpeg_path:&Path)->CoreResult<ProjectDocument> {
@@ -331,9 +338,16 @@ pub fn validate_finalized_assets(dir:&Path,manifest:&CaptureManifestV1,evidence:
     validate_asset_inventory(dir,manifest,evidence).map(|(doc,_)|doc)
 }
 fn validate_asset_inventory(dir:&Path,manifest:&CaptureManifestV1,evidence:&ffmpeg::ProbedVideoEvidence)->CoreResult<(ProjectDocument,Vec<String>)> {
+    let (initial,mut inventory)=validate_required_assets(dir,manifest,evidence)?;
+    let mut doc=initial.clone();
+    project_optional_audio(dir,&mut doc)?;
+    if doc.microphone.is_some() {inventory.insert(1,"mic.wav".into());}
+    Ok((doc,inventory))
+}
+fn validate_required_assets<'a>(dir:&Path,manifest:&'a CaptureManifestV1,evidence:&ffmpeg::ProbedVideoEvidence)->CoreResult<(&'a ProjectDocument,Vec<String>)> {
     manifest.validate(&manifest.capture_id)?;
     let CaptureStateV1::Finalized{video_timing,initial_project,..}=&manifest.state else {return Err(invalid("capture.json","Native capture is incomplete; recover or finalize it before opening"))};
-    let mut doc=initial_project.clone();
+    let doc=initial_project;
     let mut inventory=vec!["screen.mp4".to_owned()];
     asset(dir,"screen.mp4")?.ok_or_else(||invalid("video","Native screen.mp4 is missing"))?;
     require((evidence.video.width,evidence.video.height)==(doc.video.width,doc.video.height)&&equal_time(evidence.endpoint,video_timing.endpoint.packet_time())?,"video","Saved video geometry or exact endpoint does not match capture authority")?;
@@ -346,16 +360,14 @@ fn validate_asset_inventory(dir:&Path,manifest:&CaptureManifestV1,evidence:&ffmp
             require(path.starts_with("cursor/"),"cursor.path","Native cursor assets must remain under cursor/")?;asset(dir,path)?;
             inventory.push(path.clone());
         }
-        match cursor::inspect_capture_cursor(dir,&doc) {
+        match cursor::inspect_capture_cursor(dir,doc) {
             cursor::CursorAssetReport::Available{native_available,..}=>require(native_available||(!doc.cursor_settings.enabled&&manifest.diagnostic.is_some()),"cursor","Unavailable native images require declared disabled capture degradation")?,
             cursor::CursorAssetReport::Unavailable(error)=>return Err(error),
             cursor::CursorAssetReport::Unchecked=>return Err(invalid("cursor","Native cursor assets were not validated")),
         }
         inventory.push("cursor/index.json".into());
-        if doc.cursor_settings.enabled {cursor::prepare_cursor(dir,&doc,&AtomicBool::new(false))?;}
+        if doc.cursor_settings.enabled {cursor::prepare_cursor(dir,doc,&AtomicBool::new(false))?;}
     }
-    project_optional_audio(dir,&mut doc)?;
-    if doc.microphone.is_some() {inventory.insert(1,"mic.wav".into());}
     Ok((doc,inventory))
 }
 
@@ -373,11 +385,15 @@ pub fn publish_finalized_assets(dir:&Path,manifest:&CaptureManifestV1,evidence:&
     publish_finalized_with(dir,manifest,evidence,|path,directory|if directory {store::sync_directory(path)} else {fs::File::open(path)?.sync_all()},publish)
 }
 fn publish_finalized_with(dir:&Path,manifest:&CaptureManifestV1,evidence:&ffmpeg::ProbedVideoEvidence,
-    mut sync:impl FnMut(&Path,bool)->std::io::Result<()>,publish:impl FnOnce(&Path,&CaptureManifestV1)->CoreResult<()>)->CoreResult<CaptureManifestV1> {
+    sync:impl FnMut(&Path,bool)->std::io::Result<()>,publish:impl FnOnce(&Path,&CaptureManifestV1)->CoreResult<()>)->CoreResult<CaptureManifestV1> {
     let (doc,inventory)=validate_asset_inventory(dir,manifest,evidence)?;
     let mut committed=manifest.clone();
     let CaptureStateV1::Finalized{initial_project,..}=&mut committed.state else {return Err(invalid("capture.json","Finalized publication requires a finalized capture"))};
     *initial_project=doc;
+    sync_asset_inventory(dir,initial_project,inventory,sync)?;
+    publish(dir,&committed)?;Ok(committed)
+}
+fn sync_asset_inventory(dir:&Path,initial_project:&ProjectDocument,inventory:Vec<String>,mut sync:impl FnMut(&Path,bool)->std::io::Result<()>)->CoreResult<()> {
     let mut directories=std::collections::BTreeSet::new();
     for relative in inventory {
         let path=asset(dir,&relative)?.ok_or_else(||invalid("capture.path",format!("Required native asset {relative} is missing; retain this capture for recovery")))?;
@@ -396,8 +412,7 @@ fn publish_finalized_with(dir:&Path,manifest:&CaptureManifestV1,evidence:&ffmpeg
     let mut directories:Vec<_>=directories.into_iter().collect();
     directories.sort_by_key(|path|std::cmp::Reverse(path.components().count()));
     for path in &directories {sync(path,true).map_err(io_error)?;}
-    sync(dir,true).map_err(io_error)?;
-    publish(dir,&committed)?;Ok(committed)
+    sync(dir,true).map_err(io_error)
 }
 
 /// Publish only capture.json. The future producer must sync referenced assets before finalization.
@@ -412,6 +427,7 @@ fn publish_with(dir:&Path,manifest:&CaptureManifestV1,before_write:impl FnOnce(&
     manifest.validate(id)?;
     let store=store::ProjectStore::new(dir.parent().ok_or_else(||path_error("Capture directory needs a parent"))?)?;
     let _lock=store.lock(id,"document")?;
+    require(!audio::read_marker(dir)?,"capture.json","Linux V1 publication cannot replace V4 audio intent; retain files for recovery")?;
     require(!windows::read_marker(dir)?&&!windows_observations::read_marker(dir)?,"capture.json","Linux publication cannot replace Windows intent; retain files for recovery")?;
     if let Some(previous)=read(dir,id)? {
         require(matches!(previous.state,CaptureStateV1::Incomplete{..}),"capture.json","Finalized capture authority is immutable; reload before retrying")?;

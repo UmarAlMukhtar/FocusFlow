@@ -263,6 +263,7 @@ fn publish_windows_with(dir:&Path,manifest:&WindowsCaptureManifestV2,grid:Option
     let parent=dir.parent().ok_or_else(||path_error("Capture directory needs a parent"))?;
     let store=store::ProjectStore::new(parent)?;let _lock=store.lock(id,"document")?;
     let marker=read_marker(dir)?;
+    require(!super::audio::read_marker(dir)?,"capture.json","Windows V2 publication cannot replace V4 audio intent; retain files for recovery")?;
     require(!super::windows_observations::read_marker(dir)?,"capture.json","Windows V2 publication cannot replace V3 intent; retain files for recovery")?;
     let previous=if asset(dir,"capture.json")?.is_some() {read_authority(dir,id)?}else{None};
     match previous {
@@ -271,7 +272,7 @@ fn publish_windows_with(dir:&Path,manifest:&WindowsCaptureManifestV2,grid:Option
             require(previous.capture_id==manifest.capture_id&&previous.source==manifest.source&&previous.initial_defaults==manifest.initial_defaults,"capture.json","Capture identity, source and Start defaults are immutable; reload before retrying")?;
         },
         Some(CaptureAuthority::WindowsV3(_))=>return Err(recovery("Windows V2 publication cannot replace observation authority")),
-        Some(CaptureAuthority::LinuxV1(_))=>return Err(recovery("Windows publication cannot replace Linux authority")),
+        Some(CaptureAuthority::LinuxV1(_)|CaptureAuthority::LinuxAudioV4(_))=>return Err(recovery("Windows publication cannot replace Linux authority")),
         None=>require(matches!(manifest.state,WindowsCaptureStateV2::Incomplete {..}),"capture.json","Finalization requires prior Windows incomplete authority")?,
     }
     let mut committed=manifest.clone();

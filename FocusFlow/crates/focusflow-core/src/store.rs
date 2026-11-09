@@ -181,7 +181,7 @@ impl ProjectStore {
     pub fn snapshot(&self, id: &str, expected_revision: u64) -> CoreResult<RenderSnapshot> {
         let _lock = self.lock(id, "document")?;
         let project_dir = paths::project_dir(&self.root, id)?;
-        let mut document = read_document(&project_dir, id)?;
+        let (mut document, audio_authority) = read_document_with_audio_authority(&project_dir, id)?;
         check_revision(&document, expected_revision)?;
         paths::asset_path(&project_dir, &document.video.path)?;
         if let Some(audio) = &document.microphone {
@@ -201,7 +201,9 @@ impl ProjectStore {
                 }
             }
         }
-        if document.audio_tracks.is_some() {
+        if let Some(authority) = audio_authority {
+            crate::capture::audio::project_render_audio(&project_dir, &authority, &mut document)?;
+        } else if document.audio_tracks.is_some() {
             let snapshot=RenderSnapshot {project_dir:project_dir.clone(),document:document.clone(),prepared_cursor:None,prepared_focus:None};
             let prepared=crate::audio::prepare_audio(&snapshot,true)?;
             let tracks=document.audio_tracks.as_mut().unwrap();
@@ -311,6 +313,10 @@ impl ProjectStore {
 }
 
 fn read_document(dir: &Path, id: &str) -> CoreResult<ProjectDocument> {
+    read_document_with_audio_authority(dir, id).map(|(document, _)| document)
+}
+
+fn read_document_with_audio_authority(dir: &Path, id: &str) -> CoreResult<(ProjectDocument, Option<crate::capture::audio::CaptureEnvelopeV4>)> {
     let path = paths::asset_path(dir, "project.json")?;
     let file = File::open(path).map_err(|error| io_error("open project.json", error))?;
     let mut bytes = Vec::new();
@@ -327,7 +333,8 @@ fn read_document(dir: &Path, id: &str) -> CoreResult<ProjectDocument> {
     let document: ProjectDocument = serde_json::from_slice(&bytes).map_err(|error| invalid("project", format!("Invalid project document: {error}")))?;
     project::validate(&document)?;
     require(document.project_id == id, "projectId", "Document project ID must equal its directory ID")?;
-    Ok(document)
+    let authority = crate::capture::audio::join_persisted(dir, &document)?;
+    Ok((document, authority))
 }
 
 fn check_revision(document: &ProjectDocument, expected: u64) -> CoreResult<()> {
