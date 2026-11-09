@@ -579,15 +579,24 @@ pub(in crate::recorder::windows_capture) struct CursorObserver {
     pose: Option<JoinHandle<PoseEnd>>,
     input: Option<JoinHandle<InputEnd>>,
 }
+// The finite scalar types bound this fixture-only message; no path/title or second query.
+#[cfg(test)]
+fn fixture_family_rejection(w: &WindowObservation, raw: [u32; 2]) -> String {
+    format!(
+        "Current window is outside the qualified cursor model family; fixture pid={} tid={} observerPmv2={} targetPmv2={} dpi={} monitorCount={} monitorRect={:?} visible={} minimized={} style=0x{:08x} exStyle=0x{:08x} dwmRect={:?} raw={:?}",
+        w.pid, w.tid, w.observer_pmv2, w.target_pmv2, w.dpi, w.monitor_count,
+        w.monitor_rect, w.visible, w.minimized, w.style, w.ex_style, w.dwm_rect, raw,
+    )
+}
 impl CursorObserver {
     pub fn prepare(window: u64, pid: u32) -> Result<Self, String> {
-        let value = Self::candidate(window, pid)?;
+        let value = Self::candidate(window, pid, #[cfg(test)] false)?;
         if !release_qualified(value.profile) {
             return Err("Sampled cursor tracking is not yet qualified for this window; recording uses embedded cursor pixels".into());
         }
         Ok(value)
     }
-    fn candidate(window: u64, pid: u32) -> Result<Self, String> {
+    fn candidate(window: u64, pid: u32, #[cfg(test)] fixture_diagnostic: bool) -> Result<Self, String> {
         let owner = SourceOwner::prepare(window, pid)?;
         let scope = DpiScope::enter()?;
         let w = geometry(window)?;
@@ -599,8 +608,11 @@ impl CursorObserver {
             u32::try_from(i64::from(w.dwm_rect[3]) - i64::from(w.dwm_rect[1]))
                 .map_err(|e| e.to_string())?,
         ];
-        let profile = candidate_family(&w, raw)
-            .ok_or("Current window is outside the qualified cursor model family")?;
+        let profile = candidate_family(&w, raw).ok_or_else(|| {
+            #[cfg(test)]
+            if fixture_diagnostic { return fixture_family_rejection(&w, raw); }
+            "Current window is outside the qualified cursor model family".to_owned()
+        })?;
         Ok(Self {
             window,
             pid,
@@ -627,7 +639,7 @@ impl CursorObserver {
         permission:&crate::recorder::windows_qualification::production_cursor::OwnedFixturePermission,
     ) -> Result<Self, String> {
         permission.check(window, pid)?;
-        let candidate = Self::candidate(window, pid)?;
+        let candidate = Self::candidate(window, pid, true)?;
         if candidate.profile != permission.profile() {
             return Err("Fixture model family mismatch".into());
         }
@@ -728,5 +740,43 @@ impl CursorObserver {
 impl Drop for CursorObserver {
     fn drop(&mut self) {
         self.request_stop();
+    }
+}
+
+#[cfg(test)]
+mod fixture_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn rejection_scalars_fit_both_error_caps_with_recovery_and_stage_prefixes() {
+        let mut w = super::super::tests::window();
+        w.hwnd = "arbitrary-window-text-must-not-be-logged".into();
+        w.pid = u32::MAX;
+        w.tid = u32::MAX;
+        w.dpi = u32::MAX;
+        w.monitor_count = u32::MAX;
+        w.monitor_rect = [i32::MIN; 4];
+        w.dwm_rect = [i32::MIN; 4];
+        w.observer_pmv2 = false;
+        w.target_pmv2 = false;
+        w.visible = false;
+        w.minimized = false;
+        w.style = u32::MAX;
+        w.ex_style = u32::MAX;
+        let message = fixture_family_rejection(&w, [u32::MAX; 2]);
+        assert!(message.starts_with("Current window is outside the qualified cursor model family; fixture "));
+        for field in [
+            "pid=4294967295", "tid=4294967295", "observerPmv2=false", "targetPmv2=false",
+            "dpi=4294967295", "monitorCount=4294967295",
+            "monitorRect=[-2147483648, -2147483648, -2147483648, -2147483648]",
+            "visible=false", "minimized=false", "style=0xffffffff", "exStyle=0xffffffff",
+            "dwmRect=[-2147483648, -2147483648, -2147483648, -2147483648]",
+            "raw=[4294967295, 4294967295]",
+        ] { assert!(message.contains(field), "missing {field}"); }
+        assert!(!message.contains(&w.hwnd));
+        assert!(message.len() <= 768, "reserve space for existing recovery and stage prefixes");
+        let parent_error = crate::recorder::windows_capture::recovery(&message).to_string();
+        assert!(parent_error.len() <= 1024);
+        assert!(format!("[production-start-failure] prepare: {parent_error}\n").len() <= 1024);
     }
 }

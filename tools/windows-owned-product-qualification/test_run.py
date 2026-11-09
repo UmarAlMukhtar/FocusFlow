@@ -87,9 +87,11 @@ class Gates(unittest.TestCase):
                 raise ImportReached
             log=root/(name+'.log');log.write_text('test result: ok. 10 passed; 0 failed; 0 ignored;');return log
         with tempfile.TemporaryDirectory() as tmp:
-            args=SimpleNamespace(evidence=Path(tmp)/'evidence',ffmpeg=Path(tmp)/'ffmpeg',ffprobe=Path(tmp)/'ffprobe')
-            with patch('run.sys.platform','win32'),patch('run.os.chdir'),patch('run.source_manifest',return_value={}),patch('run.sha',side_effect=lambda p:run.FFMPEG_SHA if p==args.ffmpeg else run.FFPROBE_SHA),patch('run.subprocess.check_output',side_effect=lambda argv,**kw:json.dumps(metadata) if argv[0]=='cargo' else 'fixture-sha'),patch('run.execute',side_effect=execute):
+            args=SimpleNamespace(evidence=Path(tmp)/'evidence',ffmpeg=Path(tmp)/'ffmpeg',ffprobe=Path(tmp)/'ffprobe',scope='full')
+            ambient_ref=run.os.getenv('GITHUB_REF')
+            with patch.dict(run.os.environ,{'GITHUB_REF':'refs/heads/codex-windows-owned-product-qualification'}),patch('run.sys.platform','win32'),patch('run.os.chdir'),patch('run.source_manifest',return_value={}),patch('run.sha',side_effect=lambda p:run.FFMPEG_SHA if p==args.ffmpeg else run.FFPROBE_SHA),patch('run.subprocess.check_output',side_effect=lambda argv,**kw:json.dumps(metadata) if argv[0]=='cargo' else 'fixture-sha'),patch('run.execute',side_effect=execute):
                 with self.assertRaises(ImportReached):run.run(args)
+            self.assertEqual(run.os.getenv('GITHUB_REF'),ambient_ref)
 
     def test_exit7_requires_actual_exit_and_eof_without_other_failure(self):
         trace = dict(encoderExitCode=7, nonEncoderFailure=False, failure='Encoder exited 7', supervisorTerminated=None, overflow=False, selected=2, written=2, width=641, height=359, writes=[dict(ok=True, bytes=642*360*4)]*2)
@@ -318,12 +320,25 @@ class ProductionSnapshotFix(unittest.TestCase):
     def test_replacement_inside_validation_never_adopts_new_file_snapshot(self):
         for same_bytes in [False,True]:
             with self.subTest(same_bytes=same_bytes),tempfile.TemporaryDirectory() as tmp:
-                root=Path(tmp);path=root/'control.json';path.write_text('{"hwnd":123,"sourcePid":22}');loads=run.json.loads;replaced=[]
+                root=Path(tmp);path=root/'control.json';path.write_text('{"hwnd":123,"sourcePid":22}');loads=run.json.loads;replaced=[];denied=[];cache={}
+                original=path.read_bytes();identity=run.production_stat(path.stat());fresh=root/'replacement'
                 def validating(*args,**kwargs):
-                    value=loads(*args,**kwargs);fresh=root/'replacement';fresh.write_bytes(path.read_bytes() if same_bytes else b'{"hwnd":999,"sourcePid":22}');fresh.replace(path);replaced.append(True);return value
-                with patch('run.json.loads',side_effect=validating):
-                    with self.assertRaises(AssertionError):run.production_control(path,root,{})
-                self.assertTrue(replaced)
+                    value=loads(*args,**kwargs);fresh.write_bytes(original if same_bytes else b'{"hwnd":999,"sourcePid":22}')
+                    try:fresh.replace(path)
+                    except PermissionError as error:
+                        denied.append(error);raise
+                    replaced.append(True);return value
+                with patch('run.json.loads',side_effect=validating),patch('run.production_remember',wraps=run.production_remember) as remember:
+                    with self.assertRaises((AssertionError,PermissionError)) as rejected:run.production_control(path,root,cache)
+                    remember.assert_not_called()
+                if isinstance(rejected.exception,PermissionError):
+                    # Windows can deny replacing this still-open file. Only that exact denial counts.
+                    self.assertEqual(denied,[rejected.exception]);self.assertEqual(getattr(rejected.exception,'winerror',None),5)
+                    self.assertEqual(Path(rejected.exception.filename),fresh);self.assertEqual(Path(rejected.exception.filename2),path)
+                    self.assertFalse(replaced);self.assertEqual(path.read_bytes(),original);self.assertEqual(run.production_stat(path.stat()),identity)
+                else:self.assertTrue(replaced);self.assertFalse(denied)
+                self.assertEqual(cache,{})
+                self.assertFalse((root/'production-start-authorized.json').exists());self.assertFalse((root/'handles-open').exists())
 
 
     def test_nonregular_and_oversized_controls_are_rejected_before_open(self):
