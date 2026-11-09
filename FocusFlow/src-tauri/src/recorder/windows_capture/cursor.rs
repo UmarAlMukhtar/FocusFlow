@@ -26,11 +26,7 @@ fn candidate_family(w: &WindowObservation, raw: [u32; 2]) -> Option<ModelProfile
     {
         return None;
     }
-    match w.style {
-        0x90000000 => Some(ModelProfile::Popup),
-        0x10cf0000 => Some(ModelProfile::Decorated),
-        _ => None,
-    }
+    ModelProfile::from_window_style(w.style)
 }
 pub(super) fn release_qualified(_profile: ModelProfile) -> bool {
     false
@@ -109,6 +105,42 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn observed_popup_clipping_style_is_a_candidate_not_release_qualification() {
+        let mut w = window();
+        w.style = 0x9400_0000; // Literal observed popup style in run42565662101.
+        w.client_origin = [40, 40];
+        w.client_size = [320, 240];
+        w.window_rect = [40, 40, 360, 280];
+        w.dwm_rect = [40, 40, 360, 280];
+        let original = w.clone();
+        assert_eq!(candidate_family(&w, [320, 240]), Some(ModelProfile::Popup));
+        assert_eq!(w, original);
+        assert!(!release_qualified(ModelProfile::Popup));
+    }
+
+    #[test]
+    fn candidate_style_rule_ignores_only_clipping_and_preserves_other_gates() {
+        for (profile, style) in [(ModelProfile::Popup, 0x9000_0000), (ModelProfile::Popup, 0x9400_0000),
+            (ModelProfile::Decorated, 0x10cf_0000), (ModelProfile::Decorated, 0x14cf_0000)] {
+            let mut w = window(); w.style = style;
+            assert_eq!(candidate_family(&w, [322, 272]), Some(profile));
+            assert!(!release_qualified(profile));
+            for bit in 0..32 {
+                let flag = 1_u32 << bit;
+                if style & flag == 0 && flag != 0x0400_0000 {
+                    w.style = style | flag;
+                    assert_eq!(candidate_family(&w, [322, 272]), None, "extra {flag:#x} on {style:#x}");
+                }
+            }
+            w.style = style; w.ex_style = 1;
+            assert_eq!(candidate_family(&w, [322, 272]), None);
+            w.ex_style = 0;
+            assert_eq!(candidate_family(&w, [321, 272]), None, "producer extent remains exact");
+            assert_eq!(candidate_family(&w, [323, 272]), None);
+        }
+    }
+
     #[test]
     fn no_prearm_sampling_no_second_start_and_lost_readiness_fails() {
         let mut gate = ArmGate::default();

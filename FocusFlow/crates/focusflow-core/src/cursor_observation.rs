@@ -37,6 +37,18 @@ macro_rules! literals {
 }
 literals!(GeometryModel { DwmExtendedFrameTranslationV1 => "dwmExtendedFrameTranslationV1" });
 literals!(ModelProfile { Popup => "pmv2_96_single_monitor_popup", Decorated => "pmv2_96_single_monitor_decorated" });
+impl ModelProfile {
+    /// Compare only model styles; callers still enforce identity, geometry and admission.
+    pub fn from_window_style(style: u32) -> Option<Self> {
+        // WS_CLIPSIBLINGS changes painting overlap, not the frame model. Keep raw style intact.
+        const WS_CLIPSIBLINGS: u32 = 0x0400_0000;
+        match style & !WS_CLIPSIBLINGS {
+            0x9000_0000 => Some(Self::Popup),
+            0x10cf_0000 => Some(Self::Decorated),
+            _ => None,
+        }
+    }
+}
 literals!(ObservationPolicy { WindowsCurrentQueryBracket => "windowsCurrentQueryBracket" });
 literals!(ReconstructionPolicy { CausalAfterBracket => "causalAfterBracket" });
 literals!(AnimationPhase { Unknown => "unknown" });
@@ -476,10 +488,6 @@ pub fn validate_observation_row(
     }
 }
 fn family(w: &WindowObservation, index: &CursorObservationIndexV2) -> bool {
-    let style = match index.profile {
-        ModelProfile::Popup => 0x9000_0000,
-        ModelProfile::Decorated => 0x10cf_0000,
-    };
     w.pid != 0
         && w.tid != 0
         && w.observer_pmv2
@@ -491,7 +499,7 @@ fn family(w: &WindowObservation, index: &CursorObservationIndexV2) -> bool {
         && w.visible
         && !w.minimized
         && w.ex_style == 0
-        && w.style == style
+        && ModelProfile::from_window_style(w.style) == Some(index.profile)
         && i64::from(w.dwm_rect[2]) - i64::from(w.dwm_rect[0]) >= i64::from(index.width) - 1
         && i64::from(w.dwm_rect[2]) - i64::from(w.dwm_rect[0]) <= i64::from(index.width)
         && i64::from(w.dwm_rect[3]) - i64::from(w.dwm_rect[1]) >= i64::from(index.height) - 1
@@ -1725,6 +1733,61 @@ mod prepared_tests {
             inputs: vec![],
         }
     }
+    #[test]
+    fn observed_popup_clipping_style_projects_without_rewriting_saved_style() {
+        let mut data = large_shape_table(1);
+        data.index.profile = ModelProfile::Popup;
+        data.index.width = 320;
+        data.index.height = 240;
+        if let WindowsCursorRowV2::Observed { before, after, .. } = &mut data.poses[0] {
+            before.style = 0x9400_0000; // Literal observed popup style in run42565662101.
+            before.client_origin = [40, 40];
+            before.client_size = [320, 240];
+            before.window_rect = [40, 40, 360, 280];
+            before.dwm_rect = [40, 40, 360, 280];
+            *after = before.clone();
+        } else { panic!("expected observed row"); }
+        let saved = serde_json::to_vec(&data.poses[0]).unwrap();
+        assert_eq!(project_observation(&data.poses[0], &data.index).unwrap(), Some([16.0 / 320.0, 39.0 / 240.0]));
+        let prepared = PreparedObservations::prepare(&data, 0, &|| Ok(false)).unwrap();
+        assert_eq!(prepared.position_at(0, 1), Some([16.0 / 320.0, 39.0 / 240.0]));
+        assert_eq!(serde_json::to_vec(&data.poses[0]).unwrap(), saved);
+        assert_eq!(serde_json::to_value(&data.poses[0]).unwrap()["before"]["style"], 0x9400_0000_u32);
+    }
+
+    #[test]
+    fn saved_pose_style_rule_ignores_only_clipping_and_preserves_other_gates() {
+        for (profile, style) in [(ModelProfile::Popup, 0x9000_0000), (ModelProfile::Popup, 0x9400_0000),
+            (ModelProfile::Decorated, 0x10cf_0000), (ModelProfile::Decorated, 0x14cf_0000)] {
+            let mut data = large_shape_table(1);
+            data.index.profile = profile;
+            let set = |row: &mut WindowsCursorRowV2, style, ex_style, width| {
+                if let WindowsCursorRowV2::Observed { before, after, .. } = row {
+                    before.style = style; before.ex_style = ex_style; before.dwm_rect[2] = 47 + width;
+                    *after = before.clone();
+                } else { panic!("expected observed row"); }
+            };
+            set(&mut data.poses[0], style, 0, 322);
+            assert!(project_observation(&data.poses[0], &data.index).unwrap().is_some(), "{style:#x}");
+            for bit in 0..32 {
+                let flag = 1_u32 << bit;
+                if style & flag == 0 && flag != 0x0400_0000 {
+                    set(&mut data.poses[0], style | flag, 0, 322);
+                    assert!(project_observation(&data.poses[0], &data.index).unwrap().is_none(), "extra {flag:#x} on {style:#x}");
+                }
+            }
+            set(&mut data.poses[0], style, 1, 322);
+            assert!(project_observation(&data.poses[0], &data.index).unwrap().is_none());
+            for (width, accepted) in [(320, false), (321, true), (322, true), (323, false)] {
+                set(&mut data.poses[0], style, 0, width);
+                assert_eq!(project_observation(&data.poses[0], &data.index).unwrap().is_some(), accepted, "existing one-pixel extent rule: {width}");
+            }
+            set(&mut data.poses[0], style, 0, 322);
+            data.index.profile = if profile == ModelProfile::Popup { ModelProfile::Decorated } else { ModelProfile::Popup };
+            assert!(project_observation(&data.poses[0], &data.index).unwrap().is_none(), "profile still must match");
+        }
+    }
+
     #[test]
     fn preparation_validates_immutable_shape_table_once_and_public_projection_stays_strict() {
         let mut data = large_shape_table(2000);
