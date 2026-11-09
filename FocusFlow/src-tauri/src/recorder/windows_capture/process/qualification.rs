@@ -28,11 +28,11 @@ pub(super) struct Startup {
  pub source_publications:u64,pub pre_arm_source_publications:u64,pub proof_writes:u64,pub pre_arm_proof_writes:u64,pub cleanup_consumptions:u32,
 }
 #[derive(Default)]
-pub(super) struct Trace {pub startup:Startup,events:Vec<Event>,overflow:bool,pub rejected:Option<Rejected>}
+pub(super) struct Trace {pub startup:Startup,pub last_startup_metadata:Option<((i32,i32),(u32,u32))>,events:Vec<Event>,overflow:bool,pub rejected:Option<Rejected>}
 // Shared's production state snapshots do not copy/allocate the observation collector.
 impl Clone for Trace {fn clone(&self)->Self{Self::default()}}
 impl Trace {
- pub fn allocated()->Self {assert!(std::mem::size_of::<Rejected>()<1024);assert!(std::mem::size_of::<Event>()*6144+std::mem::size_of::<WriteEvent>()*2048<2*1024*1024);Self{startup:Startup::default(),events:Vec::with_capacity(6144),overflow:false,rejected:None}}
+ pub fn allocated()->Self {assert!(std::mem::size_of::<Rejected>()<1024);assert!(std::mem::size_of::<Event>()*6144+std::mem::size_of::<WriteEvent>()*2048<2*1024*1024);Self{startup:Startup::default(),last_startup_metadata:None,events:Vec::with_capacity(6144),overflow:false,rejected:None}}
  pub fn push(&mut self,mut event:Event)->Result<()> {
   if self.events.len()>=6144||self.events.capacity()<6144 {self.overflow=true;return Err("Qualification source/decision trace overflow".into());}
   event.order=self.events.len();self.events.push(event);Ok(())
@@ -114,4 +114,45 @@ pub(super) fn arm_observation(session:&Session,dir:&Path)->Result<()> {
 pub(super) fn park(path:&Path)->Result<()> {
  let dir=path.parent().ok_or("No case directory")?;
  if dir.join("parent-death").exists(){std::fs::write(dir.join("parked"),b"gate4 passed; early EOF reader active; no supervisor started").map_err(err)?;thread::sleep(Duration::from_secs(30));return Err("Parent-death isolation escape fired".into());}Ok(())
+}
+
+// Only the owned production fixture calls this; successful/private trace schemas stay unchanged.
+pub(super) mod warmup_failure {
+    const ERROR: &str = "No matching window dimensions within 2 seconds; restore the window and retry";
+
+    pub fn message(allocation: Option<(usize, usize)>, callbacks: u64, mismatches: u64,
+        frozen: Option<(i32, i32)>, last: Option<((i32, i32), (u32, u32))>) -> String {
+        format!("{ERROR}; fixtureWarmup itemAllocation={allocation:?} metadataCallbacks={callbacks} mismatches={mismatches} frozen={frozen:?} lastContentTexture={last:?}")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn zero_count_has_allocation_but_no_invented_callback_tuple() {
+            assert_eq!(message(Some((320,240)),0,0,None,None),
+                "No matching window dimensions within 2 seconds; restore the window and retry; fixtureWarmup itemAllocation=Some((320, 240)) metadataCallbacks=0 mismatches=0 frozen=None lastContentTexture=None");
+        }
+        #[test]
+        fn mismatched_observations_retain_the_last_actual_pair_and_fixed_error() {
+            assert_eq!(message(Some((320,240)),2,2,None,Some(((320,240),(336,256)))),
+                "No matching window dimensions within 2 seconds; restore the window and retry; fixtureWarmup itemAllocation=Some((320, 240)) metadataCallbacks=2 mismatches=2 frozen=None lastContentTexture=Some(((320, 240), (336, 256)))");
+        }
+        #[test]
+        fn matching_observation_reports_frozen_dimensions_without_fitting() {
+            let text=message(Some((336,279)),3,2,Some((322,272)),Some(((322,272),(322,272))));
+            assert!(text.starts_with(ERROR));
+            assert!(text.contains("itemAllocation=Some((336, 279)) metadataCallbacks=3 mismatches=2 frozen=Some((322, 272))"));
+            assert!(text.ends_with("lastContentTexture=Some(((322, 272), (322, 272)))"));
+        }
+        #[test]
+        fn finite_scalar_extremes_fit_existing_worker_and_parent_caps() {
+            let text=message(Some((usize::MAX,usize::MAX)),u64::MAX,u64::MAX,
+                Some((i32::MIN,i32::MIN)),Some(((i32::MIN,i32::MIN),(u32::MAX,u32::MAX))));
+            assert!(text.contains("metadataCallbacks=18446744073709551615 mismatches=18446744073709551615"));
+            assert!(text.ends_with("lastContentTexture=Some(((-2147483648, -2147483648), (4294967295, 4294967295)))"));
+            assert!(text.len()<=768);
+            assert!(format!("[production-start-failure] prepare: windows_capture_recovery: Windows recording files were retained for recovery: {text}\n").len()<=1024);
+        }
+    }
 }

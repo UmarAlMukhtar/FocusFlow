@@ -177,7 +177,7 @@ impl GraphicsCaptureApiHandler for Capture {
     let content=match frame.content_size(){Ok(content)=>content,Err(error)=>{let error=err(error);state.failure=Some(error.clone());return Err(error);}};let texture=(frame.width(),frame.height());
     #[cfg(test)] let before=state.gate.geometry().is_some();
     let action=state.observe(content,texture,Instant::now(),qpc)?;
-    #[cfg(test)] {state.trace.startup.metadata_callbacks+=1;if !before{if state.gate.geometry().is_some(){state.trace.startup.frozen=Some((content.0,content.1));state.trace.startup.freeze_qpc=Some(qpc()?);}else{state.trace.startup.mismatches+=1;}}
+    #[cfg(test)] {state.trace.startup.metadata_callbacks+=1;if self.flags.production_fixture{state.trace.last_startup_metadata=Some((content,texture));}if !before{if state.gate.geometry().is_some(){state.trace.startup.frozen=Some((content.0,content.1));state.trace.startup.freeze_qpc=Some(qpc()?);}else{state.trace.startup.mismatches+=1;}}
      if matches!(action,FrameAction::GeometryChanged){let cutoff=state.cutoff.unwrap_or_default();state.trace.push(qualification::Event{kind:"geometry",qpc:cutoff,content_width:content.0,content_height:content.1,texture_width:texture.0,texture_height:texture.1,..Default::default()})?;}
     }
     (action,content)
@@ -247,6 +247,7 @@ fn wait_gate(control:&Receiver<Result<()>>,shared:&Arc<Mutex<Shared>>,owner:&Sou
 }
 type NativeCapture=windows_capture::capture::CaptureControl<Capture,<Capture as GraphicsCaptureApiHandler>::Error>;
 struct Preparing<'a> {
+ #[cfg(test)] production_fixture:bool,
  capture:&'a NativeCapture,shared:&'a Arc<Mutex<Shared>>,owner:&'a SourceOwner,controls:&'a Receiver<Result<()>>,
  ffmpeg:&'a Path,path:&'a Path,job:&'a str,warm_deadline:Instant,arm_deadline:Option<Instant>,freq:i64,g:Option<Geometry>,started:Option<(i64,Selector)>,
  encoder:&'a mut Option<Encoder>,stderr:&'a mut Option<Receiver<Result<String>>>,supervisor:&'a mut Option<Supervisor>,
@@ -259,7 +260,9 @@ impl StartupOps for Preparing<'_> {
   if self.arm_deadline.is_some_and(|deadline|Instant::now()>=deadline){return Err("Window encoder admission timed out; restore the window and retry".into());}
   match step {
    Freeze=>{self.g=Some(loop{startup_live(self.shared,self.owner,self.capture.is_finished())?;let state=self.shared.lock().map_err(err)?;
-    if state.gate.geometry().is_some(){break state.geometry()?;}if Instant::now()>=self.warm_deadline{return Err("No matching window dimensions within 2 seconds; restore the window and retry".into());}drop(state);thread::sleep(POLL);
+    if state.gate.geometry().is_some(){break state.geometry()?;}if Instant::now()>=self.warm_deadline{
+     #[cfg(test)] if self.production_fixture{let startup=&state.trace.startup;return Err(qualification::warmup_failure::message(startup.allocation,startup.metadata_callbacks,startup.mismatches,startup.frozen,state.trace.last_startup_metadata));}
+     return Err("No matching window dimensions within 2 seconds; restore the window and retry".into());}drop(state);thread::sleep(POLL);
    });},
    Probe=>{#[cfg(test)] {self.shared.lock().map_err(err)?.trace.startup.probe_qpc=Some(qpc()?);}probe_profile(self.ffmpeg,self.job)?;},
    Prepared=>{let g=self.g.ok_or("Frozen media dimensions missing")?;if let Some(observer)=self.observer.as_mut(){observer.configure(self.path.parent().ok_or("Session directory missing")?,[g.width as u32,g.height as u32])?;}#[allow(unused_mut)] let mut state=self.shared.lock().map_err(err)?;state.require_live()?;emit(Message::Prepared{width:g.width as u32,height:g.height as u32,cursor:self.cursor_admission.clone()})?;
@@ -339,7 +342,7 @@ fn worker(window:u64,pid:u32,path:&Path,ffmpeg:&Path,job:&str,#[cfg(test)] proof
  #[cfg(test)] let cleanup_shared=shared.clone();
  let result=with_capture(capture,|capture|->Result<()> {
   let run=(||->Result<()> {
-  let mut preparing=Preparing{capture,shared:&shared,owner:&owner,controls:&control_rx,ffmpeg,path,job,warm_deadline,arm_deadline:None,freq,g:None,started:None,encoder:&mut encoder,stderr:&mut stderr,supervisor:&mut supervisor,writer_tx:&mut writer_tx,done_rx:&mut done_rx,progress:&progress,observer:&mut observer,cursor_admission:&cursor_admission};
+  let mut preparing=Preparing{#[cfg(test)] production_fixture:permission.is_some(),capture,shared:&shared,owner:&owner,controls:&control_rx,ffmpeg,path,job,warm_deadline,arm_deadline:None,freq,g:None,started:None,encoder:&mut encoder,stderr:&mut stderr,supervisor:&mut supervisor,writer_tx:&mut writer_tx,done_rx:&mut done_rx,progress:&progress,observer:&mut observer,cursor_admission:&cursor_admission};
   super::lifecycle::prepare(&mut preparing)?;
   let g=preparing.g.ok_or("Frozen media dimensions missing")?;let(admission,mut selector)=preparing.started.take().ok_or("Window admission missing")?;drop(preparing);
   let mut selected=0;let started=Instant::now();let mut handled=false;
