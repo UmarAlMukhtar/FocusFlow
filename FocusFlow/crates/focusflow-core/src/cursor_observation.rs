@@ -38,13 +38,14 @@ macro_rules! literals {
 literals!(GeometryModel { DwmExtendedFrameTranslationV1 => "dwmExtendedFrameTranslationV1" });
 literals!(ModelProfile { Popup => "pmv2_96_single_monitor_popup", Decorated => "pmv2_96_single_monitor_decorated" });
 impl ModelProfile {
-    /// Compare only model styles; callers still enforce identity, geometry and admission.
-    pub fn from_window_style(style: u32) -> Option<Self> {
-        // WS_CLIPSIBLINGS changes painting overlap, not the frame model. Keep raw style intact.
+    /// Compare only the model style pair; callers still enforce identity, geometry and admission.
+    pub fn from_window_style(style: u32, ex_style: u32) -> Option<Self> {
+        // Mask only the painting flag; extended style must match exactly. Keep raw values intact.
         const WS_CLIPSIBLINGS: u32 = 0x0400_0000;
-        match style & !WS_CLIPSIBLINGS {
-            0x9000_0000 => Some(Self::Popup),
-            0x10cf_0000 => Some(Self::Decorated),
+        const WS_EX_WINDOWEDGE: u32 = 0x0000_0100;
+        match (style & !WS_CLIPSIBLINGS, ex_style) {
+            (0x9000_0000, 0) => Some(Self::Popup),
+            (0x10cf_0000, 0 | WS_EX_WINDOWEDGE) => Some(Self::Decorated),
             _ => None,
         }
     }
@@ -498,8 +499,7 @@ fn family(w: &WindowObservation, index: &CursorObservationIndexV2) -> bool {
         && w.monitor_rect[1] == 0
         && w.visible
         && !w.minimized
-        && w.ex_style == 0
-        && ModelProfile::from_window_style(w.style) == Some(index.profile)
+        && ModelProfile::from_window_style(w.style, w.ex_style) == Some(index.profile)
         && i64::from(w.dwm_rect[2]) - i64::from(w.dwm_rect[0]) >= i64::from(index.width) - 1
         && i64::from(w.dwm_rect[2]) - i64::from(w.dwm_rect[0]) <= i64::from(index.width)
         && i64::from(w.dwm_rect[3]) - i64::from(w.dwm_rect[1]) >= i64::from(index.height) - 1
@@ -1733,6 +1733,49 @@ mod prepared_tests {
             inputs: vec![],
         }
     }
+    #[test]
+    fn observed_decorated_window_edge_projects_without_rewriting_saved_styles() {
+        let mut data = large_shape_table(1);
+        if let WindowsCursorRowV2::Observed { before, after, .. } = &mut data.poses[0] {
+            before.style = 0x14cf_0000;
+            before.ex_style = 0x0000_0100; // Literal observed pair in run42568819755.
+            *after = before.clone();
+        } else { panic!("expected observed row"); }
+        let saved = serde_json::to_vec(&data.poses[0]).unwrap();
+        assert_eq!(project_observation(&data.poses[0], &data.index).unwrap(), Some([9.0 / 322.0, 39.0 / 272.0]));
+        assert_eq!(PreparedObservations::prepare(&data, 0, &|| Ok(false)).unwrap().position_at(0, 1), Some([9.0 / 322.0, 39.0 / 272.0]));
+        assert_eq!(serde_json::to_vec(&data.poses[0]).unwrap(), saved);
+        let raw = serde_json::to_value(&data.poses[0]).unwrap();
+        assert_eq!(raw["before"]["style"], 0x14cf_0000_u32);
+        assert_eq!(raw["before"]["exStyle"], 0x100_u32);
+    }
+
+    #[test]
+    fn saved_pose_extended_style_is_exact_and_specific_to_decorated() {
+        for (profile, style) in [(ModelProfile::Popup, 0x9000_0000), (ModelProfile::Popup, 0x9400_0000),
+            (ModelProfile::Decorated, 0x10cf_0000), (ModelProfile::Decorated, 0x14cf_0000)] {
+            let mut data = large_shape_table(1); data.index.profile = profile;
+            let set = |row: &mut WindowsCursorRowV2, ex_style| {
+                if let WindowsCursorRowV2::Observed { before, after, .. } = row {
+                    before.style = style; before.ex_style = ex_style; *after = before.clone();
+                } else { panic!("expected observed row"); }
+            };
+            for ex_style in [0, 0x100] {
+                set(&mut data.poses[0], ex_style);
+                let accepted = ex_style == 0 || profile == ModelProfile::Decorated;
+                assert_eq!(project_observation(&data.poses[0], &data.index).unwrap().is_some(), accepted, "{style:#x}/{ex_style:#x}");
+                if !accepted { continue; }
+                for bit in 0..32 {
+                    let flag = 1_u32 << bit;
+                    if ex_style & flag == 0 && !(profile == ModelProfile::Decorated && flag == 0x100) {
+                        set(&mut data.poses[0], ex_style | flag);
+                        assert!(project_observation(&data.poses[0], &data.index).unwrap().is_none(), "extra extended bit {flag:#x} on {style:#x}/{ex_style:#x}");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn observed_popup_clipping_style_projects_without_rewriting_saved_style() {
         let mut data = large_shape_table(1);

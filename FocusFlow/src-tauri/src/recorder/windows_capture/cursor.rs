@@ -19,14 +19,13 @@ fn candidate_family(w: &WindowObservation, raw: [u32; 2]) -> Option<ModelProfile
         || w.monitor_rect[1] != 0
         || !w.visible
         || w.minimized
-        || w.ex_style != 0
         || raw.contains(&0)
         || i64::from(w.dwm_rect[2]) - i64::from(w.dwm_rect[0]) != i64::from(raw[0])
         || i64::from(w.dwm_rect[3]) - i64::from(w.dwm_rect[1]) != i64::from(raw[1])
     {
         return None;
     }
-    ModelProfile::from_window_style(w.style)
+    ModelProfile::from_window_style(w.style, w.ex_style)
 }
 pub(super) fn release_qualified(_profile: ModelProfile) -> bool {
     false
@@ -105,6 +104,38 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn observed_decorated_window_edge_is_a_candidate_not_release_qualification() {
+        let mut w = window();
+        w.style = 0x14cf_0000; w.ex_style = 0x0000_0100; // Observed run42568819755 pair.
+        let original = w.clone();
+        assert_eq!(candidate_family(&w, [322, 272]), Some(ModelProfile::Decorated));
+        assert_eq!(w, original);
+        assert!(!release_qualified(ModelProfile::Decorated));
+    }
+
+    #[test]
+    fn candidate_extended_style_is_exact_and_specific_to_decorated() {
+        for (profile, style) in [(ModelProfile::Popup, 0x9000_0000), (ModelProfile::Popup, 0x9400_0000),
+            (ModelProfile::Decorated, 0x10cf_0000), (ModelProfile::Decorated, 0x14cf_0000)] {
+            let mut w = window(); w.style = style;
+            for ex_style in [0, 0x100] {
+                w.ex_style = ex_style;
+                let accepted = ex_style == 0 || profile == ModelProfile::Decorated;
+                assert_eq!(candidate_family(&w, [322, 272]), accepted.then_some(profile), "{style:#x}/{ex_style:#x}");
+                assert!(!release_qualified(profile));
+                if !accepted { continue; }
+                for bit in 0..32 {
+                    let flag = 1_u32 << bit;
+                    if ex_style & flag == 0 && !(profile == ModelProfile::Decorated && flag == 0x100) {
+                        w.ex_style = ex_style | flag;
+                        assert_eq!(candidate_family(&w, [322, 272]), None, "extra extended bit {flag:#x} on {style:#x}/{ex_style:#x}");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn observed_popup_clipping_style_is_a_candidate_not_release_qualification() {
         let mut w = window();
