@@ -13,7 +13,7 @@ fn path_form(path: &str) -> PathForm {
     else if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && &bytes[1..3] == b":\\" { PathForm::Drive }
     else { PathForm::Other }
 }
-// This candidate is private to the newly owned harmless sentinel, never the fetch script.
+// Only the owned script verifier can turn this candidate into a launch path.
 fn dos_candidate(canonical: &str) -> Option<&str> {
     if path_form(canonical) != PathForm::DeviceDrive { return None; }
     let path = &canonical[4..];
@@ -112,27 +112,37 @@ impl StartupLaunch {
     }
 }
 #[cfg(windows)]
-// Close the extra read lease before Script removes the sentinel file.
-struct Sentinel { _dos_lease: std::fs::File, script: std::sync::Arc<Script>, dos: std::path::PathBuf }
+// Close the extra read lease before Script removes its file.
+pub(super) struct VerifiedDosScript {
+    _dos_lease: std::fs::File,
+    script: std::sync::Arc<Script>,
+    dos: std::path::PathBuf,
+}
 #[cfg(windows)]
-impl Sentinel {
-    fn create(script: Script) -> Result<Self> {
+impl VerifiedDosScript {
+    pub(super) fn create(script: Script) -> Result<Self> {
         use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
         use windows::Win32::{Foundation::HANDLE, Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION}};
         let script = std::sync::Arc::new(script);
-        let dos = std::path::PathBuf::from(dos_candidate(script.path.to_str().ok_or("Unsupported sentinel path")?).ok_or("Unsupported sentinel path")?);
+        let candidate = script.path.to_str().and_then(dos_candidate)
+            .ok_or("Unsupported DOS path for owned script")?;
+        let dos = std::path::PathBuf::from(candidate);
         crate::wav::reject_links(&dos)?;
-        if dos.canonicalize().map_err(|_| "Sentinel roundtrip failed")? != script.path { return Err("Sentinel roundtrip mismatch".into()); }
-        let lease = std::fs::OpenOptions::new().read(true).share_mode(1).open(&dos).map_err(|_| "Sentinel DOS lease failed")?;
+        if dos.canonicalize().map_err(|_| "Owned script DOS roundtrip failed")? != script.path { return Err("Owned script DOS roundtrip mismatch".into()); }
+        let lease = std::fs::OpenOptions::new().read(true).share_mode(1).open(&dos).map_err(|_| "Owned script DOS lease failed")?;
         let identity = |file: &std::fs::File| -> Result<_> {
             let mut info = BY_HANDLE_FILE_INFORMATION::default();
             // SAFETY: exact retained read-only File handle and generated writable structure live throughout this call.
-            unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }.map_err(|_| "Sentinel identity unavailable")?;
-            if info.dwFileAttributes & (0x400 | 0x10) != 0 || info.nNumberOfLinks == 0 || (info.nFileIndexHigh == 0 && info.nFileIndexLow == 0) { return Err("Unsupported sentinel identity".into()); }
+            unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }.map_err(|_| "Owned script identity unavailable")?;
+            if info.dwFileAttributes & (0x400 | 0x10) != 0 || info.nNumberOfLinks == 0 || (info.nFileIndexHigh == 0 && info.nFileIndexLow == 0) { return Err("Unsupported owned script identity".into()); }
             Ok((info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow))
         };
-        if identity(script.file.as_ref().ok_or("Missing sentinel lease")?)? != identity(&lease)? { return Err("Sentinel file identity mismatch".into()); }
+        if identity(script.file.as_ref().ok_or("Missing owned script lease")?)? != identity(&lease)? { return Err("Owned script file identity mismatch".into()); }
         Ok(Self { script, dos, _dos_lease: lease })
+    }
+
+    pub(super) fn into_dos_launch(self) -> (std::path::PathBuf, Box<dyn Send>) {
+        (self.dos.clone(), Box::new(self))
     }
 }
 #[cfg(windows)]
@@ -146,7 +156,7 @@ fn run(permit: &TransportPermit, active: &impl Fn() -> Result<()>) -> Result<Rep
     }
     let script = Script::create_bytes(SENTINEL).map_err(|_| "Startup sentinel lease unavailable")?;
     let form = script.path.to_str().map_or(PathForm::Other, path_form);
-    let sentinel = Sentinel::create(script).ok().map(Arc::new);
+    let sentinel = VerifiedDosScript::create(script).ok().map(Arc::new);
     Ok(sequence(form, |mode| {
         let owned = sentinel.as_ref()?;
         let started = Instant::now();
@@ -212,7 +222,7 @@ mod tests {
     #[test]
     fn startup_sentinel_closes_both_leases_at_final_shared_owner_release() {
         let script = Script::create_bytes(SENTINEL).expect("actual owned script");
-        let sentinel = std::sync::Arc::new(Sentinel::create(script).expect("actual owned sentinel"));
+        let sentinel = std::sync::Arc::new(VerifiedDosScript::create(script).expect("actual owned sentinel"));
         let path = sentinel.script.path.clone();
         let dos = sentinel.dos.clone();
         let retained_owner = sentinel.clone();
@@ -222,6 +232,23 @@ mod tests {
         drop(retained_owner);
         assert_eq!(std::fs::metadata(&path).unwrap_err().kind(), std::io::ErrorKind::NotFound);
         assert_eq!(std::fs::metadata(&dos).unwrap_err().kind(), std::io::ErrorKind::NotFound);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn verified_dos_transport_fetch_launch_carries_exact_bytes_and_both_leases() {
+        let script = Script::create().expect("actual owned fetch script");
+        let canonical = script.path.clone();
+        let verified = VerifiedDosScript::create(script).expect("verified fetch script");
+        assert!(verified.script.file.is_some());
+        assert_eq!(verified._dos_lease.metadata().unwrap().len(), SCRIPT.len() as u64);
+
+        let (dos, lifetime) = verified.into_dos_launch();
+        assert_eq!(path_form(dos.to_str().unwrap()), PathForm::Drive);
+        assert_eq!(dos.canonicalize().unwrap(), canonical);
+        assert_eq!(std::fs::read(&dos).unwrap(), SCRIPT);
+        assert!(std::fs::remove_file(&dos).is_err());
+        drop(lifetime);
+        assert_eq!(std::fs::metadata(&canonical).unwrap_err().kind(), std::io::ErrorKind::NotFound);
     }
     #[test]
     fn startup_path_pair_needs_only_two_sentinel_children() {

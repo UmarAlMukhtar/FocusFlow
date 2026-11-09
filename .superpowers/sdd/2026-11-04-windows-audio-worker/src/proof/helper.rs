@@ -357,7 +357,7 @@ pub(super) fn fetch(permit: &TransportPermit, active: &impl Fn() -> Result<()>) 
                 return Err("Approval polling phase expired".into());
             }
             let started = Instant::now();
-            let script = Script::create()?;
+            let script = startup::VerifiedDosScript::create(Script::create()?)?;
             #[derive(serde::Serialize)]
             struct Gate<'a> {
                 request: &'a super::approval::ApprovalRequestV1,
@@ -373,12 +373,12 @@ pub(super) fn fetch(permit: &TransportPermit, active: &impl Fn() -> Result<()>) 
             if gate.len() > 4096 {
                 return Err("Transport request exceeds gate cap".into());
             }
-            let script_path = script.path.clone();
             active()?;
+            let (script_path, lifetime) = script.into_dos_launch();
             let child = crate::owned_child::windows_child::WindowsChild::spawn_transport(
                 permit,
                 &script_path,
-                Box::new(script),
+                lifetime,
             )?;
             match supervise(
                 child,
@@ -573,6 +573,16 @@ mod tests {
             || {},
             &|| Ok(()),
         )
+    }
+    #[test]
+    fn verified_dos_transport_source_fixture_has_one_verified_launch() {
+        let fetch = include_str!("helper.rs")
+            .split_once("pub(super) fn fetch(").unwrap().1
+            .split_once("struct Script {").unwrap().0;
+        assert!(!fetch.contains("script.path"), "fetch passes the raw canonical script path");
+        assert!(fetch.contains("VerifiedDosScript::create(Script::create()?)?"));
+        assert!(fetch.contains("script.into_dos_launch()"));
+        assert_eq!(fetch.matches("spawn_transport(").count(), 1);
     }
     #[test]
     fn startup_owner_caps_before_acceptance_and_retains_uncertain_exit() {
